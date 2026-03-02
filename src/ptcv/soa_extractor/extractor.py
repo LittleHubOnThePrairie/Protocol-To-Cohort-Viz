@@ -1,0 +1,256 @@
+"""SoaExtractor — main Schedule of Activities extraction service.
+
+Orchestrates the full SoA extraction pipeline for one protocol:
+  1. Parse ICH sections for SoA tables via SoaTableParser
+  2. Map tables to USDM entities via UsdmMapper
+  3. Stamp extraction_timestamp_utc on every entity
+  4. Serialise each entity type to Parquet via UsdmParquetWriter
+  5. Write five Parquet artifacts to StorageGateway with stage="soa_extraction"
+  6. Enqueue uncertain synonym mappings (confidence < 0.80) to ReviewQueue
+  7. Return ExtractResult with run_id and artifact metadata
+
+Risk tier: MEDIUM — data pipeline service (no patient data).
+
+Regulatory references:
+- ALCOA+ Accurate: seven required timepoint attributes validated at write
+- ALCOA+ Contemporaneous: extraction_timestamp_utc stamped immediately
+  before StorageGateway.put_artifact() call
+- ALCOA+ Traceable: source_sha256 and stage="soa_extraction" in LineageRecord
+- ALCOA+ Original: each run produces a new run_id; prior Parquet preserved
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from ..ich_parser.models import IchSection, ReviewQueueEntry
+from ..ich_parser.review_queue import ReviewQueue
+from ..storage import FilesystemAdapter, StorageGateway
+from .mapper import UsdmMapper
+from .models import ExtractResult, SynonymMapping
+from .parser import SoaTableParser
+from .resolver import SynonymResolver
+from .writer import UsdmParquetWriter
+
+
+_DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
+_USER = "ptcv-soa-extractor"
+
+# Synonym mappings below this threshold are routed to the review queue
+_REVIEW_THRESHOLD = 0.80
+
+
+class SoaExtractor:
+    """Schedule of Activities extraction service.
+
+    Accepts a list of IchSection objects from PTCV-20, extracts SoA
+    tables, maps them to CDISC USDM v4.0 entities, and writes five
+    Parquet artifacts under usdm/{run_id}/ via StorageGateway.
+
+    Args:
+        gateway: StorageGateway instance. Uses FilesystemAdapter with
+            default PTCV data root if None.
+        review_queue: ReviewQueue for uncertain synonym mappings. Uses
+            default SQLite path if None.
+    [PTCV-21 Scenario: Extract SoA to USDM Parquet with lineage]
+    """
+
+    def __init__(
+        self,
+        gateway: Optional[StorageGateway] = None,
+        review_queue: Optional[ReviewQueue] = None,
+    ) -> None:
+        if gateway is None:
+            gateway = FilesystemAdapter(root=Path("C:/Dev/PTCV/data"))
+        if review_queue is None:
+            review_queue = ReviewQueue(db_path=_DEFAULT_REVIEW_DB)
+
+        self._gateway = gateway
+        self._review_queue = review_queue
+        self._parser = SoaTableParser()
+        self._mapper = UsdmMapper(resolver=SynonymResolver())
+        self._writer = UsdmParquetWriter()
+
+        self._gateway.initialise()
+        self._review_queue.initialise()
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def extract(
+        self,
+        sections: list[IchSection],
+        registry_id: str,
+        source_run_id: str = "",
+        source_sha256: str = "",
+        who: str = _USER,
+    ) -> ExtractResult:
+        """Extract SoA from ICH sections and write USDM Parquet artifacts.
+
+        Creates a new run_id for this extraction run. Prior Parquet files
+        under different run_ids are never touched (ALCOA+ Original).
+
+        Args:
+            sections: IchSection list from PTCV-20 IchParser.
+            registry_id: Trial identifier (EUCT-Code or NCT-ID).
+            source_run_id: run_id from the upstream PTCV-20 ICH parse.
+            source_sha256: SHA-256 of the upstream sections.parquet artifact.
+                Used as source_hash in lineage records.
+            who: Actor identifier for audit trail.
+
+        Returns:
+            ExtractResult with run_id, artifact keys/counts, and review count.
+
+        Raises:
+            ValueError: If sections is empty.
+        [PTCV-21 Scenario: Extract SoA to USDM Parquet with lineage]
+        [PTCV-21 Scenario: Lineage chain verifiable from USDM back to download]
+        """
+        if not sections:
+            raise ValueError("sections must not be empty")
+
+        run_id = str(uuid.uuid4())
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # 1. Parse SoA table(s) from ICH sections
+        table = self._parser.parse(sections)
+        tables = [table] if table is not None else []
+
+        # 2. Map to USDM entities (empty table list → zero entities)
+        epochs, timepoints, activities, instances, synonyms = self._mapper.map(
+            tables,
+            run_id=run_id,
+            source_run_id=source_run_id,
+            source_sha256=source_sha256,
+            registry_id=registry_id,
+            timestamp=timestamp,
+        )
+
+        artifact_keys: dict[str, str] = {}
+
+        # 3. Write Parquet artifacts (only when entities exist)
+        if epochs:
+            key = f"usdm/{run_id}/epochs.parquet"
+            self._gateway.put_artifact(
+                key=key,
+                data=self._writer.epochs_to_parquet(epochs),
+                content_type="application/vnd.apache.parquet",
+                run_id=run_id,
+                source_hash=source_sha256,
+                user=who,
+                immutable=False,
+                stage="soa_extraction",
+                registry_id=registry_id,
+            )
+            artifact_keys["epochs"] = key
+
+        if timepoints:
+            key = f"usdm/{run_id}/timepoints.parquet"
+            self._gateway.put_artifact(
+                key=key,
+                data=self._writer.timepoints_to_parquet(timepoints),
+                content_type="application/vnd.apache.parquet",
+                run_id=run_id,
+                source_hash=source_sha256,
+                user=who,
+                immutable=False,
+                stage="soa_extraction",
+                registry_id=registry_id,
+            )
+            artifact_keys["timepoints"] = key
+
+        if activities:
+            key = f"usdm/{run_id}/activities.parquet"
+            self._gateway.put_artifact(
+                key=key,
+                data=self._writer.activities_to_parquet(activities),
+                content_type="application/vnd.apache.parquet",
+                run_id=run_id,
+                source_hash=source_sha256,
+                user=who,
+                immutable=False,
+                stage="soa_extraction",
+                registry_id=registry_id,
+            )
+            artifact_keys["activities"] = key
+
+        if instances:
+            key = f"usdm/{run_id}/scheduled_instances.parquet"
+            self._gateway.put_artifact(
+                key=key,
+                data=self._writer.instances_to_parquet(instances),
+                content_type="application/vnd.apache.parquet",
+                run_id=run_id,
+                source_hash=source_sha256,
+                user=who,
+                immutable=False,
+                stage="soa_extraction",
+                registry_id=registry_id,
+            )
+            artifact_keys["scheduled_instances"] = key
+
+        if synonyms:
+            key = f"usdm/{run_id}/synonym_mappings.parquet"
+            self._gateway.put_artifact(
+                key=key,
+                data=self._writer.synonyms_to_parquet(synonyms),
+                content_type="application/vnd.apache.parquet",
+                run_id=run_id,
+                source_hash=source_sha256,
+                user=who,
+                immutable=False,
+                stage="soa_extraction",
+                registry_id=registry_id,
+            )
+            artifact_keys["synonym_mappings"] = key
+
+        # 4. Enqueue uncertain synonym mappings for human review
+        review_count = 0
+        for sm in synonyms:
+            if sm.review_required:
+                self._review_queue.enqueue(
+                    ReviewQueueEntry(
+                        run_id=run_id,
+                        registry_id=registry_id,
+                        section_code="soa_synonym",
+                        confidence_score=sm.confidence,
+                        content_json=self._synonym_to_json(sm),
+                        queue_timestamp_utc=timestamp,
+                    )
+                )
+                review_count += 1
+
+        return ExtractResult(
+            run_id=run_id,
+            registry_id=registry_id,
+            epoch_count=len(epochs),
+            timepoint_count=len(timepoints),
+            activity_count=len(activities),
+            instance_count=len(instances),
+            synonym_mapping_count=len(synonyms),
+            review_count=review_count,
+            artifact_keys=artifact_keys,
+            source_sha256=source_sha256,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _synonym_to_json(sm: SynonymMapping) -> str:
+        """Serialise a SynonymMapping to a JSON string for review_queue."""
+        import json
+        return json.dumps(
+            {
+                "original_text": sm.original_text,
+                "canonical_label": sm.canonical_label,
+                "method": sm.method,
+                "confidence": sm.confidence,
+            },
+            ensure_ascii=False,
+        )
