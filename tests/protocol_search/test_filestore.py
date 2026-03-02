@@ -23,15 +23,22 @@ class TestFilestoreManagerDirectories:
     """IQ: Directory creation and structure."""
 
     def test_ensure_directories_creates_all_subdirs(self, tmp_path):
-        """PTCV-18 Scenario: Filestore directories created if missing."""
+        """PTCV-18 Scenario: Filestore directories created if missing.
+
+        With the PTCV-29 shim, directories are created eagerly in __init__
+        via FilesystemAdapter.initialise(). ensure_directories() remains
+        idempotent.
+        """
         fs = FilestoreManager(root=tmp_path / "protocols")
-        assert not (tmp_path / "protocols").exists()
 
-        fs.ensure_directories()
-
+        # Directories are created during __init__ (FilesystemAdapter.initialise)
         assert (tmp_path / "protocols" / "eu-ctr").is_dir()
         assert (tmp_path / "protocols" / "clinicaltrials").is_dir()
         assert (tmp_path / "protocols" / "metadata").is_dir()
+
+        # ensure_directories() is still callable and idempotent
+        fs.ensure_directories()
+        assert (tmp_path / "protocols" / "eu-ctr").is_dir()
 
     def test_ensure_directories_idempotent(self, tmp_path):
         """Repeated calls to ensure_directories do not raise."""

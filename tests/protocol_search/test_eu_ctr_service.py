@@ -25,15 +25,15 @@ class TestCTISServiceInit:
     """IQ: Service initialisation wires defaults."""
 
     def test_default_filestore_and_audit_created(self, tmp_path):
-        """Service creates internal filestore and audit logger when none given."""
+        """Service creates internal gateway and audit logger when none given."""
         svc = CTISService()
-        assert svc._filestore is not None
+        assert svc._gateway is not None
         assert svc._audit is not None
         assert svc._timeout == 30
 
     def test_custom_injected_filestore_used(self, ctis_service):
-        """Injected FilestoreManager is stored on the service."""
-        assert ctis_service._filestore is not None
+        """Injected gateway is stored on the service (PTCV-29)."""
+        assert ctis_service._gateway is not None
 
 
 class TestCTISServiceSearch:
@@ -232,7 +232,7 @@ class TestCTISServiceDownload:
             )
 
         assert second.success is False
-        assert "already stored" in second.error.lower()
+        assert "already exists" in second.error.lower()
 
 
 class TestCTISServiceLegacyEudraCT:

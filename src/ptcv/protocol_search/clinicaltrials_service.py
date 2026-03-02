@@ -7,6 +7,9 @@ PTCV-28: download() now checks largeDocumentModule first to retrieve actual
 protocol PDFs and Statistical Analysis Plans uploaded by sponsors.  Falls
 back to storing the registration JSON when no document is available.
 
+PTCV-29: Storage delegated to StorageGateway (FilesystemAdapter or
+LocalStorageAdapter). FilestoreManager accepted as deprecated alias.
+
 ClinicalTrials.gov v2 API requires no authentication. Max page size
 is 1,000 records; this service defaults to 100 per page and follows
 the nextPageToken cursor for automatic pagination.
@@ -19,15 +22,17 @@ Regulatory requirements:
 - No PHI: trial registry data only (no participant identifiers)
 """
 
+import dataclasses
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Optional
 
 from ..compliance.audit import AuditAction, AuditLogger
 from ..compliance.integrity import DataIntegrityGuard
-from .filestore import FilestoreManager
+from .filestore import _DEFAULT_ROOT
 from .models import DownloadResult, ProtocolMetadata, SearchResult
 
 
@@ -45,6 +50,45 @@ _LARGE_DOC_ABBREVS: dict[str, tuple[str, ...]] = {
     "SAP": ("SAP", "Prot_SAP"),
 }
 
+_FORMAT_EXT: dict[str, str] = {
+    "PDF": "pdf",
+    "SAP": "pdf",
+    "JSON": "json",
+    "CTR-XML": "xml",
+}
+
+_CONTENT_TYPES: dict[str, str] = {
+    "PDF": "application/pdf",
+    "SAP": "application/pdf",
+    "JSON": "application/json",
+    "CTR-XML": "application/xml",
+}
+
+
+def _make_key(
+    registry_id: str,
+    amendment_number: str,
+    fmt: str,
+    source: str,
+) -> str:
+    """Return the relative storage key for a protocol file."""
+    ext = _FORMAT_EXT.get(fmt, "pdf")
+    subdir = "eu-ctr" if source == "EU-CTR" else "clinicaltrials"
+    return f"{subdir}/{registry_id}_{amendment_number}.{ext}"
+
+
+def _content_type(fmt: str) -> str:
+    """Return MIME type for the given format key."""
+    return _CONTENT_TYPES.get(fmt, "application/octet-stream")
+
+
+def _artifact_path(gateway: Any, key: str) -> str:
+    """Return absolute path string for a gateway artifact key."""
+    from ptcv.storage import FilesystemAdapter
+    if isinstance(gateway, FilesystemAdapter):
+        return str(gateway.root / key)
+    return key
+
 
 class ClinicalTrialsService:
     """Search and download protocols from ClinicalTrials.gov v2 API.
@@ -59,19 +103,38 @@ class ClinicalTrialsService:
     [PTCV-28: largeDocumentModule pathway]
 
     Args:
-        filestore: FilestoreManager instance. Uses default root if None.
+        gateway: StorageGateway instance. Uses FilesystemAdapter if None.
+        filestore: Deprecated — FilestoreManager accepted for backward
+            compatibility. Use gateway= in new code.
         audit_logger: AuditLogger instance. Uses default log if None.
         timeout: HTTP request timeout in seconds.
     """
 
     def __init__(
         self,
-        filestore: Optional[FilestoreManager] = None,
+        gateway: Any = None,
+        filestore: Any = None,
         audit_logger: Optional[AuditLogger] = None,
         timeout: int = 30,
     ) -> None:
-        self._filestore = filestore or FilestoreManager()
-        self._audit = audit_logger or AuditLogger(module="clinicaltrials_service")
+        from ptcv.storage import FilesystemAdapter
+        from .filestore import FilestoreManager
+
+        if gateway is not None:
+            self._gateway = gateway
+        elif filestore is not None and isinstance(filestore, FilestoreManager):
+            # FilestoreManager wraps FilesystemAdapter — extract the adapter
+            self._gateway = filestore._adapter
+        elif filestore is not None:
+            # Assume a StorageGateway passed via filestore= (future compat)
+            self._gateway = filestore
+        else:
+            self._gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
+
+        self._gateway.initialise()
+        self._audit = audit_logger or AuditLogger(
+            module="clinicaltrials_service"
+        )
         self._integrity = DataIntegrityGuard()
         self._timeout = timeout
 
@@ -186,6 +249,87 @@ class ClinicalTrialsService:
 
         return results
 
+    def search_pdf_available(
+        self,
+        condition: str = "",
+        phase: str = "",
+        fmt: str = "PDF",
+        max_results: int = 500,
+        who: str = "ptcv-service",
+    ) -> list[str]:
+        """Return NCT IDs for trials that have a sponsor-uploaded document.
+
+        Includes DocumentSection in the search fields so that large-document
+        availability can be determined without a separate per-study HTTP
+        request.  Only studies where a largeDocs entry matching ``fmt`` is
+        present are returned.
+
+        [PTCV-28 Scenario: Pre-filter search to PDF-available trials]
+
+        Args:
+            condition: Condition or disease filter.
+            phase: Phase filter (e.g., "PHASE2").
+            fmt: Document format to look for ("PDF" or "SAP").
+            max_results: Upper bound on studies to scan.
+            who: User/service identifier for audit trail.
+
+        Returns:
+            List of NCT IDs that have a matching large document.
+        """
+        abbrevs = _LARGE_DOC_ABBREVS.get(fmt, ())
+        if not abbrevs:
+            return []
+
+        self._audit.log(
+            action=AuditAction.SEARCH,
+            record_id="ClinicalTrials.gov",
+            user_id=who,
+            reason=(
+                f"PDF-filtered search: condition={condition!r} "
+                f"phase={phase!r} fmt={fmt!r}"
+            ),
+        )
+
+        matching_ids: list[str] = []
+        current_token = ""
+        fetched = 0
+
+        while fetched < max_results:
+            page_size = min(_MAX_PAGE_SIZE, max_results - fetched)
+            params: dict[str, str] = {
+                "pageSize": str(page_size),
+                "format": "json",
+                "fields": "NCTId,ProtocolSection,DocumentSection",
+            }
+            if condition:
+                params["query.cond"] = condition
+            if phase:
+                params["query.term"] = phase
+            if current_token:
+                params["pageToken"] = current_token
+
+            try:
+                data = self._get_json(f"{_CT_GOV_BASE}/studies", params)
+            except Exception:
+                break
+
+            studies = data.get("studies", [])
+            for study in studies:
+                nct_id = (
+                    study.get("protocolSection", {})
+                    .get("identificationModule", {})
+                    .get("nctId", "")
+                )
+                if nct_id and self._find_large_doc(study, abbrevs) is not None:
+                    matching_ids.append(nct_id)
+
+            fetched += len(studies)
+            current_token = data.get("nextPageToken", "")
+            if not current_token:
+                break
+
+        return matching_ids
+
     def download(
         self,
         nct_id: str,
@@ -259,20 +403,6 @@ class ClinicalTrialsService:
         # Attempt to download the actual document from largeDocumentModule
         content, effective_fmt = self._fetch_large_doc(data, nct_id, fmt)
 
-        # Store file and write audit entry
-        try:
-            file_path, file_hash = self._filestore.save_protocol(
-                content=content,
-                registry_id=nct_id,
-                amendment_number=version,
-                fmt=effective_fmt,
-                source="ClinicalTrials.gov",
-            )
-        except FileExistsError as exc:
-            return DownloadResult(
-                success=False, registry_id=nct_id, error=str(exc)
-            )
-
         # Build metadata from the study record
         protocol = data.get("protocolSection", {})
         id_module = protocol.get("identificationModule", {})
@@ -280,11 +410,12 @@ class ClinicalTrialsService:
         design_module = protocol.get("designModule", {})
         conditions_module = protocol.get("conditionsModule", {})
 
-        metadata = ProtocolMetadata(
-            source="ClinicalTrials.gov",
+        return self._store_and_audit(
+            content=content,
             registry_id=nct_id,
-            version=version,
             amendment_number=version,
+            fmt=effective_fmt,
+            source="ClinicalTrials.gov",
             title=(
                 id_module.get("officialTitle")
                 or id_module.get("briefTitle", "")
@@ -294,32 +425,96 @@ class ClinicalTrialsService:
             condition=", ".join(
                 conditions_module.get("conditions", [])
             ),
-            file_path=str(file_path),
-            format=effective_fmt,
-            file_hash_sha256=file_hash,
+            who=who,
+            why=why,
+        )
+
+    def _store_and_audit(
+        self,
+        content: bytes,
+        registry_id: str,
+        amendment_number: str,
+        fmt: str,
+        source: str,
+        title: str,
+        sponsor: str,
+        phase: str,
+        condition: str,
+        who: str,
+        why: str,
+    ) -> DownloadResult:
+        """Store protocol + metadata and write audit entry."""
+        run_id = str(uuid.uuid4())
+        protocol_key = _make_key(registry_id, amendment_number, fmt, source)
+
+        try:
+            artifact = self._gateway.put_artifact(
+                key=protocol_key,
+                data=content,
+                content_type=_content_type(fmt),
+                run_id=run_id,
+                source_hash="",
+                user=who,
+                immutable=True,
+                registry_id=registry_id,
+                amendment_number=amendment_number,
+                source=source,
+            )
+        except FileExistsError as exc:
+            return DownloadResult(
+                success=False, registry_id=registry_id, error=str(exc)
+            )
+
+        file_path_str = _artifact_path(self._gateway, artifact.key)
+
+        metadata = ProtocolMetadata(
+            source=source,
+            registry_id=registry_id,
+            version=amendment_number,
+            amendment_number=amendment_number,
+            title=title,
+            sponsor=sponsor,
+            phase=phase,
+            condition=condition,
+            file_path=file_path_str,
+            format=fmt,
+            file_hash_sha256=artifact.sha256,
             legacy_source=False,
         )
-        metadata_path = self._filestore.save_metadata(metadata)
+        meta_bytes = json.dumps(
+            dataclasses.asdict(metadata), indent=2, ensure_ascii=False
+        ).encode("utf-8")
+        metadata_key = f"metadata/{registry_id}_{amendment_number}.json"
+        self._gateway.put_artifact(
+            key=metadata_key,
+            data=meta_bytes,
+            content_type="application/json",
+            run_id=run_id,
+            source_hash=artifact.sha256,
+            user=who,
+            immutable=False,
+        )
+        metadata_path_str = _artifact_path(self._gateway, metadata_key)
 
         self._audit.log(
             action=AuditAction.DOWNLOAD,
-            record_id=nct_id,
+            record_id=registry_id,
             user_id=who,
             reason=why,
             after={
-                "file_path": str(file_path),
-                "file_hash_sha256": file_hash,
-                "format": effective_fmt,
+                "file_path": file_path_str,
+                "file_hash_sha256": artifact.sha256,
+                "format": fmt,
             },
         )
 
         return DownloadResult(
             success=True,
-            registry_id=nct_id,
-            file_path=str(file_path),
-            metadata_path=str(metadata_path),
-            file_hash_sha256=file_hash,
-            actual_format=effective_fmt,
+            registry_id=registry_id,
+            file_path=file_path_str,
+            metadata_path=metadata_path_str,
+            file_hash_sha256=artifact.sha256,
+            actual_format=fmt,
         )
 
     # ------------------------------------------------------------------

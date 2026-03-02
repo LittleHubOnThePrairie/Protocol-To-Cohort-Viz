@@ -7,6 +7,9 @@ Legacy EudraCT fallback: trials not yet migrated to CTIS (pre-2023)
 are flagged with legacy_source=True. Actual retrieval requires the
 ctrdata R package; this service calls R via subprocess if available.
 
+PTCV-29: Storage delegated to StorageGateway (FilesystemAdapter or
+LocalStorageAdapter). FilestoreManager accepted as deprecated alias.
+
 Risk tier: MEDIUM — data pipeline ingestion (no patient data).
 
 Regulatory requirements:
@@ -15,17 +18,19 @@ Regulatory requirements:
 - No PHI: only organisation identifiers and trial metadata stored
 """
 
+import dataclasses
 import json
 import re
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Optional
 
 from ..compliance.audit import AuditAction, AuditLogger
 from ..compliance.integrity import DataIntegrityGuard
-from .filestore import FilestoreManager
+from .filestore import _DEFAULT_ROOT
 from .models import DownloadResult, ProtocolMetadata, SearchResult
 
 
@@ -63,6 +68,46 @@ _CONDITION_AREA_CODES: dict[str, list[int]] = {
     "metabolic": [18],
 }
 
+_FORMAT_EXT: dict[str, str] = {
+    "PDF": "pdf",
+    "CTR-XML": "xml",
+    "DOCX": "docx",
+}
+
+_CONTENT_TYPES: dict[str, str] = {
+    "PDF": "application/pdf",
+    "CTR-XML": "application/xml",
+    "DOCX": (
+        "application/vnd.openxmlformats-officedocument"
+        ".wordprocessingml.document"
+    ),
+}
+
+
+def _make_key(
+    registry_id: str,
+    amendment_number: str,
+    fmt: str,
+    source: str,
+) -> str:
+    """Return the relative storage key for a protocol file."""
+    ext = _FORMAT_EXT.get(fmt, "pdf")
+    subdir = "eu-ctr" if source == "EU-CTR" else "clinicaltrials"
+    return f"{subdir}/{registry_id}_{amendment_number}.{ext}"
+
+
+def _content_type(fmt: str) -> str:
+    """Return MIME type for the given format key."""
+    return _CONTENT_TYPES.get(fmt, "application/octet-stream")
+
+
+def _artifact_path(gateway: Any, key: str) -> str:
+    """Return absolute path string for a gateway artifact key."""
+    from ptcv.storage import FilesystemAdapter
+    if isinstance(gateway, FilesystemAdapter):
+        return str(gateway.root / key)
+    return key
+
 
 class CTISService:
     """Search and download clinical trial protocols from EU-CTR (CTIS).
@@ -72,18 +117,35 @@ class CTISService:
     in the PTCV filestore and every download is written to the audit log.
 
     Args:
-        filestore: FilestoreManager instance. Uses default root if None.
+        gateway: StorageGateway instance. Uses FilesystemAdapter if None.
+        filestore: Deprecated — FilestoreManager accepted for backward
+            compatibility. Use gateway= in new code.
         audit_logger: AuditLogger instance. Uses default log if None.
         timeout: HTTP request timeout in seconds.
     """
 
     def __init__(
         self,
-        filestore: Optional[FilestoreManager] = None,
+        gateway: Any = None,
+        filestore: Any = None,
         audit_logger: Optional[AuditLogger] = None,
         timeout: int = 30,
     ) -> None:
-        self._filestore = filestore or FilestoreManager()
+        from ptcv.storage import FilesystemAdapter
+        from .filestore import FilestoreManager
+
+        if gateway is not None:
+            self._gateway = gateway
+        elif filestore is not None and isinstance(filestore, FilestoreManager):
+            # FilestoreManager wraps FilesystemAdapter — extract the adapter
+            self._gateway = filestore._adapter
+        elif filestore is not None:
+            # Assume a StorageGateway passed via filestore= (future compat)
+            self._gateway = filestore
+        else:
+            self._gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
+
+        self._gateway.initialise()
         self._audit = audit_logger or AuditLogger(module="eu_ctr_service")
         self._integrity = DataIntegrityGuard()
         self._timeout = timeout
@@ -142,7 +204,7 @@ class CTISService:
 
         try:
             data = self._post(_CTIS_BASE + "/search", payload)
-        except Exception as exc:
+        except Exception:
             return []
 
         trials = data.get("data", [])
@@ -197,6 +259,17 @@ class CTISService:
                 euct_code, amendment_number, fmt, who, why
             )
 
+        # NOTE: The CTIS public API /retrieve endpoint returns trial metadata
+        # (JSON), not an actual protocol PDF document. CTIS does not expose
+        # a public endpoint for downloading the full protocol PDF — those are
+        # only accessible via the CTIS portal UI after authentication. This
+        # service therefore stores the JSON metadata payload in place of a
+        # PDF. Actual protocol PDF retrieval will require either (a) browser
+        # automation against the CTIS portal, (b) an authenticated CTIS API
+        # credential if/when Roche/EMA makes one available, or (c) the
+        # ctrdata R package for legacy EudraCT trials. See PTCV-29 for the
+        # StorageGateway hardening that will make swapping in a real PDF
+        # source straightforward without changing downstream pipeline stages.
         url = f"{_CTIS_BASE}/retrieve/{urllib.parse.quote(euct_code, safe='')}"
         try:
             content = self._get_bytes(url)
@@ -312,12 +385,20 @@ class CTISService:
         why: str,
     ) -> DownloadResult:
         """Store protocol + metadata and write audit entry."""
+        run_id = str(uuid.uuid4())
+        protocol_key = _make_key(registry_id, amendment_number, fmt, source)
+
         try:
-            file_path, file_hash = self._filestore.save_protocol(
-                content=content,
+            artifact = self._gateway.put_artifact(
+                key=protocol_key,
+                data=content,
+                content_type=_content_type(fmt),
+                run_id=run_id,
+                source_hash="",
+                user=who,
+                immutable=True,
                 registry_id=registry_id,
                 amendment_number=amendment_number,
-                fmt=fmt,
                 source=source,
             )
         except FileExistsError as exc:
@@ -327,16 +408,31 @@ class CTISService:
                 error=str(exc),
             )
 
+        file_path_str = _artifact_path(self._gateway, artifact.key)
+
         metadata = ProtocolMetadata(
             source=source,
             registry_id=registry_id,
             amendment_number=amendment_number,
             format=fmt,
-            file_path=str(file_path),
-            file_hash_sha256=file_hash,
+            file_path=file_path_str,
+            file_hash_sha256=artifact.sha256,
             legacy_source=legacy,
         )
-        metadata_path = self._filestore.save_metadata(metadata)
+        meta_bytes = json.dumps(
+            dataclasses.asdict(metadata), indent=2, ensure_ascii=False
+        ).encode("utf-8")
+        metadata_key = f"metadata/{registry_id}_{amendment_number}.json"
+        self._gateway.put_artifact(
+            key=metadata_key,
+            data=meta_bytes,
+            content_type="application/json",
+            run_id=run_id,
+            source_hash=artifact.sha256,
+            user=who,
+            immutable=False,
+        )
+        metadata_path_str = _artifact_path(self._gateway, metadata_key)
 
         self._audit.log(
             action=AuditAction.DOWNLOAD,
@@ -344,8 +440,8 @@ class CTISService:
             user_id=who,
             reason=why,
             after={
-                "file_path": str(file_path),
-                "file_hash_sha256": file_hash,
+                "file_path": file_path_str,
+                "file_hash_sha256": artifact.sha256,
                 "format": fmt,
                 "legacy_source": legacy,
             },
@@ -354,9 +450,9 @@ class CTISService:
         return DownloadResult(
             success=True,
             registry_id=registry_id,
-            file_path=str(file_path),
-            metadata_path=str(metadata_path),
-            file_hash_sha256=file_hash,
+            file_path=file_path_str,
+            metadata_path=metadata_path_str,
+            file_hash_sha256=artifact.sha256,
         )
 
     def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:

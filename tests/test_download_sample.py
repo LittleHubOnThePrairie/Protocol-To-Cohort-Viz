@@ -63,7 +63,7 @@ def _already_stored_download(registry_id: str) -> DownloadResult:
     return DownloadResult(
         success=False,
         registry_id=registry_id,
-        error=f"Protocol already stored at /some/path. ALCOA+ Original: do not overwrite source data.",
+        error=f"Artifact already exists at /some/path. ALCOA+ Original: do not overwrite immutable artifact.",
     )
 
 
@@ -213,7 +213,9 @@ class TestDownloadCtGovBucket:
     def test_downloads_up_to_target(self):
         """Downloads min(target, found) protocols."""
         mock_ct = MagicMock()
-        mock_ct.search.return_value = _make_search_results(20, source="ClinicalTrials.gov")
+        mock_ct.search_pdf_available.return_value = [
+            f"NCT{i:08d}" for i in range(20)
+        ]
         mock_ct.download.side_effect = lambda nct_id, **kw: _success_download(nct_id)
 
         result = _download_ct_gov_bucket(mock_ct, "cardiovascular", "PHASE2", target=6, dry_run=False)
@@ -224,7 +226,9 @@ class TestDownloadCtGovBucket:
     def test_dry_run_does_not_call_download(self):
         """Dry-run mode never calls ct.download()."""
         mock_ct = MagicMock()
-        mock_ct.search.return_value = _make_search_results(10, source="ClinicalTrials.gov")
+        mock_ct.search_pdf_available.return_value = [
+            f"NCT{i:08d}" for i in range(10)
+        ]
 
         result = _download_ct_gov_bucket(mock_ct, "neurology", "PHASE2", target=4, dry_run=True)
 
@@ -245,7 +249,9 @@ class TestRunSampleDownload:
         mock_ct = MagicMock()
 
         mock_ctis.search.return_value = _make_search_results(search_count, "EU-CTR")
-        mock_ct.search.return_value = _make_search_results(search_count, "ClinicalTrials.gov")
+        mock_ct.search_pdf_available.return_value = [
+            f"NCT{i:08d}" for i in range(search_count)
+        ]
 
         if all_success:
             mock_ctis.download.side_effect = lambda euct_code, **kw: _success_download(euct_code)
@@ -301,7 +307,7 @@ class TestRunSampleDownload:
         assert len(report.therapeutic_areas) == 4
         assert "oncology" in report.therapeutic_areas
         assert "cardiovascular" in report.therapeutic_areas
-        assert "neurology" in report.therapeutic_areas
+        assert "nervous system diseases" in report.therapeutic_areas
         assert "diabetes" in report.therapeutic_areas
 
     def test_report_has_bucket_results_for_each_area_and_registry(self):
@@ -347,7 +353,7 @@ class TestRunSampleDownload:
         mock_ctis.reset_mock()
         mock_ct.reset_mock()
         mock_ctis.search.return_value = _make_search_results(20, "EU-CTR")
-        mock_ct.search.return_value = _make_search_results(20, "ClinicalTrials.gov")
+        mock_ct.search_pdf_available.return_value = [f"NCT{i:08d}" for i in range(20)]
         mock_ctis.download.side_effect = lambda euct_code, **kw: _success_download(euct_code)
         mock_ct.download.side_effect = lambda nct_id, **kw: _success_download(nct_id)
 

@@ -7,7 +7,6 @@ Risk tier: MEDIUM
 """
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,8 +16,22 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
 
 @pytest.fixture()
+def tmp_gateway(tmp_path: Path):
+    """FilesystemAdapter backed by a temporary directory (PTCV-29)."""
+    from ptcv.storage import FilesystemAdapter
+
+    adapter = FilesystemAdapter(root=tmp_path / "protocols")
+    adapter.initialise()
+    return adapter
+
+
+@pytest.fixture()
 def tmp_filestore(tmp_path: Path):
-    """FilestoreManager backed by a temporary directory."""
+    """FilestoreManager shim backed by a temporary directory.
+
+    Kept for backward compatibility with test_filestore.py tests.
+    New tests should use tmp_gateway instead.
+    """
     from ptcv.protocol_search.filestore import FilestoreManager
 
     fs = FilestoreManager(root=tmp_path / "protocols")
@@ -38,18 +51,16 @@ def tmp_audit(tmp_path: Path):
 
 
 @pytest.fixture()
-def ctis_service(tmp_filestore, tmp_audit):
-    """CTISService with isolated filestore and audit logger."""
+def ctis_service(tmp_gateway, tmp_audit):
+    """CTISService with isolated gateway and audit logger (PTCV-29)."""
     from ptcv.protocol_search.eu_ctr_service import CTISService
 
-    return CTISService(filestore=tmp_filestore, audit_logger=tmp_audit)
+    return CTISService(gateway=tmp_gateway, audit_logger=tmp_audit)
 
 
 @pytest.fixture()
-def ct_service(tmp_filestore, tmp_audit):
-    """ClinicalTrialsService with isolated filestore and audit logger."""
+def ct_service(tmp_gateway, tmp_audit):
+    """ClinicalTrialsService with isolated gateway and audit logger (PTCV-29)."""
     from ptcv.protocol_search.clinicaltrials_service import ClinicalTrialsService
 
-    return ClinicalTrialsService(
-        filestore=tmp_filestore, audit_logger=tmp_audit
-    )
+    return ClinicalTrialsService(gateway=tmp_gateway, audit_logger=tmp_audit)

@@ -1,8 +1,9 @@
 """PTCV Local Filestore Manager.
 
-Manages the PTCV-specific protocol filestore at
-C:/Dev/PTCV/data/protocols/ with subdirectories for EU-CTR,
-ClinicalTrials.gov, and metadata JSON files.
+FilestoreManager is now a thin compatibility shim over FilesystemAdapter
+(from ptcv.storage). All previous tests and callers continue to work
+unchanged. New code should use StorageGateway / FilesystemAdapter
+directly instead of FilestoreManager.
 
 Implements ALCOA+ Original principle: raw downloaded bytes are
 written once and never overwritten. SHA-256 is computed before
@@ -11,14 +12,15 @@ writing and stored in metadata.
 Risk tier: MEDIUM — data pipeline storage.
 
 Regulatory references:
-- ALCOA+ Original: raw source data preserved immutably
+- ALCOA+ Original: raw source data preserved immutably (via FilesystemAdapter)
 - ALCOA+ Complete: metadata accompanies every stored file
-- 21 CFR 11.10(e): audit trail on storage operations
+- 21 CFR 11.10(e): audit trail on storage operations (lineage.db)
 """
 
 import dataclasses
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -31,38 +33,75 @@ _FORMAT_EXT: dict[str, str] = {
     "DOCX": "docx",
 }
 
+_CONTENT_TYPES: dict[str, str] = {
+    "PDF": "application/pdf",
+    "CTR-XML": "application/xml",
+    "DOCX": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
 _DEFAULT_ROOT = Path("C:/Dev/PTCV/data/protocols")
 
 
-class FilestoreManager:
-    """Manages the PTCV protocol filestore directory tree.
+def _make_protocol_key(
+    registry_id: str,
+    amendment_number: str,
+    fmt: str,
+    source: str,
+) -> str:
+    """Return the relative storage key for a protocol file."""
+    ext = _FORMAT_EXT.get(fmt, "pdf")
+    subdir = "eu-ctr" if source == "EU-CTR" else "clinicaltrials"
+    return f"{subdir}/{registry_id}_{amendment_number}.{ext}"
 
-    Ensures the eu-ctr/, clinicaltrials/, and metadata/ subdirectories
-    exist before any file operation. Files are written once — no
-    in-place overwrites of stored protocol content.
+
+def _content_type(fmt: str) -> str:
+    """Return MIME type for the given format key."""
+    return _CONTENT_TYPES.get(fmt, "application/octet-stream")
+
+
+def _serialise(metadata: ProtocolMetadata) -> bytes:
+    """Serialise ProtocolMetadata to UTF-8 JSON bytes."""
+    return json.dumps(
+        dataclasses.asdict(metadata), indent=2, ensure_ascii=False
+    ).encode("utf-8")
+
+
+def _new_run_id() -> str:
+    """Generate a UUID4 run identifier."""
+    return str(uuid.uuid4())
+
+
+class FilestoreManager:
+    """Compatibility shim over FilesystemAdapter.
+
+    Preserves the original FilestoreManager public API so that all
+    existing tests and callers continue to work without modification.
+    Internally delegates all I/O to a FilesystemAdapter instance.
 
     Args:
         root: Override the default filestore root. Only for testing.
     """
 
     def __init__(self, root: Optional[Path] = None) -> None:
-        self.root = root or _DEFAULT_ROOT
-        self.eu_ctr_dir = self.root / "eu-ctr"
-        self.clinicaltrials_dir = self.root / "clinicaltrials"
-        self.metadata_dir = self.root / "metadata"
+        from ptcv.storage import FilesystemAdapter  # local import
+
+        _root = root or _DEFAULT_ROOT
+        self._adapter = FilesystemAdapter(root=_root)
+        self._adapter.initialise()
+
+        # Public attributes preserved for test introspection
+        self.root = _root
+        self.eu_ctr_dir = _root / "eu-ctr"
+        self.clinicaltrials_dir = _root / "clinicaltrials"
+        self.metadata_dir = _root / "metadata"
 
     def ensure_directories(self) -> None:
         """Create all required subdirectories if they do not exist.
 
-        Safe to call repeatedly — uses mkdir(exist_ok=True).
+        Delegates to FilesystemAdapter.initialise() which is idempotent.
         [PTCV-18 Scenario: Filestore directories are created if missing]
         """
-        for directory in (
-            self.eu_ctr_dir,
-            self.clinicaltrials_dir,
-            self.metadata_dir,
-        ):
-            directory.mkdir(parents=True, exist_ok=True)
+        self._adapter.initialise()
 
     @staticmethod
     def compute_sha256(content: bytes) -> str:
@@ -87,6 +126,8 @@ class FilestoreManager:
     ) -> Path:
         """Compute the canonical path for a protocol file.
 
+        This is a pure path computation — no I/O is performed.
+
         Args:
             registry_id: Trial registry identifier.
             amendment_number: Amendment number (e.g., "00", "01").
@@ -96,14 +137,8 @@ class FilestoreManager:
         Returns:
             Absolute Path for the protocol file.
         """
-        ext = _FORMAT_EXT.get(fmt, "pdf")
-        filename = f"{registry_id}_{amendment_number}.{ext}"
-        directory = (
-            self.eu_ctr_dir
-            if source == "EU-CTR"
-            else self.clinicaltrials_dir
-        )
-        return directory / filename
+        key = _make_protocol_key(registry_id, amendment_number, fmt, source)
+        return self.root / key
 
     def metadata_path(
         self,
@@ -111,6 +146,8 @@ class FilestoreManager:
         amendment_number: str,
     ) -> Path:
         """Compute the canonical path for a metadata JSON file.
+
+        This is a pure path computation — no I/O is performed.
 
         Args:
             registry_id: Trial registry identifier.
@@ -148,16 +185,20 @@ class FilestoreManager:
         Raises:
             FileExistsError: If the protocol file already exists.
         """
-        self.ensure_directories()
-        path = self.protocol_path(registry_id, amendment_number, fmt, source)
-        if path.exists():
-            raise FileExistsError(
-                f"Protocol already stored at {path}. "
-                "ALCOA+ Original: do not overwrite source data."
-            )
-        file_hash = self.compute_sha256(content)
-        path.write_bytes(content)
-        return path, file_hash
+        key = _make_protocol_key(registry_id, amendment_number, fmt, source)
+        artifact = self._adapter.put_artifact(
+            key=key,
+            data=content,
+            content_type=_content_type(fmt),
+            run_id=_new_run_id(),
+            source_hash="",
+            user="filestore",
+            immutable=True,
+            registry_id=registry_id,
+            amendment_number=amendment_number,
+            source=source,
+        )
+        return self.root / artifact.key, artifact.sha256
 
     def save_metadata(self, metadata: ProtocolMetadata) -> Path:
         """Write metadata JSON to filestore. Returns saved path.
@@ -171,12 +212,16 @@ class FilestoreManager:
         Returns:
             Path to the saved metadata JSON file.
         """
-        self.ensure_directories()
-        path = self.metadata_path(
-            metadata.registry_id, metadata.amendment_number
+        key = (
+            f"metadata/{metadata.registry_id}_{metadata.amendment_number}.json"
         )
-        path.write_text(
-            json.dumps(dataclasses.asdict(metadata), indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        self._adapter.put_artifact(
+            key=key,
+            data=_serialise(metadata),
+            content_type="application/json",
+            run_id=_new_run_id(),
+            source_hash="",
+            user="filestore",
+            immutable=False,
         )
-        return path
+        return self.root / key

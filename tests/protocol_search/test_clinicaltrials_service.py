@@ -25,15 +25,15 @@ class TestClinicalTrialsServiceInit:
     """IQ: Service initialisation wires defaults."""
 
     def test_default_dependencies_created(self):
-        """Service creates internal filestore and audit logger when none given."""
+        """Service creates internal gateway and audit logger when none given."""
         svc = ClinicalTrialsService()
-        assert svc._filestore is not None
+        assert svc._gateway is not None
         assert svc._audit is not None
         assert svc._timeout == 30
 
     def test_custom_injected_dependencies_stored(self, ct_service):
-        """Injected dependencies are stored on the service."""
-        assert ct_service._filestore is not None
+        """Injected dependencies are stored on the service (PTCV-29)."""
+        assert ct_service._gateway is not None
         assert ct_service._audit is not None
 
 
@@ -293,7 +293,7 @@ class TestClinicalTrialsServiceDownload:
             )
 
         assert second.success is False
-        assert "already stored" in second.error.lower()
+        assert "already exists" in second.error.lower()
 
     def test_download_sha256_stored_in_metadata(self, ct_service, tmp_path):
         """ALCOA+ Consistent: SHA-256 in metadata matches file content hash."""
@@ -616,3 +616,165 @@ class TestClinicalTrialsServiceLargeDocModule:
         assert url == (
             "https://clinicaltrials.gov/ProvidedDocs/78/NCT12345678/Prot_000.pdf"
         )
+
+
+class TestClinicalTrialsServiceSearchPdfAvailable:
+    """Tests for ClinicalTrialsService.search_pdf_available() (PTCV-28)."""
+
+    def _make_study(self, nct_id: str, large_docs: list[dict]) -> dict:
+        """Build a minimal study dict as returned by the v2 search API."""
+        study: dict = {
+            "protocolSection": {
+                "identificationModule": {"nctId": nct_id}
+            }
+        }
+        if large_docs:
+            study["documentSection"] = {
+                "largeDocumentModule": {"largeDocs": large_docs}
+            }
+        return study
+
+    def test_returns_nct_ids_with_prot_doc(self, ct_service):
+        """NCT IDs with Prot typeAbbrev are returned."""
+        studies = [
+            self._make_study(
+                "NCT11111111",
+                [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+            ),
+            self._make_study("NCT22222222", []),  # no large docs
+        ]
+        with patch.object(
+            ct_service, "_get_json", return_value={"studies": studies}
+        ):
+            result = ct_service.search_pdf_available(condition="oncology")
+
+        assert result == ["NCT11111111"]
+
+    def test_returns_empty_when_no_pdf_available(self, ct_service):
+        """Empty list returned when no studies have matching large docs."""
+        studies = [
+            self._make_study("NCT33333333", []),
+            self._make_study(
+                "NCT44444444",
+                [{"typeAbbrev": "ICF", "filename": "ICF_000.pdf"}],
+            ),
+        ]
+        with patch.object(
+            ct_service, "_get_json", return_value={"studies": studies}
+        ):
+            result = ct_service.search_pdf_available(condition="test")
+
+        assert result == []
+
+    def test_prot_sap_satisfies_pdf_fmt(self, ct_service):
+        """Prot_SAP typeAbbrev counts as PDF-available."""
+        studies = [
+            self._make_study(
+                "NCT55555555",
+                [{"typeAbbrev": "Prot_SAP", "filename": "ProtSAP_000.pdf"}],
+            )
+        ]
+        with patch.object(
+            ct_service, "_get_json", return_value={"studies": studies}
+        ):
+            result = ct_service.search_pdf_available(fmt="PDF")
+
+        assert "NCT55555555" in result
+
+    def test_sap_fmt_matches_sap_abbrev(self, ct_service):
+        """SAP typeAbbrev is returned when fmt='SAP'."""
+        studies = [
+            self._make_study(
+                "NCT66666666",
+                [{"typeAbbrev": "SAP", "filename": "SAP_000.pdf"}],
+            ),
+            self._make_study(
+                "NCT77777777",
+                [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+            ),
+        ]
+        with patch.object(
+            ct_service, "_get_json", return_value={"studies": studies}
+        ):
+            result = ct_service.search_pdf_available(fmt="SAP")
+
+        assert "NCT66666666" in result
+        assert "NCT77777777" not in result  # Prot does not satisfy SAP
+
+    def test_unknown_fmt_returns_empty_without_api_call(self, ct_service):
+        """Unrecognised fmt returns [] immediately without HTTP request."""
+        with patch.object(ct_service, "_get_json") as mock_get:
+            result = ct_service.search_pdf_available(fmt="UNKNOWN")
+
+        assert result == []
+        mock_get.assert_not_called()
+
+    def test_pagination_followed(self, ct_service):
+        """Second page is fetched when nextPageToken is present."""
+        page1 = {
+            "studies": [
+                self._make_study(
+                    "NCT88888881",
+                    [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+                )
+            ],
+            "nextPageToken": "tok123",
+        }
+        page2 = {
+            "studies": [
+                self._make_study(
+                    "NCT88888882",
+                    [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+                )
+            ],
+        }
+        with patch.object(
+            ct_service, "_get_json", side_effect=[page1, page2]
+        ):
+            result = ct_service.search_pdf_available(
+                condition="test", max_results=2
+            )
+
+        assert "NCT88888881" in result
+        assert "NCT88888882" in result
+
+    def test_stops_at_max_results(self, ct_service):
+        """No more pages fetched once max_results studies have been scanned."""
+        # Each page has 1 study; max_results=1 → only one page fetched.
+        page1 = {
+            "studies": [
+                self._make_study(
+                    "NCT99999991",
+                    [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+                )
+            ],
+            "nextPageToken": "tok456",
+        }
+        with patch.object(
+            ct_service, "_get_json", return_value=page1
+        ) as mock_get:
+            ct_service.search_pdf_available(condition="test", max_results=1)
+
+        assert mock_get.call_count == 1
+
+    def test_api_error_returns_partial_results(self, ct_service):
+        """If HTTP fails mid-pagination, already-found IDs are returned."""
+        page1 = {
+            "studies": [
+                self._make_study(
+                    "NCT10101010",
+                    [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+                )
+            ],
+            "nextPageToken": "tokFail",
+        }
+        with patch.object(
+            ct_service,
+            "_get_json",
+            side_effect=[page1, Exception("timeout")],
+        ):
+            result = ct_service.search_pdf_available(
+                condition="test", max_results=200
+            )
+
+        assert "NCT10101010" in result

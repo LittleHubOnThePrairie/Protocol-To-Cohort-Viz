@@ -54,7 +54,7 @@ THERAPEUTIC_AREAS: list[tuple[str, str, str]] = [
     # (condition_name, ctis_phase, ct_phase_enum)
     ("oncology", "Phase 2", "PHASE2"),
     ("cardiovascular", "Phase 2", "PHASE2"),
-    ("neurology", "Phase 2", "PHASE2"),
+    ("nervous system diseases", "Phase 2", "PHASE2"),
     ("diabetes", "Phase 2", "PHASE2"),
 ]
 
@@ -145,7 +145,7 @@ def _download_eu_ctr_bucket(
         if dl.success:
             result.downloaded += 1
             print(f"  ✓ EU-CTR {trial.registry_id}")
-        elif "already stored" in (dl.error or "").lower():
+        elif "already exists" in (dl.error or "").lower():
             result.skipped += 1
             print(f"  ~ EU-CTR {trial.registry_id} (already stored)")
         else:
@@ -163,43 +163,44 @@ def _download_ct_gov_bucket(
     target: int,
     dry_run: bool,
 ) -> BucketResult:
-    """Search ClinicalTrials.gov for `condition`, randomly sample `target`, download each."""
+    """Find CT.gov trials with sponsor-uploaded PDFs, sample `target`, download each."""
     result = BucketResult(condition=condition, registry="ClinicalTrials.gov")
 
-    search_results = ct.search(
+    pdf_ids = ct.search_pdf_available(
         condition=condition,
         phase=ct_phase,
-        max_results=min(target * 4, 100),
+        fmt="PDF",
+        max_results=500,
     )
-    result.search_found = len(search_results)
+    result.search_found = len(pdf_ids)
 
-    if not search_results:
+    if not pdf_ids:
+        print(f"  (no PDF-available trials found for {condition})")
         return result
 
-    sample = random.sample(search_results, min(target, len(search_results)))
+    sample = random.sample(pdf_ids, min(target, len(pdf_ids)))
 
-    for trial in sample:
+    for nct_id in sample:
         if dry_run:
-            print(f"  [dry-run] CT.gov {trial.registry_id}: {trial.title[:60]}")
+            print(f"  [dry-run] CT.gov {nct_id}")
             result.downloaded += 1
             continue
 
         dl = ct.download(
-            nct_id=trial.registry_id,
+            nct_id=nct_id,
             fmt="PDF",
             why=f"sample_download_100:{condition}",
         )
         if dl.success:
             result.downloaded += 1
-            fmt_label = dl.actual_format or "PDF"
-            print(f"  ✓ CT.gov {trial.registry_id} [{fmt_label}]")
-        elif "already stored" in (dl.error or "").lower():
+            print(f"  ✓ CT.gov {nct_id} [{dl.actual_format}]")
+        elif "already exists" in (dl.error or "").lower():
             result.skipped += 1
-            print(f"  ~ CT.gov {trial.registry_id} (already stored)")
+            print(f"  ~ CT.gov {nct_id} (already stored)")
         else:
             result.failed += 1
-            result.errors.append(f"{trial.registry_id}: {dl.error}")
-            print(f"  ✗ CT.gov {trial.registry_id}: {dl.error}")
+            result.errors.append(f"{nct_id}: {dl.error}")
+            print(f"  ✗ CT.gov {nct_id}: {dl.error}")
 
     return result
 
@@ -208,6 +209,7 @@ def run_sample_download(
     target_per_bucket: int = DEFAULT_TARGET_PER_BUCKET,
     dry_run: bool = False,
     seed: Optional[int] = None,
+    ct_gov_only: bool = False,
 ) -> SampleReport:
     """Run the full diverse convenience sample download.
 
@@ -234,11 +236,12 @@ def run_sample_download(
     for condition, ctis_phase, ct_phase in THERAPEUTIC_AREAS:
         print(f"\n[{condition.upper()}]")
 
-        # EU-CTR bucket (target_per_bucket)
-        eu_bucket = _download_eu_ctr_bucket(
-            ctis, condition, ctis_phase, target_per_bucket, dry_run
-        )
-        all_buckets.append(eu_bucket)
+        # EU-CTR bucket (target_per_bucket) — skip when ct_gov_only
+        if not ct_gov_only:
+            eu_bucket = _download_eu_ctr_bucket(
+                ctis, condition, ctis_phase, target_per_bucket, dry_run
+            )
+            all_buckets.append(eu_bucket)
 
         # CT.gov bucket (target_per_bucket + 1 to hit ~100 overall)
         ct_bucket = _download_ct_gov_bucket(
@@ -246,9 +249,13 @@ def run_sample_download(
         )
         all_buckets.append(ct_bucket)
 
-        total_downloaded += eu_bucket.downloaded + ct_bucket.downloaded
-        total_skipped += eu_bucket.skipped + ct_bucket.skipped
-        total_failed += eu_bucket.failed + ct_bucket.failed
+        if not ct_gov_only:
+            total_downloaded += eu_bucket.downloaded
+            total_skipped += eu_bucket.skipped
+            total_failed += eu_bucket.failed
+        total_downloaded += ct_bucket.downloaded
+        total_skipped += ct_bucket.skipped
+        total_failed += ct_bucket.failed
 
     report = SampleReport(
         run_timestamp=datetime.now(timezone.utc).isoformat(),
@@ -310,6 +317,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Random seed for reproducible sampling.",
     )
+    parser.add_argument(
+        "--ct-gov-only",
+        action="store_true",
+        help="Skip EU-CTR buckets; download ClinicalTrials.gov protocols only.",
+    )
     return parser
 
 
@@ -319,7 +331,10 @@ def main() -> int:
     args = parser.parse_args()
 
     print("PTCV-27: Diverse convenience sample download")
-    print(f"  Target per bucket : {args.target} EU-CTR + {args.target + 1} CT.gov")
+    registries = "ClinicalTrials.gov only" if args.ct_gov_only else "EU-CTR + ClinicalTrials.gov"
+    print(f"  Registries        : {registries}")
+    print(f"  Target per bucket : {args.target + 1} CT.gov" if args.ct_gov_only
+          else f"  Target per bucket : {args.target} EU-CTR + {args.target + 1} CT.gov")
     print(f"  Therapeutic areas : {[c for c, _, _ in THERAPEUTIC_AREAS]}")
     print(f"  Dry run           : {args.dry_run}")
     if args.seed is not None:
@@ -329,6 +344,7 @@ def main() -> int:
         target_per_bucket=args.target,
         dry_run=args.dry_run,
         seed=args.seed,
+        ct_gov_only=args.ct_gov_only,
     )
 
     print("\n" + "=" * 60)
