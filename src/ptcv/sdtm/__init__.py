@@ -1,8 +1,11 @@
-"""PTCV SDTM Trial Design Domain Generator (PTCV-22).
+"""PTCV SDTM Trial Design Domain Generator and Validator (PTCV-22, PTCV-23).
 
 Generates CDISC SDTM v1.7 trial design datasets (TS, TA, TE, TV, TI)
 and Define-XML v2.1 from ICH E6(R3) sections and USDM SoA timepoints.
 All artifacts are written to StorageGateway with immutable=True (WORM).
+
+Validation (PTCV-23): ValidationService runs Pinnacle 21 Community rules,
+FDA TCG v5.9 Appendix B checks, and Define-XML structural validation.
 """
 
 from .ct_normalizer import CtLookupResult, CtNormalizer
@@ -17,6 +20,16 @@ from .domain_generators import (
 from .models import CtReviewQueueEntry, SdtmGenerationResult
 from .review_queue import CtReviewQueue
 from .sdtm_service import SdtmService
+from .validation import (
+    DefineXmlIssue,
+    DefineXmlValidator,
+    P21Issue,
+    P21Validator,
+    TcgChecker,
+    TcgParameter,
+    ValidationResult,
+    ValidationService,
+)
 
 __all__ = [
     "CtLookupResult",
@@ -24,11 +37,19 @@ __all__ = [
     "CtReviewQueue",
     "CtReviewQueueEntry",
     "DefineXmlGenerator",
+    "DefineXmlIssue",
+    "DefineXmlValidator",
+    "P21Issue",
+    "P21Validator",
     "SdtmGenerationResult",
     "SdtmService",
     "TaGenerator",
+    "TcgChecker",
+    "TcgParameter",
     "TeGenerator",
     "TiGenerator",
     "TsGenerator",
     "TvGenerator",
+    "ValidationResult",
+    "ValidationService",
 ]

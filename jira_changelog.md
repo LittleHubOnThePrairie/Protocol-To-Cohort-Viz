@@ -5,6 +5,34 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-02T22:16:57Z] PTCV-22: Implement CDISC SDTM Trial Design Domain Generator
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement CDISC SDTM Trial Design Domain Generator
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/ct_normalizer.py
+- C:/Dev/PTCV/src/ptcv/sdtm/define_xml.py
+- C:/Dev/PTCV/src/ptcv/sdtm/domain_generators.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/sdtm/review_queue.py
+- C:/Dev/PTCV/src/ptcv/sdtm/sdtm_service.py
+- C:/Dev/PTCV/tests/sdtm/__init__.py
+- C:/Dev/PTCV/tests/sdtm/conftest.py
+- C:/Dev/PTCV/tests/sdtm/test_ct_normalizer.py
+- C:/Dev/PTCV/tests/sdtm/test_define_xml.py
+- C:/Dev/PTCV/tests/sdtm/test_domain_generators.py
+- C:/Dev/PTCV/tests/sdtm/test_sdtm_service.py
+
+**Test Coverage:**
+6 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-02T20:38:43Z] PTCV-29: Harden local PDF datastore with StorageGateway and MinIO WORM
 
 **Status Change:** In Progress -> Done
