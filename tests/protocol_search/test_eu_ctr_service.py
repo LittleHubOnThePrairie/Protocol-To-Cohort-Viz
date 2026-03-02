@@ -49,11 +49,11 @@ class TestCTISServiceSearch:
             "data": [
                 {
                     "ctNumber": "2024-123456-10-00",
-                    "trialTitle": "Test Trial",
-                    "sponsorName": "Sponsor A",
+                    "ctTitle": "Test Trial",
+                    "sponsor": "Sponsor A",
                     "trialPhase": "Phase 2",
-                    "medicalCondition": "oncology",
-                    "trialStatus": "Authorised",
+                    "conditions": "oncology",
+                    "ctStatus": 2,
                 }
             ]
         }
@@ -67,22 +67,22 @@ class TestCTISServiceSearch:
         assert results[0].source == "EU-CTR"
         assert results[0].sponsor == "Sponsor A"
 
-    def test_search_uses_results_key_fallback(self, ctis_service):
-        """Search handles 'results' key as fallback when 'data' absent."""
+    def test_search_uses_data_key(self, ctis_service):
+        """Search reads trials from the 'data' key in the response."""
         payload = {
-            "results": [
+            "data": [
                 {
                     "ctNumber": "2023-111111-10-00",
-                    "trialTitle": "Fallback Trial",
-                    "sponsorName": "",
+                    "ctTitle": "Cardiovascular Trial",
+                    "sponsor": "",
                     "trialPhase": "",
-                    "medicalCondition": "cardiology",
-                    "trialStatus": "Ongoing",
+                    "conditions": "Heart Failure",
+                    "ctStatus": 2,
                 }
             ]
         }
         with patch.object(ctis_service, "_post", return_value=payload):
-            results = ctis_service.search(condition="cardiology")
+            results = ctis_service.search(condition="cardiovascular")
 
         assert len(results) == 1
         assert results[0].registry_id == "2023-111111-10-00"

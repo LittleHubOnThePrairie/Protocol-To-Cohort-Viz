@@ -26,6 +26,7 @@ Regulatory requirements:
 """
 
 import argparse
+import io
 import json
 import random
 import sys
@@ -33,6 +34,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Reconfigure stdout to UTF-8 so non-ASCII trial titles print correctly on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # Allow running as `python -m scripts.download_sample` from project root
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))

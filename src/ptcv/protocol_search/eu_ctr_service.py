@@ -35,6 +35,34 @@ _EUCT_PATTERN = re.compile(r"^\d{4}-\d{6}-\d{2}-\d{2}$")
 # EudraCT format: YYYY-NNNNNN-NN
 _EUDRACT_PATTERN = re.compile(r"^\d{4}-\d{6}-\d{2}$")
 
+# CTIS trialPhaseCode numeric values (from API enumeration)
+_PHASE_CODES: dict[str, list[int]] = {
+    "Phase 1": [1, 2, 3],
+    "Phase I": [1, 2, 3],
+    "Phase 2": [4],
+    "Phase II": [4],
+    "Phase 3": [5],
+    "Phase III": [5],
+    "Phase 4": [6],
+    "Phase IV": [6],
+}
+
+# Condition text → CTIS therapeuticAreaCode numeric values.
+# Using structured codes gives far better recall than free-text containAll search,
+# since CTIS classifies trials by MeSH area, not by keyword.
+# Codes verified against live API: oncology=4 (Neoplasms C04),
+# cardiovascular=14 (Cardiovascular C14), neurology=5 (Nervous System C10),
+# diabetes=18 (Nutritional and Metabolic C18).
+_CONDITION_AREA_CODES: dict[str, list[int]] = {
+    "oncology": [4],
+    "cancer": [4],
+    "cardiovascular": [14],
+    "neurology": [5],
+    "neurological": [5],
+    "diabetes": [18],
+    "metabolic": [18],
+}
+
 
 class CTISService:
     """Search and download clinical trial protocols from EU-CTR (CTIS).
@@ -86,17 +114,24 @@ class CTISService:
         Returns:
             List of SearchResult instances. Empty if no matches.
         """
+        # CTIS pagination is 1-based (page=0 returns empty results)
         payload: dict[str, Any] = {
-            "pagination": {"page": page, "size": page_size},
-            "sort": {"property": "startDateEU", "direction": "DESC"},
+            "pagination": {"page": page + 1, "size": page_size},
+            "sort": {"property": "decisionDate", "direction": "DESC"},
             "searchCriteria": {},
         }
         if condition:
-            payload["searchCriteria"]["containAll"] = condition
+            area_codes = _CONDITION_AREA_CODES.get(condition.lower())
+            if area_codes:
+                payload["searchCriteria"]["therapeuticAreaCode"] = area_codes
+            else:
+                payload["searchCriteria"]["containAll"] = condition
         if phase:
-            payload["searchCriteria"]["phase"] = phase
+            phase_codes = _PHASE_CODES.get(phase)
+            if phase_codes:
+                payload["searchCriteria"]["trialPhaseCode"] = phase_codes
         if status:
-            payload["searchCriteria"]["trialPhaseCode"] = status
+            payload["searchCriteria"]["ctStatus"] = status
 
         self._audit.log(
             action=AuditAction.SEARCH,
@@ -110,18 +145,18 @@ class CTISService:
         except Exception as exc:
             return []
 
-        trials = data.get("data", data.get("results", []))
+        trials = data.get("data", [])
         results: list[SearchResult] = []
         for t in trials:
             results.append(
                 SearchResult(
-                    registry_id=str(t.get("ctNumber", t.get("eudraCTNumber", ""))),
-                    title=str(t.get("trialTitle", t.get("title", ""))),
+                    registry_id=str(t.get("ctNumber", "")),
+                    title=str(t.get("ctTitle", t.get("shortTitle", ""))),
                     source="EU-CTR",
-                    sponsor=str(t.get("sponsorName", "")),
+                    sponsor=str(t.get("sponsor", "")),
                     phase=str(t.get("trialPhase", "")),
-                    condition=str(t.get("medicalCondition", condition)),
-                    status=str(t.get("trialStatus", t.get("status", ""))),
+                    condition=str(t.get("conditions", condition)),
+                    status=str(t.get("ctStatus", "")),
                     url=f"{_CTIS_BASE}/retrieve/{t.get('ctNumber', '')}",
                 )
             )
