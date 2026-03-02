@@ -133,6 +133,10 @@ def _build_compliance_summary(
     registry_id: str,
     sdtm_run_id: str,
     timestamp: str,
+    format_verdict: str = "NON_ICH",
+    format_confidence: float = 0.0,
+    sections_detected: int = 0,
+    missing_required_sections: Optional[list[str]] = None,
 ) -> bytes:
     """Build human-readable compliance summary with remediation guidance."""
     all_issues = []
@@ -181,6 +185,22 @@ def _build_compliance_summary(
             ),
         })
 
+    _verdict_recommendation = {
+        "ICH_E6R3": (
+            "Protocol conforms to ICH E6(R3) Appendix B structure. "
+            "SDTM generation proceeded normally."
+        ),
+        "PARTIAL_ICH": (
+            "Protocol partially conforms to ICH E6(R3) Appendix B. "
+            "Some required sections may be missing or low-confidence. "
+            "Review SDTM output for completeness."
+        ),
+        "NON_ICH": (
+            "Protocol does not appear to follow ICH E6(R3) Appendix B "
+            "structure. SDTM output may be incomplete. Manual review required."
+        ),
+    }
+
     payload = {
         "report_type": "compliance_summary",
         "registry_id": registry_id,
@@ -194,6 +214,19 @@ def _build_compliance_summary(
             1 for i in all_issues if i.get("severity") == "Warning"
         ),
         "issues": all_issues,
+        "format_assessment": {
+            "verdict": format_verdict,
+            "format_confidence": format_confidence,
+            "sections_detected": sections_detected,
+            "missing_required_sections": (
+                missing_required_sections
+                if missing_required_sections is not None
+                else []
+            ),
+            "recommendation": _verdict_recommendation.get(
+                format_verdict, _verdict_recommendation["NON_ICH"]
+            ),
+        },
     }
     return json.dumps(payload, indent=2).encode("utf-8")
 
@@ -213,6 +246,10 @@ class ValidationService:
         self,
         sdtm_result: "SdtmGenerationResult",
         validation_run_id: Optional[str] = None,
+        format_verdict: str = "NON_ICH",
+        format_confidence: float = 0.0,
+        sections_detected: int = 0,
+        missing_required_sections: Optional[list[str]] = None,
     ) -> ValidationResult:
         """Run the full validation pipeline for one SDTM generation run.
 
@@ -222,11 +259,18 @@ class ValidationService:
                 registry_id, and source_sha256.
             validation_run_id: Optional UUID4 for this validation run.
                 Defaults to a fresh UUID4.
+            format_verdict: ICH format verdict from IchParser
+                (``"ICH_E6R3"``, ``"PARTIAL_ICH"``, or ``"NON_ICH"``).
+            format_confidence: Format confidence score in [0.0, 1.0].
+            sections_detected: Number of ICH sections classified.
+            missing_required_sections: Required ICH section codes absent
+                from the classified sections.
 
         Returns:
             ValidationResult with all findings and report artifact metadata.
         [PTCV-23 Scenario: Run Pinnacle 21 and archive report with lineage]
         [PTCV-23 Scenario: Report linked to specific SDTM version]
+        [PTCV-30 Scenario: Format verdict surfaced in compliance report]
         """
         val_run_id = validation_run_id or str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -319,6 +363,10 @@ class ValidationService:
         summary_bytes = _build_compliance_summary(
             p21_issues, tcg_missing, define_issues,
             registry_id, sdtm_run_id, timestamp,
+            format_verdict=format_verdict,
+            format_confidence=format_confidence,
+            sections_detected=sections_detected,
+            missing_required_sections=missing_required_sections,
         )
 
         # ------------------------------------------------------------------

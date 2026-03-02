@@ -35,6 +35,43 @@ from .review_queue import ReviewQueue
 _DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
 _USER = "ptcv-ich-parser"
 
+# ICH E6(R3) Appendix B sections required for a complete protocol
+_REQUIRED_SECTIONS: frozenset[str] = frozenset({"B.3", "B.4", "B.5"})
+
+
+def _compute_format_verdict(
+    sections: list[IchSection],
+) -> tuple[str, float, list[str]]:
+    """Compute protocol format verdict from classified ICH sections.
+
+    Args:
+        sections: IchSection list produced by the classifier.
+
+    Returns:
+        Tuple of (format_verdict, format_confidence, missing_required_sections).
+        format_verdict is one of "ICH_E6R3", "PARTIAL_ICH", or "NON_ICH".
+        format_confidence is a float in [0.0, 1.0].
+        missing_required_sections lists required codes absent from sections.
+    [PTCV-30 Scenario: Format verdict computed from section distribution]
+    """
+    from statistics import mean
+
+    found_codes = {s.section_code for s in sections}
+    avg_conf = mean(s.confidence_score for s in sections) if sections else 0.0
+    missing = sorted(_REQUIRED_SECTIONS - found_codes)
+
+    n_required_found = len(found_codes & _REQUIRED_SECTIONS)
+    format_confidence = avg_conf * (n_required_found / len(_REQUIRED_SECTIONS))
+
+    if format_confidence >= 0.60 and _REQUIRED_SECTIONS <= found_codes:
+        verdict = "ICH_E6R3"
+    elif format_confidence >= 0.30 or len(sections) >= 3:
+        verdict = "PARTIAL_ICH"
+    else:
+        verdict = "NON_ICH"
+
+    return verdict, round(format_confidence, 4), missing
+
 
 class ParseResult:
     """Result returned by IchParser.parse().
@@ -58,6 +95,9 @@ class ParseResult:
         section_count: int,
         review_count: int,
         source_sha256: str,
+        format_verdict: str = "NON_ICH",
+        format_confidence: float = 0.0,
+        missing_required_sections: Optional[list[str]] = None,
     ) -> None:
         self.run_id = run_id
         self.registry_id = registry_id
@@ -66,13 +106,19 @@ class ParseResult:
         self.section_count = section_count
         self.review_count = review_count
         self.source_sha256 = source_sha256
+        self.format_verdict = format_verdict
+        self.format_confidence = format_confidence
+        self.missing_required_sections: list[str] = (
+            missing_required_sections if missing_required_sections is not None else []
+        )
 
     def __repr__(self) -> str:
         return (
             f"ParseResult(run_id={self.run_id!r}, "
             f"registry_id={self.registry_id!r}, "
             f"sections={self.section_count}, "
-            f"review={self.review_count})"
+            f"review={self.review_count}, "
+            f"format_verdict={self.format_verdict!r})"
         )
 
 
@@ -168,9 +214,15 @@ class IchParser:
                 text, registry_id, run_id, source_run_id, source_sha256
             )
 
-        # 2. Stamp timestamp on every section (ALCOA+ Contemporaneous)
+        # 2a. Compute format verdict from section distribution (PTCV-30)
+        format_verdict, format_confidence, missing_required = (
+            _compute_format_verdict(sections)
+        )
+
+        # 2b. Stamp timestamp on every section (ALCOA+ Contemporaneous)
         for sec in sections:
             sec.extraction_timestamp_utc = timestamp
+
 
         # 3. Serialise to Parquet
         parquet_bytes = sections_to_parquet(sections)
@@ -213,6 +265,9 @@ class IchParser:
             section_count=len(sections),
             review_count=review_count,
             source_sha256=source_sha256,
+            format_verdict=format_verdict,
+            format_confidence=format_confidence,
+            missing_required_sections=missing_required,
         )
 
     # ------------------------------------------------------------------

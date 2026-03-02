@@ -250,6 +250,9 @@ class PipelineOrchestrator:
                 "artifact_sha256": parse_result.artifact_sha256,
                 "section_count": parse_result.section_count,
                 "review_count": parse_result.review_count,
+                "format_verdict": parse_result.format_verdict,
+                "format_confidence": parse_result.format_confidence,
+                "missing_required_sections": parse_result.missing_required_sections,
             },
             artifact_sha256=parse_result.artifact_sha256,
             source_sha256=extraction_result.text_artifact_sha256,
@@ -355,6 +358,10 @@ class PipelineOrchestrator:
         val_svc = ValidationService(gateway=self._gateway)
         validation_result: ValidationResult = val_svc.validate(
             sdtm_result=sdtm_result,
+            format_verdict=parse_result.format_verdict,
+            format_confidence=parse_result.format_confidence,
+            sections_detected=parse_result.section_count,
+            missing_required_sections=parse_result.missing_required_sections,
         )
 
         val_primary_sha256 = validation_result.artifact_sha256s.get(
