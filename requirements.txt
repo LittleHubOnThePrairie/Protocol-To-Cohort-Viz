@@ -1,0 +1,19 @@
+# PTCV runtime dependencies
+# Install with: pip install -r requirements.txt
+
+# Storage (PTCV-29)
+minio>=7.2.0
+pyarrow>=14.0.0
+duckdb>=0.10.0
+
+# PDF extraction (PTCV-19)
+pdfplumber>=0.11.0
+camelot-py[base]>=0.11.0
+tabula-py>=2.9.0
+pandas>=2.0.0
+
+# XML parsing (PTCV-19 CTR-XML)
+lxml>=5.0.0
+
+# HTTP (PTCV-18 protocol download)
+requests>=2.31.0

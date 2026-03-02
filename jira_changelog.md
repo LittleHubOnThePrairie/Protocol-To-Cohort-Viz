@@ -41,3 +41,37 @@ Harden local PDF datastore with StorageGateway and MinIO WORM
 Branch: `master` | Commits: fc72881, a7eb13d, b32c138
 
 ---
+
+## [2026-03-02T21:45:00Z] PTCV-19: Implement Protocol Format Detection and Text/Table Extraction
+
+**Status Change:** To Do -> In Progress
+**Actor:** Claude Code
+
+**Summary:**
+Implement protocol extraction layer: format detection (PDF/CTR-XML/Word), PDF cascade
+(pdfplumber → Camelot → tabula), CTR-XML native parser, multi-page SoA table
+reconstruction, Parquet output via StorageGateway, append-only lineage records.
+
+**Files Modified:**
+- src/ptcv/extraction/__init__.py
+- src/ptcv/extraction/models.py
+- src/ptcv/extraction/format_detector.py
+- src/ptcv/extraction/pdf_extractor.py
+- src/ptcv/extraction/ctr_xml_extractor.py
+- src/ptcv/extraction/parquet_writer.py
+- src/ptcv/extraction/extraction_service.py
+- tests/extraction/__init__.py
+- tests/extraction/conftest.py
+- tests/extraction/test_format_detector.py
+- tests/extraction/test_pdf_extractor.py
+- tests/extraction/test_ctr_xml_extractor.py
+- tests/extraction/test_parquet_writer.py
+- tests/extraction/test_extraction_service.py
+- requirements.txt
+
+**Test Coverage:**
+273 passed (70 new extraction tests covering all 5 GHERKIN scenarios)
+mypy: no issues found in 7 source files
+Branch: `master`
+
+---
