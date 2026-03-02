@@ -75,6 +75,7 @@ class FilesystemAdapter(StorageGateway):
         source_hash: str,
         user: str,
         immutable: bool = False,
+        stage: str = "download",
         registry_id: Optional[str] = None,
         amendment_number: Optional[str] = None,
         source: Optional[str] = None,
@@ -90,6 +91,7 @@ class FilesystemAdapter(StorageGateway):
             source_hash: SHA-256 of the upstream artifact (or "").
             user: Actor identifier.
             immutable: Raise FileExistsError if file already exists.
+            stage: Pipeline stage name for the lineage record.
             registry_id: Optional trial identifier for lineage.
             amendment_number: Optional amendment number for lineage.
             source: Optional registry source name for lineage.
@@ -127,7 +129,7 @@ class FilesystemAdapter(StorageGateway):
         lineage = LineageRecord(
             id=0,
             run_id=run_id,
-            stage="download",
+            stage=stage,
             artifact_key=key,
             version_id="",
             sha256=sha256,

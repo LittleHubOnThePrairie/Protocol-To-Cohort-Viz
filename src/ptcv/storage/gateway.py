@@ -45,6 +45,7 @@ class StorageGateway(ABC):
         source_hash: str,
         user: str,
         immutable: bool = False,
+        stage: str = "download",
         registry_id: Optional[str] = None,
         amendment_number: Optional[str] = None,
         source: Optional[str] = None,
@@ -61,6 +62,9 @@ class StorageGateway(ABC):
             user: Actor identifier for audit trail.
             immutable: If True, raise FileExistsError when the key
                 already exists (ALCOA+ Original principle).
+            stage: Pipeline stage name for the lineage record (e.g.
+                "download", "extraction", "ich_parse", "usdm_map",
+                "sdtm_gen", "validation"). Default "download".
             registry_id: Trial registry identifier (lineage metadata).
             amendment_number: Protocol amendment number (lineage metadata).
             source: Registry source name (lineage metadata).

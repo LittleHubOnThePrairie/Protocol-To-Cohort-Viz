@@ -43,13 +43,13 @@ except ImportError:
     Minio = None  # type: ignore[misc,assignment]
     COMPLIANCE = "COMPLIANCE"  # type: ignore[assignment]
 
-    class ObjectLockConfig:  # type: ignore[misc]
+    class ObjectLockConfig:  # type: ignore[misc,no-redef]
         """Stub when minio is not installed."""
 
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
-    class Retention:  # type: ignore[misc]
+    class Retention:  # type: ignore[misc,no-redef]
         """Stub when minio is not installed."""
 
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -125,6 +125,7 @@ class LocalStorageAdapter(StorageGateway):
         source_hash: str,
         user: str,
         immutable: bool = False,
+        stage: str = "download",
         registry_id: Optional[str] = None,
         amendment_number: Optional[str] = None,
         source: Optional[str] = None,
@@ -143,6 +144,7 @@ class LocalStorageAdapter(StorageGateway):
             source_hash: SHA-256 of the upstream artifact (or "").
             user: Actor identifier.
             immutable: Apply COMPLIANCE retention lock if True.
+            stage: Pipeline stage name for the lineage record.
             registry_id: Optional trial identifier for lineage.
             amendment_number: Optional amendment number for lineage.
             source: Optional registry source name for lineage.
@@ -204,7 +206,7 @@ class LocalStorageAdapter(StorageGateway):
         lineage = LineageRecord(
             id=0,
             run_id=run_id,
-            stage="download",
+            stage=stage,
             artifact_key=key,
             version_id=version_id,
             sha256=sha256,
