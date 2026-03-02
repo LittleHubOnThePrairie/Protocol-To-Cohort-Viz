@@ -75,3 +75,19 @@ mypy: no issues found in 7 source files
 Branch: `master`
 
 ---
+
+## 2026-03-02T00:00:00Z — PTCV-19 Done
+
+- **Issue:** PTCV-19: Protocol Format Detection and Text/Table Extraction
+- **Status:** In Progress → Done
+- **Actor:** Claude Code
+- **Labels:** PRD-22
+- **Files modified:** 16 (src/ptcv/extraction/ × 7, tests/extraction/ × 7, requirements.txt, jira_changelog.md)
+- **Summary:** 273/273 tests passing, mypy clean. Transition allowed with E2E advisory warning.
+
+## 2026-03-02T22:02:00Z — PTCV-22 In Progress
+
+- **Issue:** PTCV-22: Implement CDISC SDTM Trial Design Domain Generator
+- **Status:** To Do → In Progress
+- **Actor:** Claude Code
+- **Summary:** Implementing TS/TA/TE/TV/TI XPT + Define-XML v2.1 via StorageGateway WORM
