@@ -337,3 +337,282 @@ class TestClinicalTrialsServiceDownload:
         )
         assert "download_timestamp" in meta
         assert meta["download_timestamp"]  # not empty
+
+    def test_download_fallback_sets_actual_format_json(self, ct_service):
+        """No largeDocumentModule → actual_format is 'JSON'."""
+        study_data = self._study_response("NCT55555555")
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            result = ct_service.download(
+                nct_id="NCT55555555", version="1.0", fmt="PDF", who="t", why="t"
+            )
+
+        assert result.success is True
+        assert result.actual_format == "JSON"
+
+
+class TestClinicalTrialsServiceLargeDocModule:
+    """OQ: PTCV-28 largeDocumentModule pathway for protocol PDFs and SAPs."""
+
+    def _study_with_large_docs(
+        self, nct_id: str, large_docs: list[dict]
+    ) -> dict:
+        """Build a study response that includes largeDocumentModule."""
+        return {
+            "protocolSection": {
+                "identificationModule": {
+                    "nctId": nct_id,
+                    "briefTitle": "Large Doc Study",
+                    "officialTitle": "Large Doc Study Official",
+                },
+                "statusModule": {"overallStatus": "COMPLETED"},
+                "designModule": {"phases": ["PHASE3"]},
+                "sponsorCollaboratorsModule": {
+                    "leadSponsor": {"name": "Sponsor Co"}
+                },
+                "conditionsModule": {"conditions": ["Oncology"]},
+            },
+            "documentSection": {
+                "largeDocumentModule": {
+                    "largeDocs": large_docs,
+                }
+            },
+        }
+
+    def test_protocol_pdf_downloaded_when_prot_present(self, ct_service, tmp_path):
+        """PTCV-28 Scenario: protocol PDF fetched from ProvidedDocs URL."""
+        fake_pdf = b"%PDF-1.7 fake protocol content"
+        study = self._study_with_large_docs(
+            "NCT10000001",
+            [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", return_value=fake_pdf),
+        ):
+            result = ct_service.download(
+                nct_id="NCT10000001", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        assert result.actual_format == "PDF"
+        assert Path(result.file_path).read_bytes() == fake_pdf
+
+    def test_provided_docs_url_built_correctly(self, ct_service, tmp_path):
+        """ProvidedDocs URL uses last-two chars of NCT ID as path segment."""
+        captured_urls: list[str] = []
+        fake_pdf = b"%PDF-1.4 content"
+        study = self._study_with_large_docs(
+            "NCT12345678",
+            [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+        )
+
+        def capture_get_bytes(url: str) -> bytes:
+            captured_urls.append(url)
+            return fake_pdf
+
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", side_effect=capture_get_bytes),
+        ):
+            ct_service.download(
+                nct_id="NCT12345678", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert len(captured_urls) == 1
+        assert captured_urls[0] == (
+            "https://clinicaltrials.gov/ProvidedDocs/78/NCT12345678/Prot_000.pdf"
+        )
+
+    def test_prot_sap_satisfies_pdf_request(self, ct_service, tmp_path):
+        """Prot_SAP typeAbbrev is accepted when no Prot entry is present."""
+        fake_pdf = b"%PDF-1.7 combined prot_sap"
+        study = self._study_with_large_docs(
+            "NCT10000002",
+            [{"typeAbbrev": "Prot_SAP", "filename": "Prot_SAP_000.pdf"}],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", return_value=fake_pdf),
+        ):
+            result = ct_service.download(
+                nct_id="NCT10000002", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        assert result.actual_format == "PDF"
+
+    def test_prot_takes_priority_over_prot_sap(self, ct_service, tmp_path):
+        """Dedicated Prot entry is preferred over combined Prot_SAP."""
+        captured_urls: list[str] = []
+
+        def capture_get_bytes(url: str) -> bytes:
+            captured_urls.append(url)
+            return b"%PDF-1.7"
+
+        study = self._study_with_large_docs(
+            "NCT10000003",
+            [
+                {"typeAbbrev": "Prot_SAP", "filename": "Prot_SAP_000.pdf"},
+                {"typeAbbrev": "Prot", "filename": "Prot_000.pdf"},
+            ],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", side_effect=capture_get_bytes),
+        ):
+            ct_service.download(
+                nct_id="NCT10000003", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert len(captured_urls) == 1
+        assert "Prot_000.pdf" in captured_urls[0]
+
+    def test_sap_downloaded_when_fmt_sap(self, ct_service, tmp_path):
+        """PTCV-28 Scenario: SAP PDF downloaded when fmt='SAP'."""
+        fake_sap = b"%PDF-1.7 statistical analysis plan"
+        study = self._study_with_large_docs(
+            "NCT10000004",
+            [
+                {"typeAbbrev": "SAP", "filename": "SAP_000.pdf"},
+                {"typeAbbrev": "Prot", "filename": "Prot_000.pdf"},
+            ],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", return_value=fake_sap),
+        ):
+            result = ct_service.download(
+                nct_id="NCT10000004", version="1.0", fmt="SAP",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        assert result.actual_format == "SAP"
+        assert Path(result.file_path).read_bytes() == fake_sap
+
+    def test_sap_takes_priority_over_prot_sap(self, ct_service, tmp_path):
+        """Dedicated SAP entry is preferred over combined Prot_SAP for SAP request."""
+        captured_urls: list[str] = []
+
+        def capture_get_bytes(url: str) -> bytes:
+            captured_urls.append(url)
+            return b"%PDF-1.7"
+
+        study = self._study_with_large_docs(
+            "NCT10000005",
+            [
+                {"typeAbbrev": "Prot_SAP", "filename": "Prot_SAP_000.pdf"},
+                {"typeAbbrev": "SAP", "filename": "SAP_000.pdf"},
+            ],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", side_effect=capture_get_bytes),
+        ):
+            ct_service.download(
+                nct_id="NCT10000005", version="1.0", fmt="SAP",
+                who="tester", why="test",
+            )
+
+        assert len(captured_urls) == 1
+        assert "SAP_000.pdf" in captured_urls[0]
+
+    def test_fallback_to_json_when_no_large_docs(self, ct_service, tmp_path):
+        """PTCV-28 Scenario: registration JSON stored when no largeDocumentModule."""
+        study = {
+            "protocolSection": {
+                "identificationModule": {
+                    "nctId": "NCT10000006",
+                    "briefTitle": "No Docs Study",
+                    "officialTitle": "No Docs Study",
+                },
+                "statusModule": {"overallStatus": "COMPLETED"},
+                "designModule": {"phases": ["PHASE2"]},
+                "sponsorCollaboratorsModule": {
+                    "leadSponsor": {"name": "Sponsor"}
+                },
+                "conditionsModule": {"conditions": ["Diabetes"]},
+            }
+        }
+        with patch.object(ct_service, "_get_json", return_value=study):
+            result = ct_service.download(
+                nct_id="NCT10000006", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        assert result.actual_format == "JSON"
+        # Stored content must be valid JSON registration record
+        stored = json.loads(Path(result.file_path).read_bytes())
+        assert (
+            stored["protocolSection"]["identificationModule"]["nctId"]
+            == "NCT10000006"
+        )
+
+    def test_fallback_to_json_when_pdf_fetch_fails(self, ct_service, tmp_path):
+        """PTCV-28: HTTP error on ProvidedDocs URL falls back to registration JSON."""
+        study = self._study_with_large_docs(
+            "NCT10000007",
+            [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(
+                ct_service,
+                "_get_bytes",
+                side_effect=Exception("connection refused"),
+            ),
+        ):
+            result = ct_service.download(
+                nct_id="NCT10000007", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        assert result.actual_format == "JSON"
+
+    def test_metadata_records_effective_format(self, ct_service, tmp_path):
+        """PTCV-28: metadata format field reflects actual stored format."""
+        fake_pdf = b"%PDF-1.7"
+        study = self._study_with_large_docs(
+            "NCT10000008",
+            [{"typeAbbrev": "Prot", "filename": "Prot_000.pdf"}],
+        )
+        with (
+            patch.object(ct_service, "_get_json", return_value=study),
+            patch.object(ct_service, "_get_bytes", return_value=fake_pdf),
+        ):
+            result = ct_service.download(
+                nct_id="NCT10000008", version="1.0", fmt="PDF",
+                who="tester", why="test",
+            )
+
+        assert result.success is True
+        meta = json.loads(
+            Path(result.metadata_path).read_text(encoding="utf-8")
+        )
+        assert meta["format"] == "PDF"
+
+    def test_find_large_doc_returns_none_for_empty(self, ct_service):
+        """_find_large_doc returns None when no largeDocs present."""
+        study = {"protocolSection": {}}
+        assert ct_service._find_large_doc(study, ("Prot",)) is None
+
+    def test_find_large_doc_returns_none_for_no_match(self, ct_service):
+        """_find_large_doc returns None when typeAbbrev does not match."""
+        study = self._study_with_large_docs(
+            "NCT99",
+            [{"typeAbbrev": "ICF", "filename": "ICF_000.pdf"}],
+        )
+        assert ct_service._find_large_doc(study, ("Prot", "Prot_SAP")) is None
+
+    def test_build_provided_docs_url(self, ct_service):
+        """_build_provided_docs_url produces correct URL from NCT ID and filename."""
+        url = ct_service._build_provided_docs_url("NCT12345678", "Prot_000.pdf")
+        assert url == (
+            "https://clinicaltrials.gov/ProvidedDocs/78/NCT12345678/Prot_000.pdf"
+        )

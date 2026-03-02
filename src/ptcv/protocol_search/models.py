@@ -92,6 +92,8 @@ class DownloadResult:
         file_path: Absolute path of the saved protocol file.
         metadata_path: Absolute path of the saved metadata JSON.
         file_hash_sha256: SHA-256 of the downloaded file.
+        actual_format: Effective format stored — "PDF", "SAP", or "JSON"
+            (JSON indicates registration fallback, not an ICH E6 document).
         error: Error message if success is False.
     """
 
@@ -100,4 +102,5 @@ class DownloadResult:
     file_path: str = ""
     metadata_path: str = ""
     file_hash_sha256: str = ""
+    actual_format: str = ""
     error: Optional[str] = None

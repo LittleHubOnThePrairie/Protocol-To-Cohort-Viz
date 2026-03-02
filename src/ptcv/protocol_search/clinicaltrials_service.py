@@ -3,6 +3,10 @@
 Implements PTCV-18 search via GET https://clinicaltrials.gov/api/v2/studies
 with automatic pagination and protocol download to the PTCV filestore.
 
+PTCV-28: download() now checks largeDocumentModule first to retrieve actual
+protocol PDFs and Statistical Analysis Plans uploaded by sponsors.  Falls
+back to storing the registration JSON when no document is available.
+
 ClinicalTrials.gov v2 API requires no authentication. Max page size
 is 1,000 records; this service defaults to 100 per page and follows
 the nextPageToken cursor for automatic pagination.
@@ -28,8 +32,18 @@ from .models import DownloadResult, ProtocolMetadata, SearchResult
 
 
 _CT_GOV_BASE = "https://clinicaltrials.gov/api/v2"
+_CT_GOV_DOCS_BASE = "https://clinicaltrials.gov/ProvidedDocs"
 _DEFAULT_PAGE_SIZE = 100
 _MAX_PAGE_SIZE = 1000
+
+# Maps the caller's fmt string to the typeAbbrev values that satisfy it,
+# in priority order (most specific first).
+# Prot_SAP contains both protocol and SAP content; it satisfies either request
+# but is checked last so that a dedicated Prot or SAP entry takes precedence.
+_LARGE_DOC_ABBREVS: dict[str, tuple[str, ...]] = {
+    "PDF": ("Prot", "Prot_SAP"),
+    "SAP": ("SAP", "Prot_SAP"),
+}
 
 
 class ClinicalTrialsService:
@@ -38,6 +52,11 @@ class ClinicalTrialsService:
     Uses the /studies endpoint with query parameters for condition and
     phase filtering. Handles pagination automatically via nextPageToken.
     Downloads are stored in the PTCV filestore with audit trail entries.
+
+    For download(), the service checks largeDocumentModule first so that
+    actual sponsor-uploaded protocol PDFs are retrieved when available.
+    Registration JSON is stored as a fallback only.
+    [PTCV-28: largeDocumentModule pathway]
 
     Args:
         filestore: FilestoreManager instance. Uses default root if None.
@@ -130,7 +149,6 @@ class ClinicalTrialsService:
                 protocol = study.get("protocolSection", {})
                 id_module = protocol.get("identificationModule", {})
                 status_module = protocol.get("statusModule", {})
-                desc_module = protocol.get("descriptionModule", {})
                 design_module = protocol.get("designModule", {})
                 sponsor_module = protocol.get("sponsorCollaboratorsModule", {})
 
@@ -178,34 +196,41 @@ class ClinicalTrialsService:
     ) -> DownloadResult:
         """Download a ClinicalTrials.gov protocol to the PTCV filestore.
 
-        Fetches the protocol document for the given NCT ID, computes
-        SHA-256 at the download boundary, stores the file and metadata
-        JSON, and writes an audit log entry.
-        [PTCV-18 Scenario: Download ClinicalTrials.gov protocol to PTCV filestore]
+        Checks largeDocumentModule first: if the sponsor has uploaded a
+        document matching the requested format (Prot/Prot_SAP for PDF,
+        SAP/Prot_SAP for SAP), the binary PDF is downloaded from
+        https://clinicaltrials.gov/ProvidedDocs/{nct[-2:]}/{nct}/{filename}.
 
-        Note: ClinicalTrials.gov v2 API provides structured JSON study
-        data rather than PDF downloads. The retrieved study JSON is
-        stored as the canonical "protocol document" in the requested
-        format. For PDF, the ICH-standardised study design is exported.
+        Falls back to storing the registration JSON when no matching
+        large document is found or the PDF fetch fails.
+
+        SHA-256 is computed at the download boundary in all cases.
+        Every outcome is written to the audit log (21 CFR 11.10(e)).
+
+        [PTCV-18 Scenario: Download ClinicalTrials.gov protocol to PTCV filestore]
+        [PTCV-28 Scenario: Download protocol PDF when largeDocumentModule is available]
+        [PTCV-28 Scenario: Fall back to registration JSON when no protocol document]
+        [PTCV-28 Scenario: Download Statistical Analysis Plan when available]
 
         Args:
             nct_id: NCT identifier (e.g., "NCT12345678").
             version: Protocol version string (default "1.0").
-            fmt: Storage format — "PDF", "CTR-XML", or "DOCX".
+            fmt: Requested format — "PDF" (protocol), "SAP" (statistical
+                 analysis plan), or "CTR-XML". Falls back to JSON when
+                 no matching largeDoc is available.
             who: User/service identifier for audit trail.
             why: Reason for download (mandatory audit field).
 
         Returns:
-            DownloadResult with success status, paths, and hash.
+            DownloadResult with success status, paths, hash, and
+            actual_format ("PDF", "SAP", or "JSON" for fallback).
         """
+        # Fetch the full study record (includes documentSection)
         url = f"{_CT_GOV_BASE}/studies/{urllib.parse.quote(nct_id, safe='')}"
-        params = {"format": "json"}
+        params: dict[str, str] = {"format": "json"}
 
         try:
             data = self._get_json(url, params)
-            content = json.dumps(data, indent=2, ensure_ascii=False).encode(
-                "utf-8"
-            )
         except urllib.error.HTTPError as exc:
             error_msg = f"HTTP {exc.code} retrieving {nct_id}: {exc.reason}"
             self._audit.log(
@@ -231,12 +256,16 @@ class ClinicalTrialsService:
                 success=False, registry_id=nct_id, error=error_msg
             )
 
+        # Attempt to download the actual document from largeDocumentModule
+        content, effective_fmt = self._fetch_large_doc(data, nct_id, fmt)
+
+        # Store file and write audit entry
         try:
             file_path, file_hash = self._filestore.save_protocol(
                 content=content,
                 registry_id=nct_id,
                 amendment_number=version,
-                fmt=fmt,
+                fmt=effective_fmt,
                 source="ClinicalTrials.gov",
             )
         except FileExistsError as exc:
@@ -244,7 +273,7 @@ class ClinicalTrialsService:
                 success=False, registry_id=nct_id, error=str(exc)
             )
 
-        # Extract title from response for metadata
+        # Build metadata from the study record
         protocol = data.get("protocolSection", {})
         id_module = protocol.get("identificationModule", {})
         sponsor_module = protocol.get("sponsorCollaboratorsModule", {})
@@ -266,7 +295,7 @@ class ClinicalTrialsService:
                 conditions_module.get("conditions", [])
             ),
             file_path=str(file_path),
-            format=fmt,
+            format=effective_fmt,
             file_hash_sha256=file_hash,
             legacy_source=False,
         )
@@ -280,7 +309,7 @@ class ClinicalTrialsService:
             after={
                 "file_path": str(file_path),
                 "file_hash_sha256": file_hash,
-                "format": fmt,
+                "format": effective_fmt,
             },
         )
 
@@ -290,7 +319,95 @@ class ClinicalTrialsService:
             file_path=str(file_path),
             metadata_path=str(metadata_path),
             file_hash_sha256=file_hash,
+            actual_format=effective_fmt,
         )
+
+    # ------------------------------------------------------------------
+    # Large document helpers (PTCV-28)
+    # ------------------------------------------------------------------
+
+    def _fetch_large_doc(
+        self, study_data: dict, nct_id: str, fmt: str
+    ) -> tuple[bytes, str]:
+        """Fetch the best available document for the given format.
+
+        Checks largeDocumentModule for a matching typeAbbrev entry and
+        downloads the binary PDF from the ProvidedDocs URL.  Falls back
+        to registration JSON if no entry is found or the fetch fails.
+
+        Args:
+            study_data: Full study record from the v2 API.
+            nct_id: NCT identifier (used to build the ProvidedDocs URL).
+            fmt: Requested format ("PDF" or "SAP").
+
+        Returns:
+            Tuple of (content_bytes, effective_format_string).
+        """
+        abbrevs = _LARGE_DOC_ABBREVS.get(fmt, ())
+        large_doc = self._find_large_doc(study_data, abbrevs)
+
+        if large_doc is not None:
+            filename = large_doc.get("filename", "")
+            pdf_url = self._build_provided_docs_url(nct_id, filename)
+            try:
+                content = self._get_bytes(pdf_url)
+                return content, fmt
+            except Exception:
+                pass  # fall through to registration JSON fallback
+
+        registration_json = json.dumps(
+            study_data, indent=2, ensure_ascii=False
+        ).encode("utf-8")
+        return registration_json, "JSON"
+
+    def _find_large_doc(
+        self, study_data: dict, abbrevs: tuple[str, ...]
+    ) -> Optional[dict]:
+        """Return the first largeDocs entry matching any of the given typeAbbrevs.
+
+        Priority follows the order of abbrevs — more specific entries
+        (e.g., "Prot") are checked before combined entries ("Prot_SAP").
+
+        Args:
+            study_data: Full study record from the v2 API.
+            abbrevs: typeAbbrev values to search for, in priority order.
+
+        Returns:
+            Matching largeDocs dict, or None if not found.
+        """
+        large_docs: list[dict] = (
+            study_data
+            .get("documentSection", {})
+            .get("largeDocumentModule", {})
+            .get("largeDocs", [])
+        )
+        for abbrev in abbrevs:
+            for doc in large_docs:
+                if doc.get("typeAbbrev") == abbrev:
+                    return doc
+        return None
+
+    def _build_provided_docs_url(self, nct_id: str, filename: str) -> str:
+        """Build the ProvidedDocs URL for a large document.
+
+        URL pattern: https://clinicaltrials.gov/ProvidedDocs/{nct[-2:]}/{nct}/{file}
+
+        Args:
+            nct_id: NCT identifier (e.g., "NCT12345678").
+            filename: Filename from the largeDocs entry (e.g., "Prot_000.pdf").
+
+        Returns:
+            Full URL string.
+        """
+        return (
+            f"{_CT_GOV_DOCS_BASE}/{nct_id[-2:]}/"
+            f"{urllib.parse.quote(nct_id, safe='')}/"
+            f"{urllib.parse.quote(filename, safe='')}"
+        )
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+    # ------------------------------------------------------------------
 
     def _get_json(
         self, url: str, params: dict[str, str]
@@ -303,3 +420,11 @@ class ClinicalTrialsService:
         )
         with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))  # type: ignore[no-any-return]
+
+    def _get_bytes(self, url: str) -> bytes:
+        """GET a URL and return raw bytes."""
+        req = urllib.request.Request(
+            url, headers={"Accept": "application/pdf, */*"}
+        )
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            return resp.read()  # type: ignore[no-any-return]

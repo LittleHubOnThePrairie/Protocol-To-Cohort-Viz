@@ -191,7 +191,8 @@ def _download_ct_gov_bucket(
         )
         if dl.success:
             result.downloaded += 1
-            print(f"  ✓ CT.gov {trial.registry_id}")
+            fmt_label = dl.actual_format or "PDF"
+            print(f"  ✓ CT.gov {trial.registry_id} [{fmt_label}]")
         elif "already stored" in (dl.error or "").lower():
             result.skipped += 1
             print(f"  ~ CT.gov {trial.registry_id} (already stored)")
