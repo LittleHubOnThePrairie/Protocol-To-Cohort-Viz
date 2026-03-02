@@ -1,0 +1,339 @@
+"""Tests for PTCV-18 ClinicalTrials.gov Protocol Search and Download Service.
+
+Qualification phase: OQ (operational qualification)
+Regulatory requirement: ALCOA+ Audit trail, ALCOA+ Original (no overwrite),
+  ALCOA+ Complete (metadata accompanies every file),
+  PTCV-18 Scenarios: Search ClinicalTrials.gov, Download ClinicalTrials.gov.
+Risk tier: MEDIUM
+"""
+
+import json
+import sys
+import urllib.error
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
+
+from ptcv.protocol_search.clinicaltrials_service import ClinicalTrialsService
+from ptcv.protocol_search.models import SearchResult
+
+
+class TestClinicalTrialsServiceInit:
+    """IQ: Service initialisation wires defaults."""
+
+    def test_default_dependencies_created(self):
+        """Service creates internal filestore and audit logger when none given."""
+        svc = ClinicalTrialsService()
+        assert svc._filestore is not None
+        assert svc._audit is not None
+        assert svc._timeout == 30
+
+    def test_custom_injected_dependencies_stored(self, ct_service):
+        """Injected dependencies are stored on the service."""
+        assert ct_service._filestore is not None
+        assert ct_service._audit is not None
+
+
+class TestClinicalTrialsServiceSearch:
+    """OQ: PTCV-18 Scenario: Search ClinicalTrials.gov protocols."""
+
+    def _study_stub(self, nct_id: str, title: str = "Test Study") -> dict:
+        return {
+            "protocolSection": {
+                "identificationModule": {
+                    "nctId": nct_id,
+                    "briefTitle": title,
+                    "officialTitle": title,
+                },
+                "statusModule": {"overallStatus": "RECRUITING"},
+                "descriptionModule": {},
+                "designModule": {"phases": ["PHASE2"]},
+                "sponsorCollaboratorsModule": {
+                    "leadSponsor": {"name": "Test Sponsor"}
+                },
+                "conditionsModule": {"conditions": ["Oncology"]},
+            }
+        }
+
+    def test_search_returns_search_results(self, ct_service):
+        """PTCV-18 Scenario: Search CT.gov returns SearchResult list."""
+        payload = {
+            "studies": [self._study_stub("NCT12345678", "Oncology Trial")]
+        }
+        with patch.object(ct_service, "_get_json", return_value=payload):
+            results = ct_service.search(condition="oncology")
+
+        assert len(results) == 1
+        assert isinstance(results[0], SearchResult)
+        assert results[0].registry_id == "NCT12345678"
+        assert results[0].title == "Oncology Trial"
+        assert results[0].source == "ClinicalTrials.gov"
+        assert results[0].sponsor == "Test Sponsor"
+        assert results[0].status == "RECRUITING"
+
+    def test_search_pagination_follows_next_token(self, ct_service):
+        """PTCV-18: Search follows nextPageToken until no more pages."""
+        page1 = {
+            "studies": [self._study_stub("NCT11111111")],
+            "nextPageToken": "token_page2",
+        }
+        page2 = {
+            "studies": [self._study_stub("NCT22222222")],
+        }
+
+        def side_effect(url, params):
+            if params.get("pageToken") == "token_page2":
+                return page2
+            return page1
+
+        with patch.object(ct_service, "_get_json", side_effect=side_effect):
+            results = ct_service.search(condition="oncology")
+
+        assert len(results) == 2
+        ids = {r.registry_id for r in results}
+        assert "NCT11111111" in ids
+        assert "NCT22222222" in ids
+
+    def test_search_respects_max_results(self, ct_service):
+        """max_results stops pagination after the requested count."""
+        page1 = {
+            "studies": [
+                self._study_stub("NCT11111111"),
+                self._study_stub("NCT22222222"),
+                self._study_stub("NCT33333333"),
+            ],
+            "nextPageToken": "more",
+        }
+        with patch.object(ct_service, "_get_json", return_value=page1):
+            results = ct_service.search(condition="oncology", max_results=2)
+
+        assert len(results) == 2
+
+    def test_search_empty_studies(self, ct_service):
+        """Empty studies array returns empty list."""
+        with patch.object(ct_service, "_get_json", return_value={"studies": []}):
+            results = ct_service.search(condition="nothing")
+
+        assert results == []
+
+    def test_search_network_error_returns_empty(self, ct_service):
+        """Network exception in search is swallowed and returns empty list."""
+        with patch.object(
+            ct_service, "_get_json", side_effect=Exception("DNS failure")
+        ):
+            results = ct_service.search(condition="oncology")
+
+        assert results == []
+
+    def test_search_condition_filter_included_in_params(self, ct_service):
+        """Condition filter is passed as query.cond parameter."""
+        captured_params: list = []
+
+        def capture(url, params):
+            captured_params.append(params)
+            return {"studies": []}
+
+        with patch.object(ct_service, "_get_json", side_effect=capture):
+            ct_service.search(condition="diabetes", phase="PHASE3")
+
+        assert captured_params
+        params = captured_params[0]
+        assert params.get("query.cond") == "diabetes"
+        assert params.get("query.term") == "PHASE3"
+
+    def test_search_writes_audit_entry(self, ct_service, tmp_path):
+        """PTCV-18: Search action is written to audit log."""
+        with patch.object(ct_service, "_get_json", return_value={"studies": []}):
+            ct_service.search(condition="oncology", who="tester")
+
+        audit_file = tmp_path / "audit.jsonl"
+        assert audit_file.exists()
+        lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
+        entry = json.loads(lines[-1])
+        assert entry["action"] == "SEARCH"
+        assert entry["user_id"] == "tester"
+
+
+class TestClinicalTrialsServiceDownload:
+    """OQ: PTCV-18 Scenario: Download ClinicalTrials.gov protocol to PTCV filestore."""
+
+    def _study_response(self, nct_id: str) -> dict:
+        return {
+            "protocolSection": {
+                "identificationModule": {
+                    "nctId": nct_id,
+                    "briefTitle": "Study Title",
+                    "officialTitle": "Official Study Title",
+                },
+                "statusModule": {"overallStatus": "RECRUITING"},
+                "designModule": {"phases": ["PHASE2"]},
+                "sponsorCollaboratorsModule": {
+                    "leadSponsor": {"name": "BigPharma Inc"}
+                },
+                "conditionsModule": {"conditions": ["Diabetes"]},
+            }
+        }
+
+    def test_download_clinicaltrials_success(self, ct_service, tmp_path):
+        """PTCV-18 Scenario: CT.gov protocol saved to clinicaltrials/ subdirectory."""
+        study_data = self._study_response("NCT12345678")
+
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            result = ct_service.download(
+                nct_id="NCT12345678",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="protocol_ingestion",
+            )
+
+        assert result.success is True
+        assert result.registry_id == "NCT12345678"
+        assert result.file_hash_sha256 is not None
+        assert len(result.file_hash_sha256) == 64
+
+        # File must exist under clinicaltrials/ subdir
+        file_path = Path(result.file_path)
+        assert file_path.exists()
+        assert "clinicaltrials" in str(file_path)
+
+        # Stored content must be valid JSON
+        stored = json.loads(file_path.read_text(encoding="utf-8"))
+        assert stored["protocolSection"]["identificationModule"]["nctId"] == "NCT12345678"
+
+        # Metadata JSON must exist
+        metadata_path = Path(result.metadata_path)
+        assert metadata_path.exists()
+        meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert meta["registry_id"] == "NCT12345678"
+        assert meta["source"] == "ClinicalTrials.gov"
+
+    def test_download_writes_audit_entry(self, ct_service, tmp_path):
+        """PTCV-18: Download action is written to audit log."""
+        study_data = self._study_response("NCT00000001")
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            ct_service.download(
+                nct_id="NCT00000001",
+                version="1.0",
+                fmt="PDF",
+                who="auditor",
+                why="gcp_review",
+            )
+
+        audit_file = tmp_path / "audit.jsonl"
+        lines = audit_file.read_text(encoding="utf-8").strip().splitlines()
+        download_entries = [
+            json.loads(line)
+            for line in lines
+            if json.loads(line).get("action") == "DOWNLOAD"
+        ]
+        assert len(download_entries) >= 1
+        entry = download_entries[-1]
+        assert entry["user_id"] == "auditor"
+        assert entry["reason"] == "gcp_review"
+        assert "file_path" in entry.get("after", {})
+
+    def test_download_http_error_returns_failure(self, ct_service):
+        """HTTP error from CT.gov API returns DownloadResult with success=False."""
+        err = urllib.error.HTTPError(
+            url="http://x", code=404, msg="Not Found", hdrs=MagicMock(), fp=None
+        )
+        with patch.object(ct_service, "_get_json", side_effect=err):
+            result = ct_service.download(
+                nct_id="NCT99999999",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+
+        assert result.success is False
+        assert "404" in result.error
+
+    def test_download_generic_exception_returns_failure(self, ct_service):
+        """Non-HTTP exception returns DownloadResult with success=False."""
+        with patch.object(
+            ct_service, "_get_json", side_effect=Exception("SSL error")
+        ):
+            result = ct_service.download(
+                nct_id="NCT88888888",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+
+        assert result.success is False
+        assert "SSL error" in result.error
+
+    def test_download_no_overwrite_raises_file_exists(self, ct_service):
+        """ALCOA+ Original: downloading the same NCT ID twice returns failure."""
+        study_data = self._study_response("NCT12345678")
+
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            first = ct_service.download(
+                nct_id="NCT12345678",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+        assert first.success is True
+
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            second = ct_service.download(
+                nct_id="NCT12345678",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+
+        assert second.success is False
+        assert "already stored" in second.error.lower()
+
+    def test_download_sha256_stored_in_metadata(self, ct_service, tmp_path):
+        """ALCOA+ Consistent: SHA-256 in metadata matches file content hash."""
+        import hashlib
+
+        study_data = self._study_response("NCT77777777")
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            result = ct_service.download(
+                nct_id="NCT77777777",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+
+        assert result.success is True
+        file_path = Path(result.file_path)
+        actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        assert result.file_hash_sha256 == actual_hash
+
+        meta = json.loads(
+            Path(result.metadata_path).read_text(encoding="utf-8")
+        )
+        assert meta["file_hash_sha256"] == actual_hash
+
+    def test_download_metadata_has_download_timestamp(self, ct_service, tmp_path):
+        """ALCOA+ Contemporaneous: metadata includes download_timestamp."""
+        study_data = self._study_response("NCT66666666")
+        with patch.object(ct_service, "_get_json", return_value=study_data):
+            result = ct_service.download(
+                nct_id="NCT66666666",
+                version="1.0",
+                fmt="PDF",
+                who="tester",
+                why="test",
+            )
+
+        assert result.success is True
+        meta = json.loads(
+            Path(result.metadata_path).read_text(encoding="utf-8")
+        )
+        assert "download_timestamp" in meta
+        assert meta["download_timestamp"]  # not empty
