@@ -26,7 +26,7 @@ if _SRC_DIR not in sys.path:
 
 import streamlit as st
 
-from ptcv.extraction import ExtractionService, parquet_to_text_blocks
+from ptcv.extraction import ExtractionService, parquet_to_tables, parquet_to_text_blocks
 from ptcv.ich_parser import IchParser
 from ptcv.ich_parser.parquet_writer import parquet_to_sections
 from ptcv.sdtm import SdtmService
@@ -39,6 +39,7 @@ from ptcv.ui.components.ich_regenerator import (
     regenerate_ich_markdown,
 )
 from ptcv.ui.components.schedule_of_visits import render_schedule_of_visits
+from ptcv.ui.components.annotation_review import render_annotation_review
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,8 @@ def _run_parse(
         "registry_id": registry_id,
         "amendment": amendment,
         "artifact_key": parse_result.artifact_key,
+        "text_artifact_key": extraction_result.text_artifact_key,
+        "tables_artifact_key": extraction_result.tables_artifact_key,
     }
 
 
@@ -187,12 +190,23 @@ def _run_soa_extraction(
     section_bytes = gateway.get_artifact(cached["artifact_key"])
     sections = parquet_to_sections(section_bytes)
 
+    # Load pre-extracted tables for SoA bridge (PTCV-51)
+    pre_extracted_tables = None
+    tables_key = cached.get("tables_artifact_key")
+    if tables_key:
+        try:
+            tables_bytes = gateway.get_artifact(tables_key)
+            pre_extracted_tables = parquet_to_tables(tables_bytes)
+        except Exception:
+            pass  # Fall back to text-based parsing
+
     extractor = SoaExtractor(gateway=gateway)
     soa_result = extractor.extract(
         sections=sections,
         registry_id=cached["registry_id"],
         source_run_id="",
         source_sha256="",
+        extracted_tables=pre_extracted_tables,
     )
 
     writer = UsdmParquetWriter()
@@ -384,6 +398,7 @@ def main() -> None:
             "Regenerate protocol in ICH format",
             "Generate schedule of visits",
             "Create mock SDTM file",
+            "Review annotations",
         ],
         label_visibility="collapsed",
     )
@@ -437,6 +452,13 @@ def main() -> None:
                 )
             st.session_state["sdtm_cache"][file_sha] = sdtm_result
             sdtm_cached = sdtm_result
+        elif action == "Review annotations":
+            gateway = _get_gateway()
+            if cached is None:
+                with st.spinner("Parsing PDF..."):
+                    result = _run_parse(pdf_bytes, file_path.name, gateway)
+                st.session_state["parse_cache"][file_sha] = result
+                cached = result
 
     # Display results
     if cached:
@@ -465,6 +487,33 @@ def main() -> None:
                 gateway=_get_gateway(),
                 registry_id=sdtm_cached["registry_id"],
                 format_verdict=sdtm_cached["format_verdict"],
+            )
+
+        if action == "Review annotations":
+            st.divider()
+            gateway = _get_gateway()
+            section_bytes = gateway.get_artifact(cached["artifact_key"])
+            review_sections = parquet_to_sections(section_bytes)
+            # Reconstruct full protocol text for PTCV-43
+            protocol_text = ""
+            text_key = cached.get("text_artifact_key")
+            if text_key:
+                text_bytes = gateway.get_artifact(text_key)
+                text_blocks = parquet_to_text_blocks(text_bytes)
+                text_blocks_sorted = sorted(
+                    text_blocks,
+                    key=lambda b: (b.page_number, b.block_index),
+                )
+                protocol_text = "\n".join(
+                    b.text
+                    for b in text_blocks_sorted
+                    if b.text.strip()
+                )
+            render_annotation_review(
+                sections=review_sections,
+                registry_id=cached["registry_id"],
+                gateway=gateway,
+                protocol_text=protocol_text,
             )
     elif cached is None:
         st.caption(

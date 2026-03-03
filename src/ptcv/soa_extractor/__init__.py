@@ -35,6 +35,7 @@ from .models import (
 )
 from .parser import SoaTableParser
 from .resolver import SynonymResolver
+from .table_discovery import TableDiscovery
 from .writer import UsdmParquetWriter
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "UsdmMapper",
     "SoaTableParser",
     "SynonymResolver",
+    "TableDiscovery",
     "UsdmParquetWriter",
     "ExtractResult",
     "RawSoaTable",

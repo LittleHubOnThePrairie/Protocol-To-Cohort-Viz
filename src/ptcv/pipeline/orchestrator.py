@@ -37,9 +37,10 @@ from typing import Optional
 
 from ..extraction.models import ExtractionResult
 from ..extraction.extraction_service import ExtractionService
-from ..extraction.parquet_writer import parquet_to_text_blocks
+from ..extraction.parquet_writer import parquet_to_tables, parquet_to_text_blocks
 from ..ich_parser.parser import IchParser, ParseResult
 from ..ich_parser.parquet_writer import parquet_to_sections
+from ..ich_parser.priority_sections import extract_priority_sections
 from ..ich_parser.review_queue import ReviewQueue
 from ..soa_extractor.extractor import SoaExtractor
 from ..soa_extractor.models import ExtractResult
@@ -261,13 +262,47 @@ class PipelineOrchestrator:
         checkpoints.append(ich_cp)
 
         # ----------------------------------------------------------------
-        # Stage 3: SoA Extraction / USDM mapping (PTCV-21)
-        # Read ICH sections back from storage, pass to SoaExtractor.
+        # Stage 2b: Priority section extraction (PTCV-52)
+        # Enhanced extraction for B.4, B.5, B.10, B.14 sections.
         # ----------------------------------------------------------------
-        logger.info("Stage soa_extraction: reading sections.parquet")
+        logger.info("Stage priority_sections: reading sections.parquet")
         sections_bytes = self._gateway.get_artifact(parse_result.artifact_key)
         sections = parquet_to_sections(sections_bytes)
 
+        # Load pre-extracted tables for priority sections + SoA bridge
+        pre_extracted_tables = None
+        if extraction_result.tables_artifact_key:
+            try:
+                tables_bytes = self._gateway.get_artifact(
+                    extraction_result.tables_artifact_key,
+                )
+                pre_extracted_tables = parquet_to_tables(tables_bytes)
+                logger.info(
+                    "Stage soa_extraction: loaded %d pre-extracted tables",
+                    len(pre_extracted_tables),
+                )
+            except Exception:
+                logger.debug(
+                    "Could not load tables.parquet; falling back to "
+                    "text-based SoA parsing",
+                    exc_info=True,
+                )
+
+        # Run priority section extraction (PTCV-52)
+        priority_results = extract_priority_sections(
+            sections=sections,
+            text_blocks=text_blocks_sorted,
+            extracted_tables=pre_extracted_tables,
+        )
+        if priority_results:
+            logger.info(
+                "Stage priority_sections: extracted %d priority sections",
+                len(priority_results),
+            )
+
+        # ----------------------------------------------------------------
+        # Stage 3: SoA Extraction / USDM mapping (PTCV-21)
+        # ----------------------------------------------------------------
         logger.info("Stage soa_extraction: running SoaExtractor")
         soa_extractor = SoaExtractor(
             gateway=self._gateway,
@@ -278,6 +313,7 @@ class PipelineOrchestrator:
             registry_id=registry_id,
             source_run_id=parse_result.run_id,
             source_sha256=parse_result.artifact_sha256,
+            extracted_tables=pre_extracted_tables,
         )
 
         # Primary artifact for lineage: timepoints.parquet (if available)

@@ -33,6 +33,8 @@ from .mapper import UsdmMapper
 from .models import ExtractResult, SynonymMapping
 from .parser import SoaTableParser
 from .resolver import SynonymResolver
+from .table_bridge import filter_soa_tables
+from .table_discovery import TableDiscovery
 from .writer import UsdmParquetWriter
 
 
@@ -71,6 +73,7 @@ class SoaExtractor:
         self._gateway = gateway
         self._review_queue = review_queue
         self._parser = SoaTableParser()
+        self._discovery = TableDiscovery()
         self._mapper = UsdmMapper(resolver=SynonymResolver())
         self._writer = UsdmParquetWriter()
 
@@ -88,6 +91,10 @@ class SoaExtractor:
         source_run_id: str = "",
         source_sha256: str = "",
         who: str = _USER,
+        pdf_bytes: Optional[bytes] = None,
+        text_blocks: Optional[list[dict]] = None,
+        page_count: int = 0,
+        extracted_tables: Optional[list] = None,
     ) -> ExtractResult:
         """Extract SoA from ICH sections and write USDM Parquet artifacts.
 
@@ -101,6 +108,19 @@ class SoaExtractor:
             source_sha256: SHA-256 of the upstream sections.parquet artifact.
                 Used as source_hash in lineage records.
             who: Actor identifier for audit trail.
+            pdf_bytes: Optional raw PDF bytes for table discovery fallback.
+                When provided and text-based parsing finds no tables, the
+                blended Camelot Stream + Table Transformer discovery is
+                attempted (PTCV-38).
+            text_blocks: Optional list of dicts with 'page_number' and
+                'text' keys, used by table discovery to locate candidate
+                pages. Required when pdf_bytes is provided.
+            page_count: Total page count for the PDF. Required when
+                pdf_bytes is provided.
+            extracted_tables: Optional list of ExtractedTable objects from
+                tables.parquet. When provided, these are checked first for
+                SoA candidates before falling back to text parsing or PDF
+                re-extraction (PTCV-51).
 
         Returns:
             ExtractResult with run_id, artifact keys/counts, and review count.
@@ -116,9 +136,25 @@ class SoaExtractor:
         run_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # 1. Parse SoA table(s) from ICH sections
-        table = self._parser.parse(sections)
-        tables = [table] if table is not None else []
+        tables: list = []
+
+        # 1a. Primary: check pre-extracted tables.parquet (PTCV-51)
+        if extracted_tables:
+            tables = filter_soa_tables(extracted_tables)
+
+        # 1b. Fallback: parse SoA from ICH section text
+        if not tables:
+            table = self._parser.parse(sections)
+            tables = [table] if table is not None else []
+
+        # 1c. Fallback: blended table discovery from PDF (PTCV-38)
+        if not tables and pdf_bytes is not None and text_blocks:
+            discovered = self._discovery.discover(
+                pdf_bytes=pdf_bytes,
+                text_blocks=text_blocks,
+                page_count=page_count,
+            )
+            tables.extend(discovered)
 
         # 2. Map to USDM entities (empty table list → zero entities)
         epochs, timepoints, activities, instances, synonyms = self._mapper.map(

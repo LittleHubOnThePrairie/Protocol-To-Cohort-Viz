@@ -32,7 +32,11 @@ _SOA_KEYWORDS = re.compile(
     r"schedule\s+of\s+(?:activities|assessments|visits)"
     r"|visit\s+schedule"
     r"|assessment\s+schedule"
-    r"|(?:study|trial)\s+procedures",
+    r"|(?:study|trial)\s+procedures"
+    r"|study\s+calendar"
+    r"|study\s+timeline"
+    r"|treatment\s+calendar"
+    r"|assessment\s+calendar",
     re.IGNORECASE,
 )
 
