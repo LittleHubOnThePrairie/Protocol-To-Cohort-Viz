@@ -253,6 +253,7 @@ class PipelineOrchestrator:
                 "format_verdict": parse_result.format_verdict,
                 "format_confidence": parse_result.format_confidence,
                 "missing_required_sections": parse_result.missing_required_sections,
+                "detected_format": parse_result.detected_format,
             },
             artifact_sha256=parse_result.artifact_sha256,
             source_sha256=extraction_result.text_artifact_sha256,

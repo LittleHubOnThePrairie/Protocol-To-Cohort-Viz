@@ -27,6 +27,7 @@ from typing import Optional
 
 from ..storage import FilesystemAdapter, StorageGateway
 from .classifier import RuleBasedClassifier, SectionClassifier
+from .format_detector import FormatDetector, ProtocolFormat
 from .models import IchSection, ReviewQueueEntry
 from .parquet_writer import sections_to_parquet
 from .review_queue import ReviewQueue
@@ -98,6 +99,7 @@ class ParseResult:
         format_verdict: str = "NON_ICH",
         format_confidence: float = 0.0,
         missing_required_sections: Optional[list[str]] = None,
+        detected_format: str = "UNKNOWN",
     ) -> None:
         self.run_id = run_id
         self.registry_id = registry_id
@@ -111,6 +113,7 @@ class ParseResult:
         self.missing_required_sections: list[str] = (
             missing_required_sections if missing_required_sections is not None else []
         )
+        self.detected_format = detected_format
 
     def __repr__(self) -> str:
         return (
@@ -199,6 +202,30 @@ class IchParser:
         run_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        # 0. Pre-parser format detection (PTCV-31)
+        # Runs before classification to detect the protocol format family.
+        # Non-ICH protocols are flagged via a review queue entry but
+        # classification still proceeds (legacy fallback) so downstream
+        # pipeline stages always receive a valid sections artifact.
+        detector = FormatDetector()
+        fmt_result = detector.detect(text)
+        detected_format = fmt_result.format.value
+
+        if (
+            fmt_result.format == ProtocolFormat.UNKNOWN
+            and fmt_result.confidence < 0.20
+        ):
+            self._review_queue.enqueue(
+                ReviewQueueEntry(
+                    run_id=run_id,
+                    registry_id=registry_id,
+                    section_code="FORMAT",
+                    confidence_score=fmt_result.confidence,
+                    content_json="{}",
+                    queue_timestamp_utc=timestamp,
+                )
+            )
+
         # 1. Classify
         sections = self._classifier.classify(
             text=text,
@@ -268,6 +295,7 @@ class IchParser:
             format_verdict=format_verdict,
             format_confidence=format_confidence,
             missing_required_sections=missing_required,
+            detected_format=detected_format,
         )
 
     # ------------------------------------------------------------------
