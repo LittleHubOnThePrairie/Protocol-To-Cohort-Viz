@@ -5,6 +5,27 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-03T17:37:31Z] PTCV-42: Enhanced protocol file browser: group by therapeutic area, display titles, order by quality
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Enhanced protocol file browser: group by therapeutic area, display titles, order by quality
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/file_browser.py
+- C:/Dev/PTCV/src/ptcv/ui/components/protocol_catalog.py
+- C:/Dev/PTCV/scripts/batch_parse.py
+- C:/Dev/PTCV/tests/ui/test_protocol_catalog.py
+- C:/Dev/PTCV/tests/scripts/__init__.py
+- C:/Dev/PTCV/tests/scripts/test_batch_parse.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-03T14:01:39Z] PTCV-36: Streamlit: mock SDTM generation with protocol-to-SDTM lineage visualization
 
 **Status Change:** In Progress -> Done
