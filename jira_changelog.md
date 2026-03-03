@@ -5,6 +5,160 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-03T01:28:00Z] PTCV-34: Streamlit: multi-swimlane schedule of visits timeline visualization
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit: multi-swimlane schedule of visits timeline visualization
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/writer.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+- C:/Dev/PTCV/tests/soa_extractor/test_writer.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T01:21:04Z] PTCV-35: Streamlit: regenerate and display protocol reformatted in ICH E6(R3) structure
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit: regenerate and display protocol reformatted in ICH E6(R3) structure
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/tests/ui/test_ich_regenerator.py
+- C:/Dev/PTCV/tests/ui/test_app.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T01:12:39Z] PTCV-31: Pre-parser format detector to gate non-ICH protocols before ICH section classification
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Pre-parser format detector to gate non-ICH protocols before ICH section classification
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/format_detector.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/parser.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_detector.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T01:09:39Z] PTCV-33: Streamlit: file browser and ICH compliance flag for parsed PDF
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit: file browser and ICH compliance flag for parsed PDF
+
+**Files Modified:**
+- C:/Dev/PTCV/requirements.txt
+- C:/Dev/PTCV/src/ptcv/ui/__init__.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/__init__.py
+- C:/Dev/PTCV/src/ptcv/ui/components/file_browser.py
+- C:/Dev/PTCV/tests/ui/__init__.py
+- C:/Dev/PTCV/tests/ui/conftest.py
+- C:/Dev/PTCV/tests/ui/test_app.py
+- C:/Dev/PTCV/tests/ui/test_file_browser.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-02T23:44:34Z] PTCV-30: Detect non-ICH protocol format and surface verdict in ParseResult and compliance reports
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Detect non-ICH protocol format and surface verdict in ParseResult and compliance reports
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/parser.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/validation_service.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_verdict.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-02T23:24:46Z] PTCV-24: Implement End-to-End Pipeline Orchestration and Integration Tests
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement End-to-End Pipeline Orchestration and Integration Tests
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/pipeline/__init__.py
+- C:/Dev/PTCV/src/ptcv/pipeline/gateway_factory.py
+- C:/Dev/PTCV/src/ptcv/pipeline/models.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/tests/pipeline/__init__.py
+- C:/Dev/PTCV/tests/pipeline/conftest.py
+- C:/Dev/PTCV/tests/pipeline/test_gateway_factory.py
+- C:/Dev/PTCV/tests/pipeline/test_models.py
+- C:/Dev/PTCV/tests/pipeline/test_orchestrator.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-02T22:37:03Z] PTCV-23: Implement SDTM Validation and Compliance Reporting
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement SDTM Validation and Compliance Reporting
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/define_xml_validator.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/models.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/p21_validator.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/tcg_checker.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/validation_service.py
+- C:/Dev/PTCV/tests/sdtm/validation/__init__.py
+- C:/Dev/PTCV/tests/sdtm/validation/conftest.py
+- C:/Dev/PTCV/tests/sdtm/validation/test_define_xml_validator.py
+- C:/Dev/PTCV/tests/sdtm/validation/test_p21_validator.py
+- C:/Dev/PTCV/tests/sdtm/validation/test_tcg_checker.py
+- C:/Dev/PTCV/tests/sdtm/validation/test_validation_service.py
+
+**Test Coverage:**
+5 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-02T22:16:57Z] PTCV-22: Implement CDISC SDTM Trial Design Domain Generator
 
 **Status Change:** In Progress -> Done

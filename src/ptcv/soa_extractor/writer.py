@@ -308,6 +308,51 @@ class UsdmParquetWriter:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def parquet_to_activities(data: bytes) -> list[UsdmActivity]:
+        """Deserialise Parquet bytes to UsdmActivity list."""
+        buf = pa.BufferReader(data)
+        table = pq.read_table(buf)
+        result: list[UsdmActivity] = []
+        for i in range(table.num_rows):
+            row = {col: table.column(col)[i].as_py() for col in table.schema.names}
+            result.append(
+                UsdmActivity(
+                    run_id=row["run_id"],
+                    source_run_id=row["source_run_id"],
+                    source_sha256=row["source_sha256"],
+                    registry_id=row["registry_id"],
+                    activity_id=row["activity_id"],
+                    activity_name=row["activity_name"],
+                    activity_type=row["activity_type"],
+                    extraction_timestamp_utc=row["extraction_timestamp_utc"],
+                )
+            )
+        return result
+
+    @staticmethod
+    def parquet_to_instances(data: bytes) -> list[UsdmScheduledInstance]:
+        """Deserialise Parquet bytes to UsdmScheduledInstance list."""
+        buf = pa.BufferReader(data)
+        table = pq.read_table(buf)
+        result: list[UsdmScheduledInstance] = []
+        for i in range(table.num_rows):
+            row = {col: table.column(col)[i].as_py() for col in table.schema.names}
+            result.append(
+                UsdmScheduledInstance(
+                    run_id=row["run_id"],
+                    source_run_id=row["source_run_id"],
+                    source_sha256=row["source_sha256"],
+                    registry_id=row["registry_id"],
+                    instance_id=row["instance_id"],
+                    activity_id=row["activity_id"],
+                    timepoint_id=row["timepoint_id"],
+                    scheduled=bool(row["scheduled"]),
+                    extraction_timestamp_utc=row["extraction_timestamp_utc"],
+                )
+            )
+        return result
+
+    @staticmethod
     def parquet_to_timepoints(data: bytes) -> list[UsdmTimepoint]:
         """Deserialise Parquet bytes to UsdmTimepoint list."""
         buf = pa.BufferReader(data)

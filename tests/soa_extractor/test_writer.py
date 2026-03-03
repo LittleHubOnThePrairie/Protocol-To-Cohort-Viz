@@ -146,6 +146,15 @@ class TestActivitiesParquet:
         data = writer.activities_to_parquet([make_activity()])
         assert isinstance(data, bytes)
 
+    def test_round_trip(self, writer):
+        act = make_activity("act-rt")
+        data = writer.activities_to_parquet([act])
+        restored = writer.parquet_to_activities(data)
+        assert len(restored) == 1
+        assert restored[0].activity_id == "act-rt"
+        assert restored[0].activity_name == "ECG"
+        assert restored[0].activity_type == "ECG"
+
     def test_empty_raises(self, writer):
         with pytest.raises(ValueError):
             writer.activities_to_parquet([])
@@ -155,6 +164,16 @@ class TestInstancesParquet:
     def test_produces_bytes(self, writer):
         data = writer.instances_to_parquet([make_instance()])
         assert isinstance(data, bytes)
+
+    def test_round_trip(self, writer):
+        inst = make_instance("si-rt")
+        data = writer.instances_to_parquet([inst])
+        restored = writer.parquet_to_instances(data)
+        assert len(restored) == 1
+        assert restored[0].instance_id == "si-rt"
+        assert restored[0].activity_id == "act-1"
+        assert restored[0].timepoint_id == "tp-1"
+        assert restored[0].scheduled is True
 
     def test_empty_raises(self, writer):
         with pytest.raises(ValueError):
