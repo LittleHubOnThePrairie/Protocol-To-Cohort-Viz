@@ -5,6 +5,45 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-03T14:01:39Z] PTCV-36: Streamlit: mock SDTM generation with protocol-to-SDTM lineage visualization
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit: mock SDTM generation with protocol-to-SDTM lineage visualization
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/sdtm_viewer.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_sdtm_viewer.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T13:45:59Z] PTCV-38: Blended Camelot + Table Transformer table discovery for non-standard SoA formats
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Blended Camelot + Table Transformer table discovery for non-standard SoA formats
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/soa_extractor/parser.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/table_discovery.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/extractor.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/__init__.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/tests/soa_extractor/test_table_discovery.py
+
+**Test Coverage:**
+4 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-03T01:28:00Z] PTCV-34: Streamlit: multi-swimlane schedule of visits timeline visualization
 
 **Status Change:** In Progress -> Done

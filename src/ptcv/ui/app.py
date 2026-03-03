@@ -1,4 +1,4 @@
-"""PTCV Streamlit application — main entry point (PTCV-32, PTCV-33).
+"""PTCV Streamlit application — main entry point (PTCV-32, PTCV-33, PTCV-36).
 
 Launch with::
 
@@ -8,6 +8,7 @@ Provides:
 - Sidebar file browser listing protocol PDFs by registry source
 - "Parse PDF" action that runs extraction + ICH classification
 - ICH compliance verdict badge with confidence and section details
+- "Create mock SDTM file" action with lineage visualization
 - Session-level result caching keyed by file SHA-256
 """
 
@@ -28,6 +29,7 @@ import streamlit as st
 from ptcv.extraction import ExtractionService, parquet_to_text_blocks
 from ptcv.ich_parser import IchParser
 from ptcv.ich_parser.parquet_writer import parquet_to_sections
+from ptcv.sdtm import SdtmService
 from ptcv.soa_extractor import SoaExtractor
 from ptcv.soa_extractor.writer import UsdmParquetWriter
 from ptcv.storage import FilesystemAdapter
@@ -37,6 +39,7 @@ from ptcv.ui.components.ich_regenerator import (
     regenerate_ich_markdown,
 )
 from ptcv.ui.components.schedule_of_visits import render_schedule_of_visits
+from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +222,49 @@ def _run_soa_extraction(
     }
 
 
+def _run_sdtm_generation(
+    cached: dict,
+    soa_cached: dict | None,
+    gateway: FilesystemAdapter,
+) -> dict:
+    """Run SDTM generation from parsed ICH sections and SoA data.
+
+    Reads classified sections from storage, collects timepoints from
+    SoA cache (if available), and runs SdtmService.generate().
+
+    Args:
+        cached: Parse result dict from _run_parse().
+        soa_cached: SoA extraction result dict (may be None).
+        gateway: Initialised FilesystemAdapter.
+
+    Returns:
+        Dict with keys: sdtm_result, sections, has_soa,
+        registry_id, format_verdict.
+    """
+    section_bytes = gateway.get_artifact(cached["artifact_key"])
+    sections = parquet_to_sections(section_bytes)
+
+    timepoints = []
+    if soa_cached and soa_cached.get("timepoints"):
+        timepoints = soa_cached["timepoints"]
+
+    sdtm_svc = SdtmService(gateway=gateway)
+    sdtm_result = sdtm_svc.generate(
+        sections=sections,
+        timepoints=timepoints,
+        registry_id=cached["registry_id"],
+        amendment_number=cached.get("amendment", "00"),
+    )
+
+    return {
+        "sdtm_result": sdtm_result,
+        "sections": sections,
+        "has_soa": len(timepoints) > 0,
+        "registry_id": cached["registry_id"],
+        "format_verdict": cached["format_verdict"],
+    }
+
+
 def _display_verdict(result: dict) -> None:
     """Render ICH compliance verdict in the main panel.
 
@@ -327,6 +373,8 @@ def main() -> None:
         st.session_state["parse_cache"] = {}
     if "soa_cache" not in st.session_state:
         st.session_state["soa_cache"] = {}
+    if "sdtm_cache" not in st.session_state:
+        st.session_state["sdtm_cache"] = {}
 
     # Actions
     action = st.selectbox(
@@ -335,12 +383,14 @@ def main() -> None:
             "Parse PDF",
             "Regenerate protocol in ICH format",
             "Generate schedule of visits",
+            "Create mock SDTM file",
         ],
         label_visibility="collapsed",
     )
 
     cached = st.session_state.get("parse_cache", {}).get(file_sha)
     soa_cached = st.session_state.get("soa_cache", {}).get(file_sha)
+    sdtm_cached = st.session_state.get("sdtm_cache", {}).get(file_sha)
 
     if st.button("Run"):
         if action == "Parse PDF":
@@ -366,6 +416,27 @@ def main() -> None:
                 soa_result = _run_soa_extraction(cached, gateway)
             st.session_state["soa_cache"][file_sha] = soa_result
             soa_cached = soa_result
+        elif action == "Create mock SDTM file":
+            gateway = _get_gateway()
+            # Auto-parse if needed
+            if cached is None:
+                with st.spinner("Parsing PDF..."):
+                    result = _run_parse(pdf_bytes, file_path.name, gateway)
+                st.session_state["parse_cache"][file_sha] = result
+                cached = result
+            # Auto-run SoA extraction if needed
+            if soa_cached is None:
+                with st.spinner("Extracting schedule of visits..."):
+                    soa_result = _run_soa_extraction(cached, gateway)
+                st.session_state["soa_cache"][file_sha] = soa_result
+                soa_cached = soa_result
+            # Run SDTM generation
+            with st.spinner("Generating mock SDTM domains..."):
+                sdtm_result = _run_sdtm_generation(
+                    cached, soa_cached, gateway
+                )
+            st.session_state["sdtm_cache"][file_sha] = sdtm_result
+            sdtm_cached = sdtm_result
 
     # Display results
     if cached:
@@ -383,6 +454,17 @@ def main() -> None:
                 instances=soa_cached["instances"],
                 registry_id=soa_cached["registry_id"],
                 format_verdict=soa_cached["format_verdict"],
+            )
+
+        if action == "Create mock SDTM file" and sdtm_cached:
+            st.divider()
+            render_sdtm_viewer(
+                sdtm_result=sdtm_cached["sdtm_result"],
+                sections=sdtm_cached["sections"],
+                has_soa=sdtm_cached["has_soa"],
+                gateway=_get_gateway(),
+                registry_id=sdtm_cached["registry_id"],
+                format_verdict=sdtm_cached["format_verdict"],
             )
     elif cached is None:
         st.caption(
