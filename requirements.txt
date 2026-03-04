@@ -17,3 +17,12 @@ lxml>=5.0.0
 
 # HTTP (PTCV-18 protocol download)
 requests>=2.31.0
+
+# LLM retemplating (PTCV-60)
+anthropic>=0.40.0
+
+# SDTM XPT serialization (PTCV-22)
+pyreadstat>=1.3.0
+
+# UI (PTCV-32 Streamlit MVP)
+streamlit>=1.28.0

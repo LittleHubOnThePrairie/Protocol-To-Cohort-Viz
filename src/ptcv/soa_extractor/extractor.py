@@ -1,7 +1,10 @@
 """SoaExtractor — main Schedule of Activities extraction service.
 
 Orchestrates the full SoA extraction pipeline for one protocol:
-  1. Parse ICH sections for SoA tables via SoaTableParser
+  1. Find SoA tables via document-first search (PTCV-60):
+     a. Pre-extracted tables from tables.parquet (PTCV-51 bridge)
+     b. PDF table discovery via Camelot/TATR (PTCV-38)
+     c. Text parsing from ICH sections (fallback when sections provided)
   2. Map tables to USDM entities via UsdmMapper
   3. Stamp extraction_timestamp_utc on every entity
   4. Serialise each entity type to Parquet via UsdmParquetWriter
@@ -48,9 +51,11 @@ _REVIEW_THRESHOLD = 0.80
 class SoaExtractor:
     """Schedule of Activities extraction service.
 
-    Accepts a list of IchSection objects from PTCV-20, extracts SoA
-    tables, maps them to CDISC USDM v4.0 entities, and writes five
-    Parquet artifacts under usdm/{run_id}/ via StorageGateway.
+    Extracts SoA tables from protocol documents using a document-first
+    approach (PTCV-60): pre-extracted tables and PDF discovery are tried
+    before ICH section text parsing. Maps results to CDISC USDM v4.0
+    entities and writes five Parquet artifacts under usdm/{run_id}/ via
+    StorageGateway.
 
     Args:
         gateway: StorageGateway instance. Uses FilesystemAdapter with
@@ -86,52 +91,63 @@ class SoaExtractor:
 
     def extract(
         self,
-        sections: list[IchSection],
         registry_id: str,
         source_run_id: str = "",
         source_sha256: str = "",
         who: str = _USER,
+        sections: Optional[list[IchSection]] = None,
         pdf_bytes: Optional[bytes] = None,
         text_blocks: Optional[list[dict]] = None,
         page_count: int = 0,
         extracted_tables: Optional[list] = None,
     ) -> ExtractResult:
-        """Extract SoA from ICH sections and write USDM Parquet artifacts.
+        """Extract SoA tables and write USDM Parquet artifacts.
+
+        Uses a document-first approach (PTCV-60): pre-extracted tables
+        and PDF table discovery are tried before ICH section text
+        parsing. ICH sections are optional — the extractor can run
+        independently of ICH classification.
 
         Creates a new run_id for this extraction run. Prior Parquet files
         under different run_ids are never touched (ALCOA+ Original).
 
         Args:
-            sections: IchSection list from PTCV-20 IchParser.
             registry_id: Trial identifier (EUCT-Code or NCT-ID).
-            source_run_id: run_id from the upstream PTCV-20 ICH parse.
-            source_sha256: SHA-256 of the upstream sections.parquet artifact.
+            source_run_id: run_id from upstream stage.
+            source_sha256: SHA-256 of the upstream artifact.
                 Used as source_hash in lineage records.
             who: Actor identifier for audit trail.
-            pdf_bytes: Optional raw PDF bytes for table discovery fallback.
-                When provided and text-based parsing finds no tables, the
-                blended Camelot Stream + Table Transformer discovery is
-                attempted (PTCV-38).
+            sections: Optional IchSection list from ICH parser.
+                When provided, text-based SoA parsing is attempted
+                as a final fallback after table bridge and PDF
+                discovery.
+            pdf_bytes: Optional raw PDF bytes for table discovery.
+                Enables the blended Camelot Stream + Table Transformer
+                discovery (PTCV-38).
             text_blocks: Optional list of dicts with 'page_number' and
                 'text' keys, used by table discovery to locate candidate
                 pages. Required when pdf_bytes is provided.
             page_count: Total page count for the PDF. Required when
                 pdf_bytes is provided.
             extracted_tables: Optional list of ExtractedTable objects from
-                tables.parquet. When provided, these are checked first for
-                SoA candidates before falling back to text parsing or PDF
-                re-extraction (PTCV-51).
+                tables.parquet. Checked first for SoA candidates
+                (PTCV-51).
 
         Returns:
-            ExtractResult with run_id, artifact keys/counts, and review count.
+            ExtractResult with run_id, artifact keys/counts, and
+            review count.
 
         Raises:
-            ValueError: If sections is empty.
+            ValueError: If no input sources are provided (sections,
+                extracted_tables, and pdf_bytes are all None/empty).
         [PTCV-21 Scenario: Extract SoA to USDM Parquet with lineage]
         [PTCV-21 Scenario: Lineage chain verifiable from USDM back to download]
         """
-        if not sections:
-            raise ValueError("sections must not be empty")
+        if not sections and not extracted_tables and pdf_bytes is None:
+            raise ValueError(
+                "At least one input source required: sections, "
+                "extracted_tables, or pdf_bytes"
+            )
 
         run_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -142,12 +158,7 @@ class SoaExtractor:
         if extracted_tables:
             tables = filter_soa_tables(extracted_tables)
 
-        # 1b. Fallback: parse SoA from ICH section text
-        if not tables:
-            table = self._parser.parse(sections)
-            tables = [table] if table is not None else []
-
-        # 1c. Fallback: blended table discovery from PDF (PTCV-38)
+        # 1b. Secondary: blended table discovery from PDF (PTCV-38)
         if not tables and pdf_bytes is not None and text_blocks:
             discovered = self._discovery.discover(
                 pdf_bytes=pdf_bytes,
@@ -155,6 +166,11 @@ class SoaExtractor:
                 page_count=page_count,
             )
             tables.extend(discovered)
+
+        # 1c. Tertiary: parse SoA from ICH section text (fallback)
+        if not tables and sections:
+            table = self._parser.parse(sections)
+            tables = [table] if table is not None else []
 
         # 2. Map to USDM entities (empty table list → zero entities)
         epochs, timepoints, activities, instances, synonyms = self._mapper.map(

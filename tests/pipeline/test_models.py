@@ -1,4 +1,4 @@
-"""Tests for PipelineResult and LineageChainVerification models — PTCV-24."""
+"""Tests for PipelineResult and LineageChainVerification models — PTCV-24/60."""
 
 from __future__ import annotations
 
@@ -27,28 +27,30 @@ def make_sha(n: int = 0) -> str:
 
 
 def make_checkpoints(chain: bool = True) -> list[StageCheckpoint]:
-    """Build 6 sequential stage checkpoints, optionally with a broken chain."""
+    """Build 7 sequential stage checkpoints, optionally with a broken chain."""
     sha0 = make_sha(0)  # protocol_sha256
     sha1 = make_sha(1)
     sha2 = make_sha(2)
     sha3 = make_sha(3)
     sha4 = make_sha(4)
     sha5 = make_sha(5)
+    sha6 = make_sha(6)
 
     # chain: each artifact_sha256 becomes the next stage's source_sha256
     return [
         StageCheckpoint("download", "run-0", "key-0", sha0, ""),
         StageCheckpoint("extraction", "run-1", "key-1", sha1, sha0),
-        StageCheckpoint("ich_parse", "run-2", "key-2", sha2, sha1),
+        StageCheckpoint("soa_extraction", "run-2", "key-2", sha2, sha1),
         StageCheckpoint(
-            "soa_extraction",
+            "retemplating",
             "run-3",
             "key-3",
             sha3,
             sha2 if chain else make_sha(99),  # break chain here if requested
         ),
-        StageCheckpoint("sdtm_generation", "run-4", "key-4", sha4, sha3),
-        StageCheckpoint("validation", "run-5", "key-5", sha5, sha4),
+        StageCheckpoint("coverage_review", "run-4", "key-4", sha4, sha3),
+        StageCheckpoint("sdtm_generation", "run-5", "key-5", sha5, sha4),
+        StageCheckpoint("validation", "run-6", "key-6", sha6, sha5),
     ]
 
 
@@ -60,8 +62,9 @@ def make_result(checkpoints: list[StageCheckpoint] | None = None) -> PipelineRes
         registry_id="NCT00000001",
         amendment_number="00",
         extraction_result=None,
-        parse_result=None,
         soa_result=None,
+        retemplating_result=None,
+        coverage_result=None,
         sdtm_result=None,
         validation_result=None,
         protocol_sha256=make_sha(0),
@@ -76,15 +79,16 @@ def make_result(checkpoints: list[StageCheckpoint] | None = None) -> PipelineRes
 
 
 class TestPipelineStages:
-    def test_six_stages_defined(self):
-        assert len(PIPELINE_STAGES) == 6
+    def test_seven_stages_defined(self):
+        assert len(PIPELINE_STAGES) == 7
 
     def test_stages_in_order(self):
         assert PIPELINE_STAGES == [
             "download",
             "extraction",
-            "ich_parse",
             "soa_extraction",
+            "retemplating",
+            "coverage_review",
             "sdtm_generation",
             "validation",
         ]
@@ -124,7 +128,7 @@ class TestVerifyLineageChain:
     def test_unbroken_chain_stages_verified(self):
         result = make_result(make_checkpoints(chain=True))
         verification = result.verify_lineage_chain()
-        assert verification.stages_verified == 6
+        assert verification.stages_verified == 7
 
     def test_unbroken_chain_broken_at_stage_is_none(self):
         result = make_result(make_checkpoints(chain=True))
@@ -139,8 +143,8 @@ class TestVerifyLineageChain:
     def test_broken_chain_identifies_stage(self):
         result = make_result(make_checkpoints(chain=False))
         verification = result.verify_lineage_chain()
-        # The break is at soa_extraction (stage index 3)
-        assert verification.broken_at_stage == "soa_extraction"
+        # The break is at retemplating (stage index 3)
+        assert verification.broken_at_stage == "retemplating"
 
     def test_empty_checkpoints_is_invalid(self):
         result = make_result(checkpoints=[])
@@ -151,7 +155,7 @@ class TestVerifyLineageChain:
     def test_details_populated(self):
         result = make_result(make_checkpoints(chain=True))
         verification = result.verify_lineage_chain()
-        assert len(verification.details) >= 6
+        assert len(verification.details) >= 7
 
     def test_verification_is_lineage_chain_verification_type(self):
         result = make_result()
@@ -171,11 +175,12 @@ class TestPipelineResultProperties:
             pipeline_run_id=str(uuid.uuid4()),
             registry_id="NCT0001",
             amendment_number="00",
-            extraction_result=object(),  # type: ignore[arg-type]
-            parse_result=object(),       # type: ignore[arg-type]
-            soa_result=object(),         # type: ignore[arg-type]
-            sdtm_result=object(),        # type: ignore[arg-type]
-            validation_result=object(),  # type: ignore[arg-type]
+            extraction_result=object(),       # type: ignore[arg-type]
+            soa_result=object(),              # type: ignore[arg-type]
+            retemplating_result=object(),     # type: ignore[arg-type]
+            coverage_result=object(),         # type: ignore[arg-type]
+            sdtm_result=object(),             # type: ignore[arg-type]
+            validation_result=object(),       # type: ignore[arg-type]
             protocol_sha256=make_sha(0),
             stage_checkpoints=[],
             pipeline_timestamp_utc="2024-01-15T10:00:00+00:00",
@@ -203,3 +208,7 @@ class TestPipelineResultProperties:
     def test_registry_id_preserved(self):
         result = make_result()
         assert result.registry_id == "NCT00000001"
+
+    def test_deprecated_parse_result_defaults_to_none(self):
+        result = make_result()
+        assert result.parse_result is None

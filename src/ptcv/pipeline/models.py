@@ -1,4 +1,4 @@
-"""Pipeline data models for PTCV-24 end-to-end orchestration.
+"""Pipeline data models for PTCV-24/PTCV-60 end-to-end orchestration.
 
 PipelineResult carries all stage outputs and the lineage chain
 sha256 values needed to verify ALCOA++ traceability from protocol
@@ -9,7 +9,7 @@ Risk tier: MEDIUM — data pipeline orchestration models (no patient data).
 Regulatory references:
 - ALCOA++ Traceable: sha256 chain from protocol_sha256 through each stage
 - ALCOA++ Original: each stage has its own run_id; pipeline_run_id groups
-  the six lightweight stage-checkpoint lineage records
+  the seven lightweight stage-checkpoint lineage records
 """
 
 from __future__ import annotations
@@ -19,18 +19,21 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..extraction.models import ExtractionResult
+    from ..ich_parser.coverage_reviewer import CoverageResult
+    from ..ich_parser.llm_retemplater import RetemplatingResult
     from ..ich_parser.parser import ParseResult
     from ..soa_extractor.models import ExtractResult
     from ..sdtm.models import SdtmGenerationResult
     from ..sdtm.validation.models import ValidationResult
 
 
-# Expected pipeline stage names (in order)
+# Expected pipeline stage names (in order) — PTCV-60 reordering
 PIPELINE_STAGES = [
     "download",
     "extraction",
-    "ich_parse",
     "soa_extraction",
+    "retemplating",
+    "coverage_review",
     "sdtm_generation",
     "validation",
 ]
@@ -81,21 +84,28 @@ class LineageChainVerification:
 class PipelineResult:
     """End-to-end pipeline execution result for one protocol amendment.
 
-    Carries the outputs from all 6 stages plus a lineage chain summary
+    Carries the outputs from all 7 stages plus a lineage chain summary
     traceable from protocol download to validation report.
+
+    PTCV-60 pipeline order:
+        download → extraction → soa_extraction → retemplating →
+        coverage_review → sdtm_generation → validation
 
     Attributes:
         pipeline_run_id: UUID4 assigned by the orchestrator. Used as the
-            run_id for the six stage-checkpoint lineage records, enabling
-            get_lineage(pipeline_run_id) to return exactly six records.
+            run_id for the seven stage-checkpoint lineage records.
         registry_id: Trial registry identifier.
         amendment_number: Protocol amendment version (e.g. "00").
 
         extraction_result: Output from PTCV-19 ExtractionService.
-        parse_result: Output from PTCV-20 IchParser.
         soa_result: Output from PTCV-21 SoaExtractor.
+        retemplating_result: Output from PTCV-60 LlmRetemplater.
+        coverage_result: Output from PTCV-60 CoverageReviewer.
         sdtm_result: Output from PTCV-22 SdtmService.
         validation_result: Output from PTCV-23 ValidationService.
+
+        parse_result: Deprecated alias — kept for backward compat.
+            Use retemplating_result instead.
 
         protocol_sha256: SHA-256 of the input protocol file (PTCV-18).
         stage_checkpoints: Ordered list of stage checkpoints.
@@ -107,14 +117,18 @@ class PipelineResult:
     amendment_number: str
 
     extraction_result: Optional["ExtractionResult"]
-    parse_result: Optional["ParseResult"]
     soa_result: Optional["ExtractResult"]
+    retemplating_result: Optional["RetemplatingResult"]
+    coverage_result: Optional["CoverageResult"]
     sdtm_result: Optional["SdtmGenerationResult"]
     validation_result: Optional["ValidationResult"]
 
     protocol_sha256: str
     stage_checkpoints: list[StageCheckpoint]
     pipeline_timestamp_utc: str
+
+    # Deprecated: kept for backward compatibility
+    parse_result: Optional["ParseResult"] = None
 
     def verify_lineage_chain(self) -> LineageChainVerification:
         """Verify that sha256 values form an unbroken chain across stages.
@@ -169,11 +183,12 @@ class PipelineResult:
 
     @property
     def all_stages_complete(self) -> bool:
-        """True when all 6 pipeline stages completed successfully."""
+        """True when all 7 pipeline stages completed successfully."""
         return (
             self.extraction_result is not None
-            and self.parse_result is not None
             and self.soa_result is not None
+            and self.retemplating_result is not None
+            and self.coverage_result is not None
             and self.sdtm_result is not None
             and self.validation_result is not None
         )

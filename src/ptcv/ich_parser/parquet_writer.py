@@ -38,6 +38,7 @@ _SCHEMA = pa.schema(
         pa.field("review_required", pa.bool_(), nullable=False),
         pa.field("legacy_format", pa.bool_(), nullable=False),
         pa.field("extraction_timestamp_utc", pa.string(), nullable=False),
+        pa.field("content_text", pa.string(), nullable=True),
     ]
 )
 
@@ -88,6 +89,9 @@ def sections_to_parquet(sections: list["IchSection"]) -> bytes:
             "extraction_timestamp_utc": [
                 s.extraction_timestamp_utc for s in sections
             ],
+            "content_text": [
+                s.content_text or None for s in sections
+            ],
         },
         schema=_SCHEMA,
     )
@@ -108,10 +112,11 @@ def parquet_to_sections(data: bytes) -> list["IchSection"]:
     """
     from .models import IchSection
 
-    table = pq.read_table(io.BytesIO(data), schema=_SCHEMA)
+    table = pq.read_table(io.BytesIO(data))
+    columns = set(table.column_names)
     sections: list[IchSection] = []
     for i in range(len(table)):
-        row = {col: table.column(col)[i].as_py() for col in table.column_names}
+        row = {col: table.column(col)[i].as_py() for col in columns}
         sections.append(
             IchSection(
                 run_id=row["run_id"],
@@ -125,6 +130,7 @@ def parquet_to_sections(data: bytes) -> list["IchSection"]:
                 review_required=bool(row["review_required"]),
                 legacy_format=bool(row["legacy_format"]),
                 extraction_timestamp_utc=row["extraction_timestamp_utc"],
+                content_text=row.get("content_text", "") or "",
             )
         )
     return sections

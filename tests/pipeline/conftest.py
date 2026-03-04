@@ -1,9 +1,13 @@
-"""Shared fixtures for PTCV-24 pipeline integration tests."""
+"""Shared fixtures for PTCV-24/60 pipeline integration tests."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
+import uuid
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -13,10 +17,6 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 # ---------------------------------------------------------------------------
 # Synthetic 2-page protocol text (used as the pipeline's input "PDF")
 # ---------------------------------------------------------------------------
-# This text is designed so that:
-# - IchParser can extract B.4 and B.1 sections
-# - SoaTableParser can parse the SoA table in B.4
-# - SdtmService can generate TS, TA, TE, TV, TI domains
 SYNTHETIC_PROTOCOL_TEXT = """\
 CLINICAL STUDY PROTOCOL
 NCT00112827
@@ -46,16 +46,6 @@ The primary endpoint is progression-free survival at 16 weeks.
 Sample size: 120 patients per arm (alpha 0.05, power 80%).
 """
 
-# The synthetic protocol is plain text, not PDF bytes. We wrap it in a
-# minimal structure that PdfExtractor will handle gracefully. However,
-# since we don't have a real PDF for tests, we use a CTR-XML-like encoding
-# or rely on the ExtractionService's fallback path.
-#
-# To avoid a dependency on pdfplumber for the integration tests, we
-# bypass ExtractionService and inject the text directly via a thin
-# helper fixture (fake_protocol_bytes) that the orchestrator's test
-# stub uses.
-
 SYNTHETIC_CTR_XML = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <ClinicalStudy xmlns="urn:hl7-org:greenlightGreen">
@@ -78,6 +68,98 @@ SYNTHETIC_CTR_XML = """\
   </StudyProtocol>
 </ClinicalStudy>
 """
+
+
+# ---------------------------------------------------------------------------
+# Mock LlmRetemplater for integration tests (no Anthropic API needed)
+# ---------------------------------------------------------------------------
+
+
+class MockLlmRetemplater:
+    """Fake retemplater that produces a deterministic result without LLM calls.
+
+    Writes a real sections.parquet via the gateway so downstream stages
+    (coverage review, SDTM) can read it.
+    """
+
+    def __init__(self, gateway, review_queue=None):
+        self._gateway = gateway
+        self._review_queue = review_queue
+
+    def retemplate(
+        self,
+        text_blocks: list[dict],
+        registry_id: str,
+        source_run_id: str = "",
+        source_sha256: str = "",
+        soa_summary: Optional[dict] = None,
+        who: str = "mock-retemplater",
+    ):
+        from ptcv.ich_parser.llm_retemplater import RetemplatingResult
+        from ptcv.ich_parser.models import IchSection
+        from ptcv.ich_parser.parquet_writer import sections_to_parquet
+        from ptcv.ich_parser.parser import _compute_format_verdict
+
+        if not text_blocks:
+            raise ValueError("text_blocks must not be empty")
+
+        run_id = str(uuid.uuid4())
+        timestamp = "2024-01-15T10:00:00+00:00"
+
+        # Build one B.1 section from the text
+        full_text = " ".join(b.get("text", "") for b in text_blocks)
+        sections = [
+            IchSection(
+                run_id=run_id,
+                source_run_id=source_run_id,
+                source_sha256=source_sha256,
+                registry_id=registry_id,
+                section_code="B.1",
+                section_name="General Information",
+                content_json=json.dumps({
+                    "text_excerpt": full_text[:500],
+                    "key_concepts": ["mock"],
+                }),
+                confidence_score=0.85,
+                review_required=False,
+                legacy_format=True,
+                extraction_timestamp_utc=timestamp,
+            ),
+        ]
+
+        # Write Parquet
+        parquet_bytes = sections_to_parquet(sections)
+        artifact_key = f"ich-json/{run_id}/sections.parquet"
+        self._gateway.put_artifact(
+            key=artifact_key,
+            data=parquet_bytes,
+            content_type="application/vnd.apache.parquet",
+            run_id=run_id,
+            source_hash=source_sha256,
+            user=who,
+            immutable=False,
+            stage="retemplating",
+            registry_id=registry_id,
+        )
+
+        artifact_sha256 = hashlib.sha256(parquet_bytes).hexdigest()
+        verdict, confidence, missing = _compute_format_verdict(sections)
+
+        return RetemplatingResult(
+            run_id=run_id,
+            registry_id=registry_id,
+            artifact_key=artifact_key,
+            artifact_sha256=artifact_sha256,
+            section_count=len(sections),
+            review_count=0,
+            source_sha256=source_sha256,
+            format_verdict=verdict,
+            format_confidence=confidence,
+            missing_required_sections=missing,
+            input_tokens=0,
+            output_tokens=0,
+            chunk_count=1,
+        )
 
 
 @pytest.fixture
@@ -112,13 +194,19 @@ def tmp_ct_review_queue(tmp_path: Path):
 
 @pytest.fixture
 def orchestrator(tmp_gateway, tmp_review_queue, tmp_ct_review_queue):
-    """PipelineOrchestrator backed by filesystem fixtures."""
+    """PipelineOrchestrator backed by filesystem fixtures with mock retemplater."""
     from ptcv.pipeline import PipelineOrchestrator
+
+    mock_retemplater = MockLlmRetemplater(
+        gateway=tmp_gateway,
+        review_queue=tmp_review_queue,
+    )
 
     return PipelineOrchestrator(
         gateway=tmp_gateway,
         review_queue=tmp_review_queue,
         ct_review_queue=tmp_ct_review_queue,
+        retemplater=mock_retemplater,
     )
 
 

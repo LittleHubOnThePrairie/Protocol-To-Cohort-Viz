@@ -1,10 +1,11 @@
-"""Integration tests for PipelineOrchestrator — PTCV-24.
+"""Integration tests for PipelineOrchestrator — PTCV-24/60.
 
 Tests verify end-to-end pipeline execution, artifact production,
-and ALCOA++ lineage chain integrity across all six stages.
+and ALCOA++ lineage chain integrity across all seven stages.
 
-All tests use FilesystemAdapter (tmp_gateway) and CTR-XML input to
-avoid PDF library dependencies and real network access.
+All tests use FilesystemAdapter (tmp_gateway), a MockLlmRetemplater
+(no Anthropic API calls), and CTR-XML input to avoid PDF library
+dependencies and real network access.
 """
 
 from __future__ import annotations
@@ -73,8 +74,8 @@ class TestCompletePipelineRun:
     def test_all_stages_complete(self, orchestrator, ctr_xml_bytes, registry_id):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.all_stages_complete, (
-            "Not all stages completed — check extraction, ich_parse, "
-            "soa_extraction, sdtm_generation, and validation results"
+            "Not all stages completed — check extraction, soa_extraction, "
+            "retemplating, coverage_review, sdtm_generation, and validation results"
         )
 
     def test_extraction_result_present(self, orchestrator, ctr_xml_bytes, registry_id):
@@ -82,10 +83,15 @@ class TestCompletePipelineRun:
         assert result.extraction_result is not None
         assert result.extraction_result.registry_id == registry_id
 
-    def test_parse_result_present(self, orchestrator, ctr_xml_bytes, registry_id):
+    def test_retemplating_result_present(self, orchestrator, ctr_xml_bytes, registry_id):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
-        assert result.parse_result is not None
-        assert result.parse_result.section_count >= 1
+        assert result.retemplating_result is not None
+        assert result.retemplating_result.section_count >= 1
+
+    def test_coverage_result_present(self, orchestrator, ctr_xml_bytes, registry_id):
+        result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
+        assert result.coverage_result is not None
+        assert 0.0 <= result.coverage_result.coverage_score <= 1.0
 
     def test_soa_result_present(self, orchestrator, ctr_xml_bytes, registry_id):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
@@ -114,6 +120,13 @@ class TestCompletePipelineRun:
         r2 = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert r1.pipeline_run_id != r2.pipeline_run_id
 
+    def test_deprecated_parse_result_is_none(
+        self, orchestrator, ctr_xml_bytes, registry_id
+    ):
+        """parse_result is deprecated — should be None in new pipeline."""
+        result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
+        assert result.parse_result is None
+
 
 # -----------------------------------------------------------------------
 # Scenario: StorageGateway initialises and produces artifacts
@@ -131,11 +144,11 @@ class TestStorageGatewayArtifacts:
         data = tmp_gateway.get_artifact(result.extraction_result.text_artifact_key)
         assert data[:4] == b"PAR1"  # Parquet magic bytes
 
-    def test_ich_sections_artifact_written(
+    def test_retemplating_artifact_written(
         self, orchestrator, ctr_xml_bytes, registry_id, tmp_gateway
     ):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
-        data = tmp_gateway.get_artifact(result.parse_result.artifact_key)
+        data = tmp_gateway.get_artifact(result.retemplating_result.artifact_key)
         assert data[:4] == b"PAR1"
 
     def test_sdtm_ts_xpt_artifact_written(
@@ -176,17 +189,17 @@ class TestStorageGatewayArtifacts:
 class TestLineageChain:
     """GHERKIN: Unbroken ALCOA++ lineage chain from download to validation report."""
 
-    def test_six_stage_checkpoints_recorded(
+    def test_seven_stage_checkpoints_recorded(
         self, orchestrator, ctr_xml_bytes, registry_id
     ):
-        """Exactly 6 stage checkpoints (one per PTCV-18 through PTCV-23)."""
+        """Exactly 7 stage checkpoints (PTCV-60 pipeline)."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
-        assert len(result.stage_checkpoints) == 6
+        assert len(result.stage_checkpoints) == 7
 
     def test_all_stage_names_present(
         self, orchestrator, ctr_xml_bytes, registry_id
     ):
-        """All 6 expected stage names appear in checkpoints."""
+        """All 7 expected stage names appear in checkpoints."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.stage_names_present == set(PIPELINE_STAGES)
 
@@ -204,16 +217,16 @@ class TestLineageChain:
     ):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         verification = result.verify_lineage_chain()
-        assert verification.stages_verified == 6
+        assert verification.stages_verified == 7
 
-    def test_get_lineage_returns_six_records(
+    def test_get_lineage_returns_seven_records(
         self, orchestrator, ctr_xml_bytes, registry_id, tmp_gateway
     ):
-        """get_lineage(pipeline_run_id) returns at least 6 records."""
+        """get_lineage(pipeline_run_id) returns at least 7 records."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         lineage = tmp_gateway.get_lineage(result.pipeline_run_id)
         # One checkpoint artifact per stage was written under pipeline_run_id
-        assert len(lineage) >= 6
+        assert len(lineage) >= 7
 
     def test_lineage_records_have_expected_stages(
         self, orchestrator, ctr_xml_bytes, registry_id, tmp_gateway
@@ -259,7 +272,7 @@ class TestMigrationSmokeTest:
     def test_smoke_test_all_stages_pass(
         self, orchestrator, ctr_xml_bytes, registry_id
     ):
-        """2-page synthetic fixture runs all 6 stages without error."""
+        """2-page synthetic fixture runs all 7 stages without error."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.all_stages_complete
 
@@ -344,17 +357,10 @@ class TestAmendmentRerun:
 
 class TestPipelineCoherence:
     def test_timepoint_count_non_negative(self, orchestrator, ctr_xml_bytes, registry_id):
-        """Pipeline SoA extraction completes without error.
-
-        CTR-XML input produces 0 timepoints (no markdown SoA table in the
-        ODM format — only StudyName/StudyEventDef metadata). SoA detection
-        from PDFs is covered by the soa_extractor unit tests.
-        """
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.soa_result.timepoint_count >= 0
 
     def test_activity_count_non_negative(self, orchestrator, ctr_xml_bytes, registry_id):
-        """Pipeline activity extraction completes without error."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.soa_result.activity_count >= 0
 
@@ -378,7 +384,41 @@ class TestPipelineCoherence:
     ):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         assert result.extraction_result.registry_id == registry_id
-        assert result.parse_result.registry_id == registry_id
+        assert result.retemplating_result.registry_id == registry_id
         assert result.soa_result.registry_id == registry_id
         assert result.sdtm_result.registry_id == registry_id
         assert result.validation_result.registry_id == registry_id
+
+
+# -----------------------------------------------------------------------
+# Scenario: PTCV-60 document-first pipeline specifics
+# -----------------------------------------------------------------------
+
+
+class TestDocumentFirstPipeline:
+    """PTCV-60: SoA extraction runs before ICH retemplating."""
+
+    def test_soa_stage_before_retemplating_in_checkpoints(
+        self, orchestrator, ctr_xml_bytes, registry_id
+    ):
+        """SoA extraction checkpoint appears before retemplating."""
+        result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
+        stage_names = [cp.stage for cp in result.stage_checkpoints]
+        soa_idx = stage_names.index("soa_extraction")
+        ret_idx = stage_names.index("retemplating")
+        assert soa_idx < ret_idx
+
+    def test_coverage_review_stage_present(
+        self, orchestrator, ctr_xml_bytes, registry_id
+    ):
+        """Coverage review appears in stage checkpoints."""
+        result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
+        stage_names = [cp.stage for cp in result.stage_checkpoints]
+        assert "coverage_review" in stage_names
+
+    def test_coverage_result_has_score(
+        self, orchestrator, ctr_xml_bytes, registry_id
+    ):
+        result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
+        assert result.coverage_result is not None
+        assert isinstance(result.coverage_result.coverage_score, float)

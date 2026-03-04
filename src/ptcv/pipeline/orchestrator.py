@@ -1,27 +1,28 @@
-"""PipelineOrchestrator — end-to-end PTCV pipeline (PTCV-24).
+"""PipelineOrchestrator — end-to-end PTCV pipeline (PTCV-24, PTCV-60).
 
-Sequences all six pipeline stages from protocol bytes through validated
+Sequences all seven pipeline stages from protocol bytes through validated
 SDTM package, using a single shared StorageGateway instance injected into
 every stage service.
 
-Pipeline sequence:
+Pipeline sequence (PTCV-60 document-first reordering):
   PTCV-18  Protocol download  (input: protocol bytes + sha256)
   PTCV-19  ExtractionService  (PDF/XML → text_blocks + tables Parquet)
-  PTCV-20  IchParser          (text → ICH sections Parquet)
-  PTCV-21  SoaExtractor       (ICH sections → USDM Parquet)
+  PTCV-21  SoaExtractor       (tables/PDF → USDM Parquet) — MOVED BEFORE ICH
+  PTCV-60  LlmRetemplater     (text → ICH sections Parquet via Claude)
+  PTCV-60  CoverageReviewer   (text overlap quality gate)
   PTCV-22  SdtmService        (ICH sections + USDM timepoints → XPT + define.xml)
   PTCV-23  ValidationService  (XPT + define.xml → P21/TCG/compliance reports)
 
 After each stage, the orchestrator writes a lightweight JSON checkpoint
 artifact under the orchestrator's pipeline_run_id via StorageGateway, so
 that get_lineage(pipeline_run_id) returns exactly one LineageRecord per
-stage (six total).
+stage (seven total).
 
 Risk tier: MEDIUM — data pipeline orchestration (no patient data).
 
 Regulatory references:
 - ALCOA++ Contemporaneous: single timestamp per pipeline run
-- ALCOA++ Traceable: source_hash chain across all six stages
+- ALCOA++ Traceable: source_hash chain across all seven stages
 - ALCOA++ Original: each stage service generates its own run_id
 - 21 CFR 11.10(e): stage-checkpoint lineage records for audit trail
 """
@@ -38,7 +39,8 @@ from typing import Optional
 from ..extraction.models import ExtractionResult
 from ..extraction.extraction_service import ExtractionService
 from ..extraction.parquet_writer import parquet_to_tables, parquet_to_text_blocks
-from ..ich_parser.parser import IchParser, ParseResult
+from ..ich_parser.coverage_reviewer import CoverageReviewer, CoverageResult
+from ..ich_parser.llm_retemplater import LlmRetemplater, RetemplatingResult
 from ..ich_parser.parquet_writer import parquet_to_sections
 from ..ich_parser.priority_sections import extract_priority_sections
 from ..ich_parser.review_queue import ReviewQueue
@@ -63,7 +65,7 @@ class PipelineOrchestrator:
     """End-to-end pipeline from protocol bytes to validated SDTM package.
 
     One StorageGateway instance is created at construction and shared
-    across all six stage services (PTCV-18 design requirement).
+    across all seven stage services (PTCV-18 design requirement).
 
     Args:
         gateway: StorageGateway to use for all artifact writes. If None,
@@ -72,6 +74,8 @@ class PipelineOrchestrator:
             Shared with SoaExtractor. If None, uses default SQLite path.
         ct_review_queue: CtReviewQueue for SDTM unmapped CT terms. If
             None, uses default SQLite path.
+        retemplater: LlmRetemplater instance for Stage 3. If None, a
+            default instance is created. Intended for test injection.
     [PTCV-24 Scenario: Complete pipeline run for EU-CTR PDF protocol]
     [PTCV-24 Scenario: StorageGateway initialises on first run]
     """
@@ -81,6 +85,7 @@ class PipelineOrchestrator:
         gateway: Optional[StorageGateway] = None,
         review_queue: Optional[ReviewQueue] = None,
         ct_review_queue: Optional[CtReviewQueue] = None,
+        retemplater: Optional[LlmRetemplater] = None,
     ) -> None:
         if gateway is None:
             gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
@@ -92,6 +97,7 @@ class PipelineOrchestrator:
         # share them (avoids double-initialisation of SQLite tables).
         self._review_queue = review_queue
         self._ct_review_queue = ct_review_queue
+        self._retemplater = retemplater
 
     # ------------------------------------------------------------------
     # Public interface
@@ -108,6 +114,10 @@ class PipelineOrchestrator:
         pipeline_run_id: Optional[str] = None,
     ) -> PipelineResult:
         """Run the full pipeline for one protocol amendment.
+
+        PTCV-60 pipeline order:
+            download → extraction → soa_extraction → retemplating →
+            coverage_review → sdtm_generation → validation
 
         Args:
             protocol_data: Raw bytes of the protocol file (PDF or CTR-XML).
@@ -128,7 +138,7 @@ class PipelineOrchestrator:
             ValueError: If protocol_data is empty.
         [PTCV-24 Scenario: Complete pipeline run for EU-CTR PDF protocol]
         [PTCV-24 Scenario: Unbroken ALCOA++ lineage chain]
-        [PTCV-24 Scenario: Migration smoke test passes on LocalStorageAdapter]
+        [PTCV-60 Scenario: Document-first SoA extraction]
         """
         if not protocol_data:
             raise ValueError("protocol_data must not be empty")
@@ -138,9 +148,7 @@ class PipelineOrchestrator:
 
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # Compute source_sha256 from bytes if not supplied (covers the
-        # case where the orchestrator drives directly from a file path
-        # without going through PTCV-18 download service).
+        # Compute source_sha256 from bytes if not supplied
         if not source_sha256:
             import hashlib
             source_sha256 = hashlib.sha256(protocol_data).hexdigest()
@@ -155,8 +163,6 @@ class PipelineOrchestrator:
 
         # ----------------------------------------------------------------
         # Stage 0: Record download checkpoint (PTCV-18)
-        # The protocol bytes were already downloaded; we just record the
-        # pipeline-level lineage entry for the download artifact.
         # ----------------------------------------------------------------
         download_cp = self._write_checkpoint(
             pipeline_run_id=pipeline_run_id,
@@ -210,66 +216,35 @@ class PipelineOrchestrator:
         checkpoints.append(extraction_cp)
 
         # ----------------------------------------------------------------
-        # Stage 2: ICH Parsing (PTCV-20)
-        # Reconstruct protocol text from text_blocks.parquet for IchParser.
+        # Stage 1b: Load extracted data for downstream stages
         # ----------------------------------------------------------------
-        logger.info("Stage ich_parse: reading text_blocks.parquet")
-        text_bytes = self._gateway.get_artifact(extraction_result.text_artifact_key)
+        logger.info("Loading text_blocks.parquet for downstream stages")
+        text_bytes = self._gateway.get_artifact(
+            extraction_result.text_artifact_key,
+        )
         text_blocks = parquet_to_text_blocks(text_bytes)
-        # Join all text blocks ordered by page then block_index
         text_blocks_sorted = sorted(
-            text_blocks, key=lambda b: (b.page_number, b.block_index)
-        )
-        protocol_text = "\n".join(b.text for b in text_blocks_sorted if b.text.strip())
-
-        if not protocol_text.strip():
-            # Fallback: use a minimal placeholder so IchParser produces a
-            # legacy section rather than raising ValueError.
-            protocol_text = f"Protocol {registry_id} (text extraction produced no content)"
-
-        logger.info("Stage ich_parse: running IchParser")
-        ich_parser = IchParser(
-            gateway=self._gateway,
-            review_queue=self._review_queue,
-        )
-        parse_result: ParseResult = ich_parser.parse(
-            text=protocol_text,
-            registry_id=registry_id,
-            source_run_id=extraction_result.run_id,
-            source_sha256=extraction_result.text_artifact_sha256,
+            text_blocks, key=lambda b: (b.page_number, b.block_index),
         )
 
-        ich_cp = self._write_checkpoint(
-            pipeline_run_id=pipeline_run_id,
-            stage="ich_parse",
-            stage_run_id=parse_result.run_id,
-            artifact_key=f"pipeline/{pipeline_run_id}/stage-03-ich-parse.json",
-            payload={
-                "stage": "ich_parse",
-                "stage_run_id": parse_result.run_id,
-                "artifact_key": parse_result.artifact_key,
-                "artifact_sha256": parse_result.artifact_sha256,
-                "section_count": parse_result.section_count,
-                "review_count": parse_result.review_count,
-                "format_verdict": parse_result.format_verdict,
-                "format_confidence": parse_result.format_confidence,
-                "missing_required_sections": parse_result.missing_required_sections,
-                "detected_format": parse_result.detected_format,
-            },
-            artifact_sha256=parse_result.artifact_sha256,
-            source_sha256=extraction_result.text_artifact_sha256,
-        )
-        checkpoints.append(ich_cp)
+        # Build text_block_dicts for SoA extractor and retemplater
+        text_block_dicts = [
+            {"page_number": b.page_number, "text": b.text}
+            for b in text_blocks_sorted
+            if b.text.strip()
+        ]
 
-        # ----------------------------------------------------------------
-        # Stage 2b: Priority section extraction (PTCV-52)
-        # Enhanced extraction for B.4, B.5, B.10, B.14 sections.
-        # ----------------------------------------------------------------
-        logger.info("Stage priority_sections: reading sections.parquet")
-        sections_bytes = self._gateway.get_artifact(parse_result.artifact_key)
-        sections = parquet_to_sections(sections_bytes)
+        # Fallback: if extraction produced no text blocks (e.g. XML with
+        # non-standard namespace), create a placeholder so downstream
+        # stages receive at least one block.
+        if not text_block_dicts:
+            text_block_dicts = [{
+                "page_number": 1,
+                "text": f"Protocol {registry_id} "
+                        "(text extraction produced no content)",
+            }]
 
-        # Load pre-extracted tables for priority sections + SoA bridge
+        # Load pre-extracted tables for SoA bridge (PTCV-51)
         pre_extracted_tables = None
         if extraction_result.tables_artifact_key:
             try:
@@ -278,30 +253,18 @@ class PipelineOrchestrator:
                 )
                 pre_extracted_tables = parquet_to_tables(tables_bytes)
                 logger.info(
-                    "Stage soa_extraction: loaded %d pre-extracted tables",
+                    "Loaded %d pre-extracted tables",
                     len(pre_extracted_tables),
                 )
             except Exception:
                 logger.debug(
-                    "Could not load tables.parquet; falling back to "
-                    "text-based SoA parsing",
+                    "Could not load tables.parquet; proceeding without",
                     exc_info=True,
                 )
 
-        # Run priority section extraction (PTCV-52)
-        priority_results = extract_priority_sections(
-            sections=sections,
-            text_blocks=text_blocks_sorted,
-            extracted_tables=pre_extracted_tables,
-        )
-        if priority_results:
-            logger.info(
-                "Stage priority_sections: extracted %d priority sections",
-                len(priority_results),
-            )
-
         # ----------------------------------------------------------------
-        # Stage 3: SoA Extraction / USDM mapping (PTCV-21)
+        # Stage 2: SoA Extraction / USDM mapping (PTCV-21) — MOVED UP
+        # Runs BEFORE ICH retemplating so SoA results can enrich B.4.
         # ----------------------------------------------------------------
         logger.info("Stage soa_extraction: running SoaExtractor")
         soa_extractor = SoaExtractor(
@@ -309,26 +272,28 @@ class PipelineOrchestrator:
             review_queue=self._review_queue,
         )
         soa_result: ExtractResult = soa_extractor.extract(
-            sections=sections,
             registry_id=registry_id,
-            source_run_id=parse_result.run_id,
-            source_sha256=parse_result.artifact_sha256,
+            source_run_id=extraction_result.run_id,
+            source_sha256=extraction_result.text_artifact_sha256,
+            pdf_bytes=protocol_data,
+            text_blocks=text_block_dicts,
+            page_count=len({b.page_number for b in text_blocks}),
             extracted_tables=pre_extracted_tables,
         )
 
-        # Primary artifact for lineage: timepoints.parquet (if available)
         soa_primary_key = soa_result.artifact_keys.get(
             "timepoints",
             next(iter(soa_result.artifact_keys.values()), ""),
         )
-        # sha256 of the primary artifact — retrieve from gateway lineage
         soa_primary_sha256 = self._resolve_artifact_sha256(soa_primary_key)
 
         soa_cp = self._write_checkpoint(
             pipeline_run_id=pipeline_run_id,
             stage="soa_extraction",
             stage_run_id=soa_result.run_id,
-            artifact_key=f"pipeline/{pipeline_run_id}/stage-04-soa-extraction.json",
+            artifact_key=(
+                f"pipeline/{pipeline_run_id}/stage-03-soa-extraction.json"
+            ),
             payload={
                 "stage": "soa_extraction",
                 "stage_run_id": soa_result.run_id,
@@ -337,16 +302,135 @@ class PipelineOrchestrator:
                 "primary_artifact_key": soa_primary_key,
                 "primary_artifact_sha256": soa_primary_sha256,
             },
-            artifact_sha256=soa_primary_sha256 or parse_result.artifact_sha256,
-            source_sha256=parse_result.artifact_sha256,
+            artifact_sha256=(
+                soa_primary_sha256
+                or extraction_result.text_artifact_sha256
+            ),
+            source_sha256=extraction_result.text_artifact_sha256,
         )
         checkpoints.append(soa_cp)
 
         # ----------------------------------------------------------------
-        # Stage 4: SDTM Generation (PTCV-22)
-        # Deserialise USDM timepoints for TV domain generation.
+        # Stage 3: LLM Retemplating (PTCV-60) — NEW
+        # Classify text into ICH sections using Claude, enriched with SoA.
         # ----------------------------------------------------------------
-        logger.info("Stage sdtm_generation: reading timepoints.parquet")
+        logger.info("Stage retemplating: running LlmRetemplater")
+
+        # Build SoA summary for B.4 enrichment
+        soa_summary: Optional[dict] = None
+        if soa_result.timepoint_count > 0:
+            soa_summary = {
+                "visit_count": soa_result.timepoint_count,
+                "activity_count": soa_result.activity_count,
+            }
+
+        retemplater = self._retemplater or LlmRetemplater(
+            gateway=self._gateway,
+            review_queue=self._review_queue,
+        )
+        retemplating_result: RetemplatingResult = retemplater.retemplate(
+            text_blocks=text_block_dicts,
+            registry_id=registry_id,
+            source_run_id=soa_result.run_id,
+            source_sha256=soa_cp.artifact_sha256,
+            soa_summary=soa_summary,
+        )
+
+        retemplating_cp = self._write_checkpoint(
+            pipeline_run_id=pipeline_run_id,
+            stage="retemplating",
+            stage_run_id=retemplating_result.run_id,
+            artifact_key=(
+                f"pipeline/{pipeline_run_id}/stage-04-retemplating.json"
+            ),
+            payload={
+                "stage": "retemplating",
+                "stage_run_id": retemplating_result.run_id,
+                "artifact_key": retemplating_result.artifact_key,
+                "artifact_sha256": retemplating_result.artifact_sha256,
+                "section_count": retemplating_result.section_count,
+                "review_count": retemplating_result.review_count,
+                "format_verdict": retemplating_result.format_verdict,
+                "format_confidence": retemplating_result.format_confidence,
+                "input_tokens": retemplating_result.input_tokens,
+                "output_tokens": retemplating_result.output_tokens,
+                "chunk_count": retemplating_result.chunk_count,
+            },
+            artifact_sha256=retemplating_result.artifact_sha256,
+            source_sha256=soa_cp.artifact_sha256,
+        )
+        checkpoints.append(retemplating_cp)
+
+        # ----------------------------------------------------------------
+        # Stage 4: Coverage Review (PTCV-60) — NEW
+        # Deterministic text overlap check: original vs retemplated.
+        # ----------------------------------------------------------------
+        logger.info("Stage coverage_review: running CoverageReviewer")
+
+        # Load retemplated sections for coverage review
+        sections_bytes = self._gateway.get_artifact(
+            retemplating_result.artifact_key,
+        )
+        sections = parquet_to_sections(sections_bytes)
+
+        reviewer = CoverageReviewer()
+        coverage_result: CoverageResult = reviewer.review(
+            original_text_blocks=text_block_dicts,
+            retemplated_sections=sections,
+        )
+
+        import hashlib
+        coverage_payload = json.dumps({
+            "stage": "coverage_review",
+            "coverage_score": coverage_result.coverage_score,
+            "total_original_chars": coverage_result.total_original_chars,
+            "covered_chars": coverage_result.covered_chars,
+            "uncovered_block_count": len(coverage_result.uncovered_blocks),
+            "passed": coverage_result.passed,
+        }).encode("utf-8")
+        coverage_sha256 = hashlib.sha256(coverage_payload).hexdigest()
+
+        coverage_cp = self._write_checkpoint(
+            pipeline_run_id=pipeline_run_id,
+            stage="coverage_review",
+            stage_run_id=retemplating_result.run_id,
+            artifact_key=(
+                f"pipeline/{pipeline_run_id}/stage-05-coverage-review.json"
+            ),
+            payload={
+                "stage": "coverage_review",
+                "coverage_score": coverage_result.coverage_score,
+                "total_original_chars": coverage_result.total_original_chars,
+                "covered_chars": coverage_result.covered_chars,
+                "uncovered_block_count": len(
+                    coverage_result.uncovered_blocks
+                ),
+                "passed": coverage_result.passed,
+            },
+            artifact_sha256=coverage_sha256,
+            source_sha256=retemplating_result.artifact_sha256,
+        )
+        checkpoints.append(coverage_cp)
+
+        # ----------------------------------------------------------------
+        # Stage 4b: Priority section extraction (PTCV-52)
+        # ----------------------------------------------------------------
+        priority_results = extract_priority_sections(
+            sections=sections,
+            text_blocks=text_blocks_sorted,
+            extracted_tables=pre_extracted_tables,
+        )
+        if priority_results:
+            logger.info(
+                "Priority sections: extracted %d sections",
+                len(priority_results),
+            )
+
+        # ----------------------------------------------------------------
+        # Stage 5: SDTM Generation (PTCV-22)
+        # Uses retemplated ICH sections + USDM timepoints.
+        # ----------------------------------------------------------------
+        logger.info("Stage sdtm_generation: running SdtmService")
         timepoints = []
         timepoints_key = soa_result.artifact_keys.get("timepoints")
         if timepoints_key:
@@ -354,7 +438,6 @@ class PipelineOrchestrator:
             writer = UsdmParquetWriter()
             timepoints = writer.parquet_to_timepoints(tp_bytes)
 
-        logger.info("Stage sdtm_generation: running SdtmService")
         sdtm_svc = SdtmService(
             gateway=self._gateway,
             review_queue=self._ct_review_queue,
@@ -364,18 +447,20 @@ class PipelineOrchestrator:
             timepoints=timepoints,
             registry_id=registry_id,
             amendment_number=amendment_number,
-            source_sha256=soa_cp.artifact_sha256,
+            source_sha256=coverage_cp.artifact_sha256,
         )
 
         sdtm_ts_sha256 = sdtm_result.artifact_sha256s.get(
-            "ts", sdtm_result.source_sha256
+            "ts", sdtm_result.source_sha256,
         )
 
         sdtm_cp = self._write_checkpoint(
             pipeline_run_id=pipeline_run_id,
             stage="sdtm_generation",
             stage_run_id=sdtm_result.run_id,
-            artifact_key=f"pipeline/{pipeline_run_id}/stage-05-sdtm-generation.json",
+            artifact_key=(
+                f"pipeline/{pipeline_run_id}/stage-06-sdtm-generation.json"
+            ),
             payload={
                 "stage": "sdtm_generation",
                 "stage_run_id": sdtm_result.run_id,
@@ -384,21 +469,24 @@ class PipelineOrchestrator:
                 "ct_unmapped_count": sdtm_result.ct_unmapped_count,
             },
             artifact_sha256=sdtm_ts_sha256,
-            source_sha256=soa_cp.artifact_sha256,
+            source_sha256=coverage_cp.artifact_sha256,
         )
         checkpoints.append(sdtm_cp)
 
         # ----------------------------------------------------------------
-        # Stage 5: Validation (PTCV-23)
+        # Stage 6: Validation (PTCV-23)
+        # Uses retemplating_result for format verdict (not parse_result).
         # ----------------------------------------------------------------
         logger.info("Stage validation: running ValidationService")
         val_svc = ValidationService(gateway=self._gateway)
         validation_result: ValidationResult = val_svc.validate(
             sdtm_result=sdtm_result,
-            format_verdict=parse_result.format_verdict,
-            format_confidence=parse_result.format_confidence,
-            sections_detected=parse_result.section_count,
-            missing_required_sections=parse_result.missing_required_sections,
+            format_verdict=retemplating_result.format_verdict,
+            format_confidence=retemplating_result.format_confidence,
+            sections_detected=retemplating_result.section_count,
+            missing_required_sections=(
+                retemplating_result.missing_required_sections
+            ),
         )
 
         val_primary_sha256 = validation_result.artifact_sha256s.get(
@@ -410,7 +498,9 @@ class PipelineOrchestrator:
             pipeline_run_id=pipeline_run_id,
             stage="validation",
             stage_run_id=validation_result.run_id,
-            artifact_key=f"pipeline/{pipeline_run_id}/stage-06-validation.json",
+            artifact_key=(
+                f"pipeline/{pipeline_run_id}/stage-07-validation.json"
+            ),
             payload={
                 "stage": "validation",
                 "stage_run_id": validation_result.run_id,
@@ -436,8 +526,9 @@ class PipelineOrchestrator:
             registry_id=registry_id,
             amendment_number=amendment_number,
             extraction_result=extraction_result,
-            parse_result=parse_result,
             soa_result=soa_result,
+            retemplating_result=retemplating_result,
+            coverage_result=coverage_result,
             sdtm_result=sdtm_result,
             validation_result=validation_result,
             protocol_sha256=source_sha256,
@@ -461,7 +552,7 @@ class PipelineOrchestrator:
     ) -> StageCheckpoint:
         """Write a pipeline-level stage checkpoint artifact to storage.
 
-        Uses pipeline_run_id as the run_id so all six checkpoint records
+        Uses pipeline_run_id as the run_id so all seven checkpoint records
         appear in get_lineage(pipeline_run_id).
 
         Args:

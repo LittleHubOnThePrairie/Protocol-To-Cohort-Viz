@@ -40,6 +40,10 @@ class IchSection:
             (pre-ICH-E6(R3) protocol or non-standard headings).
         extraction_timestamp_utc: ISO 8601 UTC timestamp of the write.
             Populated by IchParser immediately before storing.
+        content_text: Full assembled text for this section from the
+            original protocol (PTCV-64). Empty string for legacy
+            classification-only results. When populated, contains the
+            complete un-truncated text assigned to this ICH section.
     """
 
     run_id: str
@@ -53,6 +57,7 @@ class IchSection:
     review_required: bool
     legacy_format: bool
     extraction_timestamp_utc: str = ""
+    content_text: str = ""
 
 
 @dataclasses.dataclass

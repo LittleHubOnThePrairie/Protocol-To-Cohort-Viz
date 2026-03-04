@@ -5,6 +5,114 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-04T12:52:35Z] PTCV-60: Reorder pipeline: document-first SoA extraction with ICH retemplating
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Reorder pipeline: document-first SoA extraction with ICH retemplating
+
+**Files Modified:**
+- C:/Dev/PTCV/requirements.txt
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/coverage_reviewer.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/pipeline/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_llm_retemplater.py
+- C:/Dev/PTCV/tests/ich_parser/test_coverage_reviewer.py
+- C:/Dev/PTCV/tests/pipeline/test_orchestrator.py
+- C:/Dev/PTCV/tests/pipeline/conftest.py
+
+**Test Coverage:**
+5 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T12:42:31Z] PTCV-59: Implement protocol amendment diff engine for versioned SoA tracking
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement protocol amendment diff engine for versioned SoA tracking
+
+**Files Modified:**
+- C:/Dev/PTCV/.gitignore
+- C:/Dev/PTCV/jira_changelog.md
+- C:/Dev/PTCV/requirements.txt
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/parquet_writer.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/format_detector.py
+- C:/Dev/PTCV/src/ptcv/pipeline/__init__.py
+- C:/Dev/PTCV/src/ptcv/pipeline/models.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/__init__.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/extractor.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_detector.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_verdict.py
+- C:/Dev/PTCV/tests/pipeline/conftest.py
+- C:/Dev/PTCV/tests/pipeline/test_models.py
+- C:/Dev/PTCV/tests/pipeline/test_orchestrator.py
+
+**Test Coverage:**
+13 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T23:06:49Z] PTCV-61: Reconcile Streamlit UI with PTCV-60 document-first pipeline reorder
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Reconcile Streamlit UI with PTCV-60 document-first pipeline reorder
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-03T18:34:13Z] PTCV-51: SoA extraction pipeline ignores pre-extracted tables.parquet data
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoA extraction pipeline ignores pre-extracted tables.parquet data
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/soa_extractor/table_bridge.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/table_discovery.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/extractor.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/__init__.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/parser.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/soa_extractor/test_table_bridge.py
+- C:/Dev/PTCV/tests/soa_extractor/test_table_discovery.py
+- C:/Dev/PTCV/tests/annotations/test_models.py
+
+**Test Coverage:**
+6 test file(s) found
+Branch: `master` | Commits: 7aadfce, f711be6, 20d488e
+
+---
 ## [2026-03-03T17:37:31Z] PTCV-42: Enhanced protocol file browser: group by therapeutic area, display titles, order by quality
 
 **Status Change:** In Progress -> Done

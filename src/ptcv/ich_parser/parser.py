@@ -338,5 +338,6 @@ class IchParser:
                 confidence_score=0.10,
                 review_required=True,
                 legacy_format=True,
+                content_text=text,
             )
         ]
