@@ -27,186 +27,14 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .models import IchSection
+from .schema_loader import get_classifier_sections
 
 
 # ---------------------------------------------------------------------------
-# ICH E6(R3) Appendix B section definitions
+# ICH E6(R3) Appendix B section definitions — loaded from YAML (PTCV-67)
 # ---------------------------------------------------------------------------
 
-_ICH_SECTIONS: dict[str, dict[str, Any]] = {
-    "B.1": {
-        "name": "General Information",
-        "patterns": [
-            r"\bgeneral\s+information\b",
-            r"\bprotocol\s+(?:title|number|version|date)\b",
-            r"\btrial\s+title\b",
-            r"\bsponsor\s+(?:name|address|contact)\b",
-        ],
-        "keywords": [
-            "title", "sponsor", "investigator", "protocol number",
-            "version", "phase", "eudract", "euct", "nct",
-            "amendment", "date of protocol",
-        ],
-    },
-    "B.2": {
-        "name": "Background Information",
-        "patterns": [
-            r"\bbackground\b",
-            r"\brationale\b",
-            r"\bpreclinical\b",
-            r"\bnonclinical\b",
-            r"\bliterature\s+review\b",
-            r"\bstate\s+of\s+(?:the\s+)?art\b",
-        ],
-        "keywords": [
-            "background", "rationale", "preclinical", "nonclinical",
-            "prior studies", "literature", "mechanism of action",
-            "disease background", "current treatment",
-        ],
-    },
-    "B.3": {
-        "name": "Trial Objectives and Purpose",
-        "patterns": [
-            r"\bobjectives?\b",
-            r"\bpurpose\b",
-            r"\bhypothes[ie]s\b",
-            r"\bprimary\s+(?:objective|endpoint|outcome)\b",
-            r"\bsecondary\s+(?:objective|endpoint|outcome)\b",
-        ],
-        "keywords": [
-            "objective", "purpose", "primary endpoint", "secondary endpoint",
-            "hypothesis", "primary outcome", "efficacy endpoint",
-        ],
-    },
-    "B.4": {
-        "name": "Trial Design",
-        "patterns": [
-            r"\btrial\s+design\b",
-            r"\bstudy\s+design\b",
-            r"\brandomis(?:ed|ation)\b",
-            r"\bdouble.blind\b",
-            r"\bopen.label\b",
-            r"\bparallel.group\b",
-            r"\bcrossover\b",
-        ],
-        "keywords": [
-            "design", "randomisation", "blinding", "control", "parallel",
-            "crossover", "open-label", "double-blind", "single-blind",
-            "placebo", "active comparator", "allocation",
-        ],
-    },
-    "B.5": {
-        "name": "Selection of Subjects",
-        "patterns": [
-            r"\b(?:inclusion|exclusion)\s+criteria\b",
-            r"\beligibility\s+criteria\b",
-            r"\bselection\s+of\s+(?:subjects|patients|participants)\b",
-            r"\bentry\s+criteria\b",
-        ],
-        "keywords": [
-            "inclusion criteria", "exclusion criteria", "eligibility",
-            "subject selection", "patient population", "age range",
-            "diagnosis", "contraindication",
-        ],
-    },
-    "B.6": {
-        "name": "Treatment of Subjects",
-        "patterns": [
-            r"\bdiscontinuation\b",
-            r"\bwithdrawal\b",
-            r"\btreatment\s+(?:discontinuation|withdrawal|termination)\b",
-            r"\bstopping\s+rules?\b",
-        ],
-        "keywords": [
-            "discontinuation", "withdrawal", "stopping rules",
-            "treatment termination", "dropout", "lost to follow-up",
-        ],
-    },
-    "B.7": {
-        "name": "Assessment of Efficacy",
-        "patterns": [
-            r"\btreatment\s+(?:schedule|regimen|administration)\b",
-            r"\bdose(?:s|ing|age)?\b",
-            r"\bconcomitant\s+(?:medication|treatment|therapy)\b",
-            r"\bstudy\s+treatment\b",
-            r"\binvestigational\s+(?:product|medicinal\s+product)\b",
-        ],
-        "keywords": [
-            "dose", "dosing", "administration", "regimen",
-            "investigational product", "IMP", "treatment schedule",
-            "concomitant medication", "rescue medication",
-        ],
-    },
-    "B.8": {
-        "name": "Assessment of Safety",
-        "patterns": [
-            r"\befficacy\s+(?:assessments?|endpoints?|evaluations?)\b",
-            r"\bprimary\s+efficacy\b",
-            r"\bclinical\s+outcome\b",
-            r"\bresponse\s+(?:criteria|rate|assessment)\b",
-            r"\bsurvival\b",
-            r"\bremission\b",
-        ],
-        "keywords": [
-            "efficacy assessment", "clinical response", "tumour response",
-            "progression-free survival", "overall survival", "remission",
-            "disease-free", "response rate",
-        ],
-    },
-    "B.9": {
-        "name": "Statistics",
-        "patterns": [
-            r"\bsafety\s+(?:assessments?|monitoring|evaluations?)\b",
-            r"\badverse\s+(?:event|reaction|effect)\b",
-            r"\bserious\s+adverse\b",
-            r"\bvital\s+signs?\b",
-            r"\blaboratory\s+(?:tests?|assessments?|parameters?)\b",
-            r"\becg\b",
-            r"\btoxicity\b",
-        ],
-        "keywords": [
-            "adverse event", "adverse reaction", "SAE", "safety monitoring",
-            "vital signs", "laboratory", "ECG", "toxicity", "tolerability",
-            "DSMB", "SUSAR",
-        ],
-    },
-    "B.10": {
-        "name": "Direct Access to Source Data and Documents",
-        "patterns": [
-            r"\bstatistical\s+(?:methods?|analysis|plan)\b",
-            r"\bsample\s+size\b",
-            r"\bpower\s+(?:calculation|analysis)\b",
-            r"\banalysis\s+(?:population|set)\b",
-            r"\bintention.to.treat\b",
-            r"\bper.protocol\b",
-        ],
-        "keywords": [
-            "statistical analysis", "sample size", "power calculation",
-            "significance level", "analysis population",
-            "intention-to-treat", "per-protocol", "missing data",
-            "multiplicity", "interim analysis",
-        ],
-    },
-    "B.11": {
-        "name": "Quality Control and Quality Assurance",
-        "patterns": [
-            r"\bquality\s+(?:control|assurance|management)\b",
-            r"\baudit\b",
-            r"\binspection\b",
-            r"\bmonitoring\s+(?:plan|visits?|procedures?)\b",
-            r"\bsource\s+data\s+(?:verification|access)\b",
-            r"\bdata\s+(?:management|governance|integrity)\b",
-            r"\bGCP\b",
-            r"\bICH\s+E6\b",
-        ],
-        "keywords": [
-            "quality control", "quality assurance", "audit", "inspection",
-            "monitoring", "GCP", "ICH E6", "source data verification",
-            "data management", "data integrity", "regulatory compliance",
-            "ethics committee", "IRB", "informed consent",
-        ],
-    },
-}
+_ICH_SECTIONS: dict[str, dict[str, Any]] = get_classifier_sections()
 
 # Confidence threshold below which review is required (ALCOA+ Accurate)
 REVIEW_THRESHOLD = 0.70
@@ -299,6 +127,7 @@ class RuleBasedClassifier(SectionClassifier):
                     confidence_score=round(best_score, 4),
                     review_required=review_required,
                     legacy_format=legacy,
+                    content_text=block_text,
                 )
             )
 
@@ -354,13 +183,46 @@ class RuleBasedClassifier(SectionClassifier):
         return best_code, best_score, content
 
     def _deduplicate(self, sections: list[IchSection]) -> list[IchSection]:
-        """Keep one IchSection per section_code — highest confidence wins."""
+        """Keep one IchSection per section_code — highest confidence wins.
+
+        When multiple blocks classify to the same section, the
+        highest-confidence one is kept and content_text from all
+        blocks is merged (PTCV-64).
+        """
+        import dataclasses as _dc
+
         best: dict[str, IchSection] = {}
+        extra_texts: dict[str, list[str]] = {}
         for sec in sections:
             existing = best.get(sec.section_code)
-            if existing is None or sec.confidence_score > existing.confidence_score:
+            if existing is None:
                 best[sec.section_code] = sec
-        return sorted(best.values(), key=lambda s: s.section_code)
+                extra_texts[sec.section_code] = []
+            elif sec.confidence_score > existing.confidence_score:
+                extra_texts[sec.section_code].append(
+                    existing.content_text,
+                )
+                best[sec.section_code] = sec
+            else:
+                extra_texts[sec.section_code].append(
+                    sec.content_text,
+                )
+
+        # Merge content_text from duplicate blocks
+        result: list[IchSection] = []
+        for code in sorted(best.keys()):
+            sec = best[code]
+            extras = [
+                t for t in extra_texts.get(code, []) if t
+            ]
+            if extras and sec.content_text:
+                merged = sec.content_text + "\n" + "\n".join(
+                    extras,
+                )
+                sec = _dc.replace(sec, content_text=merged)
+            result.append(sec)
+
+        return result
 
 
 # ---------------------------------------------------------------------------

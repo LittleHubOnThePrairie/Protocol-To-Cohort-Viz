@@ -10,6 +10,9 @@ build/
 venv/
 .pytest_cache/
 .mypy_cache/
-data/protocols/
-data/audit/
+data/*
+!data/templates/
+data/templates/*
+!data/templates/ich_e6r3_schema.yaml
 *.jsonl
+.secrets

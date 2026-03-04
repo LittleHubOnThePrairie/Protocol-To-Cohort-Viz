@@ -1,0 +1,368 @@
+# ICH E6(R3) Appendix B section schema (PTCV-67).
+#
+# Single source of truth for section definitions, keywords, and
+# regex patterns used by the ICH parser pipeline.  Replaces hardcoded
+# dicts in llm_retemplater.py and classifier.py.
+#
+# Loaded once at module import via schema_loader.load_ich_schema().
+
+version: "E6(R3)"
+effective_date: "2025-01-06"
+
+sections:
+  B.1:
+    name: "General Information"
+    description: >-
+      General Information (title, sponsor, investigator,
+      protocol number, version)
+    requirement: mandatory
+    render_order: 1
+    patterns:
+      - "\\bgeneral\\s+information\\b"
+      - "\\bprotocol\\s+(?:title|number|version|date)\\b"
+      - "\\btrial\\s+title\\b"
+      - "\\bsponsor\\s+(?:name|address|contact)\\b"
+    keywords:
+      - "title"
+      - "sponsor"
+      - "investigator"
+      - "protocol number"
+      - "version"
+      - "phase"
+      - "eudract"
+      - "euct"
+      - "nct"
+      - "amendment"
+      - "date of protocol"
+
+  B.2:
+    name: "Background Information"
+    description: >-
+      Background Information (rationale, preclinical,
+      literature review)
+    requirement: mandatory
+    render_order: 2
+    patterns:
+      - "\\bbackground\\b"
+      - "\\brationale\\b"
+      - "\\bpreclinical\\b"
+      - "\\bnonclinical\\b"
+      - "\\bliterature\\s+review\\b"
+      - "\\bstate\\s+of\\s+(?:the\\s+)?art\\b"
+    keywords:
+      - "background"
+      - "rationale"
+      - "preclinical"
+      - "nonclinical"
+      - "prior studies"
+      - "literature"
+      - "mechanism of action"
+      - "disease background"
+      - "current treatment"
+
+  B.3:
+    name: "Trial Objectives and Purpose"
+    description: >-
+      Trial Objectives and Purpose (primary/secondary
+      endpoints, hypothesis)
+    requirement: mandatory
+    render_order: 3
+    patterns:
+      - "\\bobjectives?\\b"
+      - "\\bpurpose\\b"
+      - "\\bhypothes[ie]s\\b"
+      - "\\bprimary\\s+(?:objective|endpoint|outcome)\\b"
+      - "\\bsecondary\\s+(?:objective|endpoint|outcome)\\b"
+    keywords:
+      - "objective"
+      - "purpose"
+      - "primary endpoint"
+      - "secondary endpoint"
+      - "hypothesis"
+      - "primary outcome"
+      - "efficacy endpoint"
+
+  B.4:
+    name: "Trial Design"
+    description: >-
+      Trial Design (design, randomisation, blinding,
+      schedule of activities)
+    requirement: mandatory
+    render_order: 4
+    patterns:
+      - "\\btrial\\s+design\\b"
+      - "\\bstudy\\s+design\\b"
+      - "\\brandomis(?:ed|ation)\\b"
+      - "\\bdouble.blind\\b"
+      - "\\bopen.label\\b"
+      - "\\bparallel.group\\b"
+      - "\\bcrossover\\b"
+      - "\\bstudy\\s+calendar\\b"
+      - "\\bschedule\\s+of\\s+(?:activities|assessments)\\b"
+      - "\\bassessment\\s+calendar\\b"
+    keywords:
+      - "design"
+      - "randomisation"
+      - "blinding"
+      - "control"
+      - "parallel"
+      - "crossover"
+      - "open-label"
+      - "double-blind"
+      - "single-blind"
+      - "placebo"
+      - "active comparator"
+      - "allocation"
+      - "study calendar"
+      - "schedule of activities"
+      - "assessment calendar"
+
+  B.5:
+    name: "Selection of Subjects"
+    description: >-
+      Selection of Subjects (inclusion/exclusion criteria,
+      eligibility)
+    requirement: mandatory
+    render_order: 5
+    patterns:
+      - "\\b(?:inclusion|exclusion)\\s+criteria\\b"
+      - "\\beligibility\\s+criteria\\b"
+      - "\\bselection\\s+of\\s+(?:subjects|patients|participants)\\b"
+      - "\\bentry\\s+criteria\\b"
+    keywords:
+      - "inclusion criteria"
+      - "exclusion criteria"
+      - "eligibility"
+      - "subject selection"
+      - "patient population"
+      - "age range"
+      - "diagnosis"
+      - "contraindication"
+
+  B.6:
+    name: "Treatment of Subjects"
+    description: >-
+      Treatment of Subjects (discontinuation, withdrawal,
+      stopping rules)
+    requirement: mandatory
+    render_order: 6
+    patterns:
+      - "\\bdiscontinuation\\b"
+      - "\\bwithdrawal\\b"
+      - "\\btreatment\\s+(?:discontinuation|withdrawal|termination)\\b"
+      - "\\bstopping\\s+rules?\\b"
+    keywords:
+      - "discontinuation"
+      - "withdrawal"
+      - "stopping rules"
+      - "treatment termination"
+      - "dropout"
+      - "lost to follow-up"
+
+  B.7:
+    name: "Assessment of Efficacy"
+    description: >-
+      Assessment of Efficacy (treatment schedule, dosing,
+      IMP administration)
+    requirement: mandatory
+    render_order: 7
+    patterns:
+      - "\\btreatment\\s+(?:schedule|regimen|administration)\\b"
+      - "\\bdose(?:s|ing|age)?\\b"
+      - "\\bconcomitant\\s+(?:medication|treatment|therapy)\\b"
+      - "\\bstudy\\s+treatment\\b"
+      - "\\binvestigational\\s+(?:product|medicinal\\s+product)\\b"
+    keywords:
+      - "dose"
+      - "dosing"
+      - "administration"
+      - "regimen"
+      - "investigational product"
+      - "IMP"
+      - "treatment schedule"
+      - "concomitant medication"
+      - "rescue medication"
+
+  B.8:
+    name: "Assessment of Safety"
+    description: >-
+      Assessment of Safety (AEs, SAEs, vital signs, labs,
+      ECG, toxicity)
+    requirement: mandatory
+    render_order: 8
+    patterns:
+      - "\\befficacy\\s+(?:assessments?|endpoints?|evaluations?)\\b"
+      - "\\bprimary\\s+efficacy\\b"
+      - "\\bclinical\\s+outcome\\b"
+      - "\\bresponse\\s+(?:criteria|rate|assessment)\\b"
+      - "\\bsurvival\\b"
+      - "\\bremission\\b"
+    keywords:
+      - "efficacy assessment"
+      - "clinical response"
+      - "tumour response"
+      - "progression-free survival"
+      - "overall survival"
+      - "remission"
+      - "disease-free"
+      - "response rate"
+
+  B.9:
+    name: "Statistics"
+    description: >-
+      Statistics (statistical analysis plan, sample size,
+      power calculation)
+    requirement: mandatory
+    render_order: 9
+    patterns:
+      - "\\bsafety\\s+(?:assessments?|monitoring|evaluations?)\\b"
+      - "\\badverse\\s+(?:event|reaction|effect)\\b"
+      - "\\bserious\\s+adverse\\b"
+      - "\\bvital\\s+signs?\\b"
+      - "\\blaboratory\\s+(?:tests?|assessments?|parameters?)\\b"
+      - "\\becg\\b"
+      - "\\btoxicity\\b"
+    keywords:
+      - "adverse event"
+      - "adverse reaction"
+      - "SAE"
+      - "safety monitoring"
+      - "vital signs"
+      - "laboratory"
+      - "ECG"
+      - "toxicity"
+      - "tolerability"
+      - "DSMB"
+      - "SUSAR"
+
+  B.10:
+    name: "Direct Access to Source Data and Documents"
+    description: >-
+      Direct Access to Source Data (quality control, data
+      management, GCP, monitoring)
+    requirement: mandatory
+    render_order: 10
+    patterns:
+      - "\\bstatistical\\s+(?:methods?|analysis|plan)\\b"
+      - "\\bsample\\s+size\\b"
+      - "\\bpower\\s+(?:calculation|analysis)\\b"
+      - "\\banalysis\\s+(?:population|set)\\b"
+      - "\\bintention.to.treat\\b"
+      - "\\bper.protocol\\b"
+    keywords:
+      - "statistical analysis"
+      - "sample size"
+      - "power calculation"
+      - "significance level"
+      - "analysis population"
+      - "intention-to-treat"
+      - "per-protocol"
+      - "missing data"
+      - "multiplicity"
+      - "interim analysis"
+
+  B.11:
+    name: "Quality Control and Quality Assurance"
+    description: >-
+      Quality Control and Quality Assurance (audit,
+      inspection, source data verification)
+    requirement: mandatory
+    render_order: 11
+    patterns:
+      - "\\bquality\\s+(?:control|assurance|management)\\b"
+      - "\\baudit\\b"
+      - "\\binspection\\b"
+      - "\\bmonitoring\\s+(?:plan|visits?|procedures?)\\b"
+      - "\\bsource\\s+data\\s+(?:verification|access)\\b"
+      - "\\bdata\\s+(?:management|governance|integrity)\\b"
+      - "\\bGCP\\b"
+      - "\\bICH\\s+E6\\b"
+    keywords:
+      - "quality control"
+      - "quality assurance"
+      - "audit"
+      - "inspection"
+      - "monitoring"
+      - "GCP"
+      - "ICH E6"
+      - "source data verification"
+      - "data management"
+      - "data integrity"
+      - "regulatory compliance"
+      - "ethics committee"
+      - "IRB"
+      - "informed consent"
+
+  B.12:
+    name: "Ethics"
+    description: >-
+      Ethics (ethics committee, IRB approval, informed
+      consent process, subject information)
+    requirement: mandatory
+    render_order: 12
+    patterns:
+      - "\\bethics\\s+(?:committee|review|approval)\\b"
+      - "\\bIRB\\b"
+      - "\\bIEC\\b"
+      - "\\binformed\\s+consent\\b"
+      - "\\bsubject\\s+information\\s+(?:sheet|leaflet)\\b"
+      - "\\bindependent\\s+ethics\\b"
+    keywords:
+      - "ethics"
+      - "ethics committee"
+      - "IRB"
+      - "IEC"
+      - "informed consent"
+      - "subject information"
+      - "ethical approval"
+      - "consent form"
+      - "assent"
+
+  B.13:
+    name: "Data Handling and Record Keeping"
+    description: >-
+      Data Handling and Record Keeping (CRF, data
+      management, electronic records, archiving)
+    requirement: mandatory
+    render_order: 13
+    patterns:
+      - "\\bdata\\s+handling\\b"
+      - "\\brecord\\s+keeping\\b"
+      - "\\bcase\\s+report\\s+form\\b"
+      - "\\bCRF\\b"
+      - "\\beCRF\\b"
+      - "\\belectronic\\s+(?:data|record)\\b"
+      - "\\barchiv(?:ing|e)\\b"
+    keywords:
+      - "data handling"
+      - "record keeping"
+      - "CRF"
+      - "case report form"
+      - "eCRF"
+      - "data entry"
+      - "electronic records"
+      - "archiving"
+      - "data retention"
+
+  B.14:
+    name: "Financing, Insurance, and Publication Policy"
+    description: >-
+      Financing, Insurance, and Publication Policy
+      (financial disclosure, insurance, publication)
+    requirement: mandatory
+    render_order: 14
+    patterns:
+      - "\\bfinanc(?:ing|ial)\\b"
+      - "\\binsurance\\b"
+      - "\\bpublication\\s+(?:policy|plan|agreement)\\b"
+      - "\\bcompensation\\b"
+      - "\\bindemnity\\b"
+    keywords:
+      - "financing"
+      - "financial disclosure"
+      - "insurance"
+      - "publication"
+      - "publication policy"
+      - "compensation"
+      - "indemnity"
+      - "funding"

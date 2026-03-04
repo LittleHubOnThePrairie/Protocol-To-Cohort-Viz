@@ -37,6 +37,7 @@ from ..storage import FilesystemAdapter, StorageGateway
 from .models import IchSection, ReviewQueueEntry
 from .parquet_writer import sections_to_parquet
 from .review_queue import ReviewQueue
+from .schema_loader import get_section_defs, get_section_order
 
 logger = logging.getLogger(__name__)
 
@@ -47,55 +48,11 @@ _DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
 # Maximum text characters per LLM chunk (~30K tokens with prompt)
 _MAX_CHUNK_CHARS = 100_000
 
-# ICH E6(R3) Appendix B section definitions for prompt
-_ICH_SECTION_DEFS: dict[str, str] = {
-    "B.1": "General Information (title, sponsor, investigator, "
-           "protocol number, version)",
-    "B.2": "Background Information (rationale, preclinical, "
-           "literature review)",
-    "B.3": "Trial Objectives and Purpose (primary/secondary "
-           "endpoints, hypothesis)",
-    "B.4": "Trial Design (design, randomisation, blinding, "
-           "schedule of activities)",
-    "B.5": "Selection of Subjects (inclusion/exclusion criteria, "
-           "eligibility)",
-    "B.6": "Treatment of Subjects (discontinuation, withdrawal, "
-           "stopping rules)",
-    "B.7": "Assessment of Efficacy (treatment schedule, dosing, "
-           "IMP administration)",
-    "B.8": "Assessment of Safety (AEs, SAEs, vital signs, labs, "
-           "ECG, toxicity)",
-    "B.9": "Statistics (statistical analysis plan, sample size, "
-           "power calculation)",
-    "B.10": "Direct Access to Source Data (quality control, data "
-            "management, GCP, monitoring)",
-    "B.11": "Quality Control and Quality Assurance (audit, "
-            "inspection, source data verification)",
-    "B.12": "Ethics (ethics committee, IRB approval, informed "
-            "consent process, subject information)",
-    "B.13": "Data Handling and Record Keeping (CRF, data "
-            "management, electronic records, archiving)",
-    "B.14": "Financing, Insurance, and Publication Policy "
-            "(financial disclosure, insurance, publication)",
-}
+# ICH E6(R3) Appendix B section definitions — loaded from YAML (PTCV-67)
+_ICH_SECTION_DEFS: dict[str, str] = get_section_defs()
 
-# Canonical section order for markdown rendering
-_ICH_SECTION_ORDER: list[tuple[str, str]] = [
-    ("B.1", "General Information"),
-    ("B.2", "Background Information"),
-    ("B.3", "Trial Objectives and Purpose"),
-    ("B.4", "Trial Design"),
-    ("B.5", "Selection of Subjects"),
-    ("B.6", "Treatment of Subjects"),
-    ("B.7", "Assessment of Efficacy"),
-    ("B.8", "Assessment of Safety"),
-    ("B.9", "Statistics"),
-    ("B.10", "Direct Access to Source Data and Documents"),
-    ("B.11", "Quality Control and Quality Assurance"),
-    ("B.12", "Ethics"),
-    ("B.13", "Data Handling and Record Keeping"),
-    ("B.14", "Financing, Insurance, and Publication Policy"),
-]
+# Canonical section order for markdown rendering — loaded from YAML (PTCV-67)
+_ICH_SECTION_ORDER: list[tuple[str, str]] = get_section_order()
 
 
 @dataclasses.dataclass
