@@ -23,6 +23,8 @@ import io
 import logging
 import os
 import sys
+import time
+import traceback
 from pathlib import Path
 
 # Ensure src/ is on sys.path for non-installed package
@@ -923,6 +925,7 @@ def main() -> None:
     if st.button("Run Pipeline", disabled=not active):
         gateway = _get_gateway()
         execution_order = get_execution_order(active)
+        pipeline_error = False
 
         for stage_key in execution_order:
             stage = STAGE_BY_KEY[stage_key]
@@ -931,84 +934,187 @@ def main() -> None:
             if not stage.cache_key:
                 continue
 
-            # Skip already-cached stages
-            if _is_cached(stage_key):
-                st.toast(f"{stage.label}: Cached")
+            # Stop pipeline on prior error (PTCV-82)
+            if pipeline_error:
+                st.status(
+                    f"{stage.label}: Skipped (prior error)",
+                    state="error",
+                )
                 continue
 
-            # Execute stage
+            # Cached stages: show status instead of toast (PTCV-82)
+            if _is_cached(stage_key):
+                st.status(
+                    f"{stage.label}: Cached",
+                    state="complete",
+                )
+                continue
+
+            # Execute stage with timing and error handling
             if stage_key in ("extraction", "retemplating"):
                 # Both resolve via _run_parse()
                 if cached is None:
                     with st.status(
-                        f"Running {stage.label}...", expanded=True,
+                        f"Running {stage.label}...",
+                        expanded=True,
                     ) as status:
+                        t0 = time.monotonic()
                         tier = st.session_state.get(
                             "model_tier", _DEFAULT_TIER,
                         )
-                        result = _run_parse(
-                            pdf_bytes, file_path.name, gateway,
-                            model_tier=tier,
+                        st.write(
+                            f"Extracting and retemplating "
+                            f"{page_count} pages "
+                            f"({tier})..."
                         )
-                        st.session_state["parse_cache"][
-                            file_sha
-                        ] = result
-                        cached = result
-                        status.update(
-                            label=f"{stage.label}: Complete",
-                            state="complete",
-                        )
+                        try:
+                            result = _run_parse(
+                                pdf_bytes, file_path.name,
+                                gateway, model_tier=tier,
+                            )
+                            elapsed = time.monotonic() - t0
+                            st.session_state["parse_cache"][
+                                file_sha
+                            ] = result
+                            cached = result
+                            status.update(
+                                label=(
+                                    f"{stage.label}: "
+                                    f"Complete ({elapsed:.1f}s)"
+                                ),
+                                state="complete",
+                            )
+                        except Exception:
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    f"{stage.label}: "
+                                    f"Error ({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.code(
+                                traceback.format_exc(),
+                                language="text",
+                            )
+                            pipeline_error = True
                 else:
-                    st.toast(f"{stage.label}: Cached")
+                    st.status(
+                        f"{stage.label}: Cached",
+                        state="complete",
+                    )
 
             elif stage_key == "soa":
                 with st.status(
                     "Running SoA Extraction...", expanded=True,
                 ) as status:
-                    soa_result = _run_soa_extraction(
-                        cached, pdf_bytes, gateway,
-                    )
-                    st.session_state["soa_cache"][
-                        file_sha
-                    ] = soa_result
-                    soa_cached = soa_result
-                    status.update(
-                        label="SoA Extraction: Complete",
-                        state="complete",
-                    )
+                    t0 = time.monotonic()
+                    st.write("Discovering tables and timepoints...")
+                    try:
+                        soa_result = _run_soa_extraction(
+                            cached, pdf_bytes, gateway,
+                        )
+                        elapsed = time.monotonic() - t0
+                        st.session_state["soa_cache"][
+                            file_sha
+                        ] = soa_result
+                        soa_cached = soa_result
+                        status.update(
+                            label=(
+                                "SoA Extraction: "
+                                f"Complete ({elapsed:.1f}s)"
+                            ),
+                            state="complete",
+                        )
+                    except Exception:
+                        elapsed = time.monotonic() - t0
+                        status.update(
+                            label=(
+                                "SoA Extraction: "
+                                f"Error ({elapsed:.1f}s)"
+                            ),
+                            state="error",
+                        )
+                        st.code(
+                            traceback.format_exc(),
+                            language="text",
+                        )
+                        pipeline_error = True
 
             elif stage_key == "fidelity":
                 with st.status(
                     "Running Fidelity Check...", expanded=True,
                 ) as status:
-                    fidelity_result = _run_fidelity_check(
-                        cached, gateway,
-                        enable_llm=_HAS_ANTHROPIC_KEY,
-                    )
-                    st.session_state["fidelity_cache"][
-                        file_sha
-                    ] = fidelity_result
-                    fidelity_cached = fidelity_result
-                    status.update(
-                        label="Fidelity Check: Complete",
-                        state="complete",
-                    )
+                    t0 = time.monotonic()
+                    st.write("Comparing retemplated vs original...")
+                    try:
+                        fidelity_result = _run_fidelity_check(
+                            cached, gateway,
+                            enable_llm=_HAS_ANTHROPIC_KEY,
+                        )
+                        elapsed = time.monotonic() - t0
+                        st.session_state["fidelity_cache"][
+                            file_sha
+                        ] = fidelity_result
+                        fidelity_cached = fidelity_result
+                        status.update(
+                            label=(
+                                "Fidelity Check: "
+                                f"Complete ({elapsed:.1f}s)"
+                            ),
+                            state="complete",
+                        )
+                    except Exception:
+                        elapsed = time.monotonic() - t0
+                        status.update(
+                            label=(
+                                "Fidelity Check: "
+                                f"Error ({elapsed:.1f}s)"
+                            ),
+                            state="error",
+                        )
+                        st.code(
+                            traceback.format_exc(),
+                            language="text",
+                        )
+                        pipeline_error = True
 
             elif stage_key == "sdtm":
                 with st.status(
                     "Running SDTM Generation...", expanded=True,
                 ) as status:
-                    sdtm_result = _run_sdtm_generation(
-                        cached, soa_cached, gateway,
-                    )
-                    st.session_state["sdtm_cache"][
-                        file_sha
-                    ] = sdtm_result
-                    sdtm_cached = sdtm_result
-                    status.update(
-                        label="SDTM Generation: Complete",
-                        state="complete",
-                    )
+                    t0 = time.monotonic()
+                    st.write("Generating SDTM domains...")
+                    try:
+                        sdtm_result = _run_sdtm_generation(
+                            cached, soa_cached, gateway,
+                        )
+                        elapsed = time.monotonic() - t0
+                        st.session_state["sdtm_cache"][
+                            file_sha
+                        ] = sdtm_result
+                        sdtm_cached = sdtm_result
+                        status.update(
+                            label=(
+                                "SDTM Generation: "
+                                f"Complete ({elapsed:.1f}s)"
+                            ),
+                            state="complete",
+                        )
+                    except Exception:
+                        elapsed = time.monotonic() - t0
+                        status.update(
+                            label=(
+                                "SDTM Generation: "
+                                f"Error ({elapsed:.1f}s)"
+                            ),
+                            state="error",
+                        )
+                        st.code(
+                            traceback.format_exc(),
+                            language="text",
+                        )
+                        pipeline_error = True
 
     # ------------------------------------------------------------------
     # Display results for all active stages (PTCV-77)
