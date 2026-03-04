@@ -34,7 +34,7 @@ import pyarrow.parquet as pq
 import streamlit as st
 
 from ptcv.extraction import ExtractionService, parquet_to_tables, parquet_to_text_blocks
-from ptcv.ich_parser import IchParser
+from ptcv.ich_parser import IchParser, RAGClassifier
 from ptcv.ich_parser.coverage_reviewer import CoverageReviewer
 from ptcv.ich_parser.fidelity_checker import FidelityChecker
 from ptcv.ich_parser.llm_retemplater import LlmRetemplater
@@ -71,6 +71,56 @@ _PROTOCOLS_DIR = _DATA_ROOT / "protocols"
 
 # LLM retemplating available when API key is set
 _HAS_ANTHROPIC_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+# Model tier definitions (PTCV-78)
+_MODEL_TIERS: dict[str, dict[str, str | float]] = {
+    "Best Quality (Opus)": {
+        "model_id": "claude-opus-4-6",
+        "method": "llm",
+        "cost_per_page_low": 0.015,
+        "cost_per_page_high": 0.020,
+    },
+    "Balanced (Sonnet)": {
+        "model_id": "claude-sonnet-4-6",
+        "method": "rag",
+        "cost_per_page_low": 0.0008,
+        "cost_per_page_high": 0.002,
+    },
+}
+_DEFAULT_TIER = "Best Quality (Opus)"
+
+
+def estimate_cost(page_count: int, tier: str) -> tuple[float, float]:
+    """Estimate LLM cost based on page count and model tier.
+
+    Args:
+        page_count: Number of pages in the PDF.
+        tier: Key into _MODEL_TIERS.
+
+    Returns:
+        (low_estimate, high_estimate) in USD.
+    """
+    cfg = _MODEL_TIERS[tier]
+    low = page_count * float(cfg["cost_per_page_low"])
+    high = page_count * float(cfg["cost_per_page_high"])
+    return (low, high)
+
+
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Count pages in a PDF without full extraction.
+
+    Args:
+        pdf_bytes: Raw PDF file bytes.
+
+    Returns:
+        Page count (0 on failure).
+    """
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            return len(pdf.pages)
+    except Exception:
+        return 0
 
 
 def _get_gateway() -> FilesystemAdapter:
@@ -122,11 +172,12 @@ def _run_parse(
     pdf_bytes: bytes,
     filename: str,
     gateway: FilesystemAdapter,
+    model_tier: str = _DEFAULT_TIER,
 ) -> dict:
     """Run extraction and retemplating pipeline (PTCV-60 order).
 
     Chains ExtractionService.extract() → read text_blocks →
-    LlmRetemplater.retemplate() (or IchParser.parse() fallback)
+    LlmRetemplater.retemplate() (or IchParser/RAGClassifier fallback)
     → CoverageReviewer.review() and returns verdict fields for
     display.
 
@@ -134,6 +185,7 @@ def _run_parse(
         pdf_bytes: Raw PDF file bytes.
         filename: Original PDF filename.
         gateway: Initialised FilesystemAdapter.
+        model_tier: Model cost tier key from _MODEL_TIERS (PTCV-78).
 
     Returns:
         Dict with extraction info, retemplating verdict, coverage
@@ -196,9 +248,14 @@ def _run_parse(
         else 0
     )
 
-    # Stage 3: Retemplating (LlmRetemplater or IchParser fallback)
-    if _HAS_ANTHROPIC_KEY:
-        retemplater = LlmRetemplater(gateway=gateway)
+    # Stage 3: Retemplating — routed by model tier (PTCV-78)
+    tier_cfg = _MODEL_TIERS.get(model_tier, _MODEL_TIERS[_DEFAULT_TIER])
+    if _HAS_ANTHROPIC_KEY and tier_cfg["method"] == "llm":
+        # Opus tier: full LLM retemplater
+        retemplater = LlmRetemplater(
+            gateway=gateway,
+            claude_model=str(tier_cfg["model_id"]),
+        )
         retemplate_result = retemplater.retemplate(
             text_blocks=text_block_dicts,
             registry_id=registry_id,
@@ -217,8 +274,31 @@ def _run_parse(
         output_tokens = retemplate_result.output_tokens
         retemplated_artifact_key = retemplate_result.retemplated_artifact_key
         retemplating_method = "llm"
+    elif _HAS_ANTHROPIC_KEY and tier_cfg["method"] == "rag":
+        # Sonnet tier: RAGClassifier (Cohere + Sonnet) via IchParser
+        protocol_text = "\n".join(str(d["text"]) for d in text_block_dicts)
+        classifier = RAGClassifier(claude_model=str(tier_cfg["model_id"]))
+        parser = IchParser(gateway=gateway, classifier=classifier)
+        parse_result = parser.parse(
+            text=protocol_text,
+            registry_id=registry_id,
+            source_run_id=extraction_result.run_id,
+            source_sha256=extraction_result.text_artifact_sha256,
+        )
+        format_verdict = parse_result.format_verdict
+        format_confidence = parse_result.format_confidence
+        section_count = parse_result.section_count
+        review_count = parse_result.review_count
+        missing_required = parse_result.missing_required_sections
+        artifact_key = parse_result.artifact_key
+        retemplating_run_id = parse_result.run_id
+        artifact_sha256 = parse_result.artifact_sha256
+        input_tokens = 0
+        output_tokens = 0
+        retemplated_artifact_key = ""
+        retemplating_method = "rag"
     else:
-        # Fallback to deterministic IchParser when no API key
+        # No API key: deterministic IchParser fallback
         protocol_text = "\n".join(str(d["text"]) for d in text_block_dicts)
         parser = IchParser(gateway=gateway)
         parse_result = parser.parse(
@@ -275,6 +355,7 @@ def _run_parse(
         "output_tokens": output_tokens,
         "retemplating_method": retemplating_method,
         "retemplated_artifact_key": retemplated_artifact_key,
+        "model_tier": model_tier,
         # PTCV-60: coverage review
         "coverage_score": coverage_result.coverage_score,
         "coverage_passed": coverage_result.passed,
@@ -560,13 +641,20 @@ def _display_verdict(result: dict) -> None:
                 f"uncovered block(s))"
             )
 
-    # Retemplating method and token usage (PTCV-60)
+    # Retemplating method and token usage (PTCV-60, PTCV-78)
     method = result.get("retemplating_method", "ich_parser")
+    tier = result.get("model_tier", "")
     if method == "llm" and result.get("input_tokens", 0) > 0:
+        tier_label = f" [{tier}]" if tier else ""
         st.caption(
-            f"LLM retemplating: "
+            f"LLM retemplating{tier_label}: "
             f"{result['input_tokens']:,} in / "
             f"{result['output_tokens']:,} out tokens"
+        )
+    elif method == "rag":
+        st.caption(
+            f"RAG retemplating [{tier}]: "
+            "Cohere embeddings + Claude Sonnet"
         )
     elif method == "ich_parser":
         st.caption(
@@ -643,6 +731,7 @@ def main() -> None:
     # Read PDF and compute SHA for caching
     pdf_bytes = file_path.read_bytes()
     file_sha = _compute_sha256(pdf_bytes)
+    page_count = _count_pdf_pages(pdf_bytes)
 
     # Initialise caches
     if "parse_cache" not in st.session_state:
@@ -685,6 +774,27 @@ def main() -> None:
         if not cache_key:
             return False
         return file_sha in st.session_state.get(cache_key, {})
+
+    # Sidebar: model cost tier (PTCV-78)
+    with st.sidebar:
+        st.subheader("Model Tier")
+        tier_options = list(_MODEL_TIERS.keys())
+        selected_tier = st.radio(
+            "Retemplating model",
+            tier_options,
+            index=tier_options.index(_DEFAULT_TIER),
+            key="model_tier",
+            label_visibility="collapsed",
+        )
+
+        if page_count > 0 and _HAS_ANTHROPIC_KEY:
+            low, high = estimate_cost(page_count, selected_tier)
+            st.caption(
+                f"Est. cost ({page_count} pages): "
+                f"${low:.2f}\u2013${high:.2f}"
+            )
+        elif not _HAS_ANTHROPIC_KEY:
+            st.caption("No API key — deterministic fallback")
 
     # Sidebar: pipeline stage checkboxes
     with st.sidebar:
@@ -746,8 +856,12 @@ def main() -> None:
                     with st.status(
                         f"Running {stage.label}...", expanded=True,
                     ) as status:
+                        tier = st.session_state.get(
+                            "model_tier", _DEFAULT_TIER,
+                        )
                         result = _run_parse(
                             pdf_bytes, file_path.name, gateway,
+                            model_tier=tier,
                         )
                         st.session_state["parse_cache"][
                             file_sha
