@@ -36,6 +36,9 @@ from .schema_loader import get_classifier_sections, get_review_threshold
 
 _ICH_SECTIONS: dict[str, dict[str, Any]] = get_classifier_sections()
 
+# Minimum block size for splitting — blocks below this are merged (PTCV-48)
+_MIN_BLOCK_CHARS = 500
+
 
 # ---------------------------------------------------------------------------
 # Abstract base
@@ -136,12 +139,33 @@ class RuleBasedClassifier(SectionClassifier):
     # ------------------------------------------------------------------
 
     def _split_into_blocks(self, text: str) -> list[str]:
-        """Split text into candidate section blocks by heading detection."""
+        """Split text into candidate section blocks by heading detection.
+
+        Blocks shorter than ``_MIN_BLOCK_CHARS`` are merged with the
+        following block to avoid over-splitting (PTCV-48).
+        """
         positions = [m.start() for m in self._HEADING_RE.finditer(text)]
         if not positions:
             return [text]
         positions.append(len(text))
-        return [text[positions[i]: positions[i + 1]] for i in range(len(positions) - 1)]
+        raw = [text[positions[i]: positions[i + 1]] for i in range(len(positions) - 1)]
+
+        # Merge small blocks with the next block
+        merged: list[str] = []
+        carry = ""
+        for block in raw:
+            combined = carry + block
+            if len(combined) < _MIN_BLOCK_CHARS:
+                carry = combined
+            else:
+                merged.append(combined)
+                carry = ""
+        if carry:
+            if merged:
+                merged[-1] += carry
+            else:
+                merged.append(carry)
+        return merged
 
     def _score_block(
         self, block: str
@@ -290,7 +314,7 @@ class RAGClassifier(SectionClassifier):
         sections: list[IchSection] = []
 
         # Embed all blocks in one batch call
-        block_texts = [b[:4096] for b in blocks]
+        block_texts = [b[:8192] for b in blocks]
         embed_resp = self._co.embed(
             texts=block_texts,
             model=self._cohere_model,
@@ -369,20 +393,20 @@ class RAGClassifier(SectionClassifier):
             f"You are a GCP expert classifying clinical trial protocol text "
             f"into ICH E6(R3) Appendix B sections.\n\n"
             f"Protocol text (registry: {registry_id}):\n"
-            f"<text>\n{block[:3000]}\n</text>\n\n"
+            f"<text>\n{block[:8000]}\n</text>\n\n"
             f"Top candidate sections by embedding similarity:\n{candidates}\n\n"
             f"Respond with a single JSON object (no markdown) with these keys:\n"
             f"  section_code: the best matching ICH section code (e.g. \"B.3\")\n"
             f"  confidence: float 0.0–1.0 reflecting how well the text matches\n"
             f"  key_concepts: list of up to 5 key concepts found in the text\n"
-            f"  text_excerpt: first 500 chars of the classified text\n\n"
+            f"  text_excerpt: first 1000 chars of the classified text\n\n"
             f"Return section_code=\"NONE\" with confidence=0.0 if the text is "
             f"not classifiable as any ICH Appendix B section."
         )
 
         resp = self._claude.messages.create(
             model=self._claude_model,
-            max_tokens=512,
+            max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
         first_block = resp.content[0]
@@ -408,7 +432,7 @@ class RAGClassifier(SectionClassifier):
 
         content: dict[str, Any] = {
             "key_concepts": parsed.get("key_concepts", []),
-            "text_excerpt": parsed.get("text_excerpt", block[:500]),
+            "text_excerpt": parsed.get("text_excerpt", block[:1000]),
             "word_count": len(block.split()),
         }
         return section_code, json.dumps(content, ensure_ascii=False), confidence

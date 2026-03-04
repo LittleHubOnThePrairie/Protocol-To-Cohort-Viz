@@ -11,9 +11,9 @@ import pytest
 
 from ptcv.ich_parser.classifier import (
     RuleBasedClassifier,
-    REVIEW_THRESHOLD,
     _ICH_SECTIONS,
 )
+from ptcv.ich_parser.schema_loader import get_review_threshold
 from ptcv.ich_parser.models import IchSection
 
 
@@ -92,7 +92,7 @@ class TestRuleBasedClassifier:
             sample_text, REGISTRY_ID, RUN_ID, SOURCE_RUN_ID, SOURCE_SHA
         )
         for sec in sections:
-            if sec.confidence_score < REVIEW_THRESHOLD:
+            if sec.confidence_score < get_review_threshold(sec.section_code):
                 assert sec.review_required is True, (
                     f"review_required should be True for confidence "
                     f"{sec.confidence_score} (section {sec.section_code})"
@@ -184,7 +184,12 @@ class TestRuleBasedClassifier:
     def test_split_into_blocks_by_heading(
         self, clf: RuleBasedClassifier
     ) -> None:
-        text = "1. TITLE\nsome content\n2. BACKGROUND\nmore content"
+        text = (
+            "1. TITLE\n"
+            + "The protocol describes the clinical procedures in detail. " * 15
+            + "\n2. BACKGROUND\n"
+            + "Additional background information is provided herein. " * 15
+        )
         blocks = clf._split_into_blocks(text)
         assert len(blocks) >= 2
 
