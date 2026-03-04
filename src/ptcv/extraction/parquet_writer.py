@@ -66,6 +66,7 @@ _METADATA_SCHEMA = pa.schema(
         pa.field("table_count", pa.int32(), nullable=False),
         pa.field("text_block_count", pa.int32(), nullable=False),
         pa.field("extraction_timestamp_utc", pa.string(), nullable=False),
+        pa.field("landscape_pages", pa.string(), nullable=False),
     ]
 )
 
@@ -200,6 +201,7 @@ def metadata_to_parquet(metadata: "ExtractionMetadata") -> bytes:
                 [metadata.text_block_count], type=pa.int32()
             ),
             "extraction_timestamp_utc": [metadata.extraction_timestamp_utc],
+            "landscape_pages": [metadata.landscape_pages],
         },
         schema=_METADATA_SCHEMA,
     )
@@ -278,4 +280,5 @@ def parquet_to_metadata(data: bytes) -> "ExtractionMetadata":
         table_count=int(row["table_count"]),
         text_block_count=int(row["text_block_count"]),
         extraction_timestamp_utc=row["extraction_timestamp_utc"],
+        landscape_pages=row.get("landscape_pages", ""),
     )

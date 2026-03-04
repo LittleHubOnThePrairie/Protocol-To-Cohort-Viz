@@ -5,6 +5,78 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-04T18:18:35Z] PTCV-68: Create stage-specific compressed ICH prompt templates with relevance filtering
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Create stage-specific compressed ICH prompt templates with relevance filtering
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/schema_loader.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/tests/ich_parser/test_schema_loader.py
+- C:/Dev/PTCV/scripts/benchmark_ich_prompt_tokens.py
+- C:/Dev/PTCV/tests/scripts/test_benchmark_ich_prompt.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T18:18:00Z] PTCV-64: Implement real ICH E6(R3) retemplater via Claude Opus 4.6 language transformation
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement real ICH E6(R3) retemplater via Claude Opus 4.6 language transformation
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/models.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/coverage_reviewer.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/schema_loader.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/src/ptcv/pipeline/models.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_detector.py
+- C:/Dev/PTCV/tests/ich_parser/test_format_verdict.py
+- C:/Dev/PTCV/tests/ich_parser/test_schema_loader.py
+- C:/Dev/PTCV/src/ptcv/extraction/parquet_writer.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T14:51:26Z] PTCV-67: Externalize ICH E6(R3) section definitions to a single YAML schema file
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Externalize ICH E6(R3) section definitions to a single YAML schema file
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/schema_loader.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/tests/ich_parser/test_schema_loader.py
+- C:/Dev/PTCV/.gitignore
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-04T12:52:35Z] PTCV-60: Reorder pipeline: document-first SoA extraction with ICH retemplating
 
 **Status Change:** In Progress -> Done

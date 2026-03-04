@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from .models import IchSection
 
+from .schema_loader import get_boilerplate_pattern, get_min_sentence_length
+
 
 @dataclasses.dataclass
 class UncoveredBlock:
@@ -60,17 +62,9 @@ class CoverageResult:
     passed: bool
 
 
-# Boilerplate patterns to exclude from coverage calculation
-_BOILERPLATE_RE = re.compile(
-    r"^\s*(?:page\s+\d+|confidential|proprietary|"
-    r"version\s+\d|date\s*:?\s*\d|table\s+of\s+contents|"
-    r"protocol\s+number|eudract\s+number|list\s+of\s+"
-    r"(?:tables|figures|abbreviations))\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-# Minimum sentence length to consider (chars)
-_MIN_SENTENCE_LEN = 20
+# Loaded from YAML configuration (PTCV-69).
+_BOILERPLATE_RE: re.Pattern[str] = get_boilerplate_pattern()
+_MIN_SENTENCE_LEN: int = get_min_sentence_length()
 
 
 class CoverageReviewer:

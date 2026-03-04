@@ -167,9 +167,10 @@ class TestFormatDetector:
         assert isinstance(result, FormatDetectionResult)
 
     def test_protocol_format_enum_values(self) -> None:
-        """ProtocolFormat enum has exactly four members."""
+        """ProtocolFormat enum has exactly five members."""
         assert set(ProtocolFormat) == {
             ProtocolFormat.ICH_E6R3,
+            ProtocolFormat.ICH_M11,
             ProtocolFormat.CTD,
             ProtocolFormat.FDA_IND,
             ProtocolFormat.UNKNOWN,
@@ -266,18 +267,26 @@ class TestFormatDetectorIntegration:
         assert result.section_count >= 1
         assert result.artifact_key != ""
 
-    def test_orchestrator_checkpoint_has_detected_format(
+    def test_orchestrator_checkpoint_has_format_verdict(
         self, tmp_path: Path
     ) -> None:
-        """stage-03 checkpoint includes detected_format field.
+        """retemplating checkpoint includes format_verdict field.
         [PTCV-31 Scenario: CTD format recorded in checkpoint]
+        [PTCV-60: Replaced ich_parse with retemplating stage]
         """
         from ptcv.pipeline.orchestrator import PipelineOrchestrator
-        from tests.pipeline.conftest import SYNTHETIC_CTR_XML
+        from tests.pipeline.conftest import (
+            MockLlmRetemplater,
+            SYNTHETIC_CTR_XML,
+        )
 
         gw = FilesystemAdapter(root=tmp_path)
         gw.initialise()
-        orchestrator = PipelineOrchestrator(gateway=gw)
+        mock_retemplater = MockLlmRetemplater(gateway=gw)
+        orchestrator = PipelineOrchestrator(
+            gateway=gw,
+            retemplater=mock_retemplater,
+        )
 
         result = orchestrator.run(
             protocol_data=SYNTHETIC_CTR_XML.encode("utf-8"),
@@ -286,15 +295,16 @@ class TestFormatDetectorIntegration:
             pipeline_run_id="test-ptcv31-checkpoint",
         )
 
-        ich_cp = next(
-            (cp for cp in result.stage_checkpoints if cp.stage == "ich_parse"),
+        ret_cp = next(
+            (cp for cp in result.stage_checkpoints
+             if cp.stage == "retemplating"),
             None,
         )
-        assert ich_cp is not None
+        assert ret_cp is not None
 
-        cp_bytes = gw.get_artifact(ich_cp.artifact_key)
+        cp_bytes = gw.get_artifact(ret_cp.artifact_key)
         cp_data = json.loads(cp_bytes.decode("utf-8"))
-        assert "detected_format" in cp_data
-        assert cp_data["detected_format"] in (
-            "ICH_E6R3", "CTD", "FDA_IND", "UNKNOWN"
+        assert "format_verdict" in cp_data
+        assert cp_data["format_verdict"] in (
+            "ICH_E6R3", "PARTIAL_ICH", "NON_ICH",
         )

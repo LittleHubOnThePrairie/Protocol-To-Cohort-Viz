@@ -238,16 +238,24 @@ class TestIchParserFormatVerdict:
     def test_orchestrator_checkpoint_contains_format_verdict(
         self, tmp_path: Path
     ) -> None:
-        """Stage-03 checkpoint JSON must include format_verdict and
-        format_confidence fields from ParseResult.
-        [PTCV-30 Scenario: format_verdict present in stage-03 checkpoint]
+        """Retemplating checkpoint must include format_verdict and
+        format_confidence fields.
+        [PTCV-30 Scenario: format_verdict present in retemplating checkpoint]
+        [PTCV-60: Replaced ich_parse with retemplating stage]
         """
         from ptcv.pipeline.orchestrator import PipelineOrchestrator
-        from tests.pipeline.conftest import SYNTHETIC_CTR_XML
+        from tests.pipeline.conftest import (
+            MockLlmRetemplater,
+            SYNTHETIC_CTR_XML,
+        )
 
         gw = FilesystemAdapter(root=tmp_path)
         gw.initialise()
-        orchestrator = PipelineOrchestrator(gateway=gw)
+        mock_retemplater = MockLlmRetemplater(gateway=gw)
+        orchestrator = PipelineOrchestrator(
+            gateway=gw,
+            retemplater=mock_retemplater,
+        )
 
         protocol_bytes = SYNTHETIC_CTR_XML.encode("utf-8")
         pipeline_run_id = "test-ptcv30-pipeline-run"
@@ -259,35 +267,48 @@ class TestIchParserFormatVerdict:
             pipeline_run_id=pipeline_run_id,
         )
 
-        # Find the stage-03 checkpoint
-        ich_cp = next(
-            (cp for cp in result.stage_checkpoints if cp.stage == "ich_parse"),
+        # Find the retemplating checkpoint
+        ret_cp = next(
+            (cp for cp in result.stage_checkpoints
+             if cp.stage == "retemplating"),
             None,
         )
-        assert ich_cp is not None, "ich_parse checkpoint not found"
+        assert ret_cp is not None, "retemplating checkpoint not found"
 
         # Read the checkpoint artifact from storage
-        cp_bytes = gw.get_artifact(ich_cp.artifact_key)
+        cp_bytes = gw.get_artifact(ret_cp.artifact_key)
         cp_data = json.loads(cp_bytes.decode("utf-8"))
 
-        assert "format_verdict" in cp_data, "format_verdict missing from checkpoint"
+        assert "format_verdict" in cp_data, (
+            "format_verdict missing from checkpoint"
+        )
         assert "format_confidence" in cp_data, (
             "format_confidence missing from checkpoint"
         )
-        assert cp_data["format_verdict"] in ("ICH_E6R3", "PARTIAL_ICH", "NON_ICH")
+        assert cp_data["format_verdict"] in (
+            "ICH_E6R3", "PARTIAL_ICH", "NON_ICH",
+        )
 
     def test_orchestrator_compliance_report_has_format_assessment(
         self, tmp_path: Path
     ) -> None:
         """compliance_summary.json must contain a format_assessment block.
         [PTCV-30 Scenario: Format verdict surfaced in compliance report]
+        [PTCV-60: Uses retemplating_result for format verdict]
         """
         from ptcv.pipeline.orchestrator import PipelineOrchestrator
-        from tests.pipeline.conftest import SYNTHETIC_CTR_XML
+        from tests.pipeline.conftest import (
+            MockLlmRetemplater,
+            SYNTHETIC_CTR_XML,
+        )
 
         gw = FilesystemAdapter(root=tmp_path)
         gw.initialise()
-        orchestrator = PipelineOrchestrator(gateway=gw)
+        mock_retemplater = MockLlmRetemplater(gateway=gw)
+        orchestrator = PipelineOrchestrator(
+            gateway=gw,
+            retemplater=mock_retemplater,
+        )
 
         protocol_bytes = SYNTHETIC_CTR_XML.encode("utf-8")
         result = orchestrator.run(
@@ -297,7 +318,7 @@ class TestIchParserFormatVerdict:
             pipeline_run_id="test-ptcv30-compliance-run",
         )
 
-        # Retrieve the compliance_summary artifact key from ValidationResult
+        # Retrieve the compliance_summary artifact key
         summary_key = result.validation_result.artifact_keys.get("summary")
         assert summary_key, "compliance_summary artifact key not found"
 

@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .models import IchSection
-from .schema_loader import get_classifier_sections
+from .schema_loader import get_classifier_sections, get_review_threshold
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +35,6 @@ from .schema_loader import get_classifier_sections
 # ---------------------------------------------------------------------------
 
 _ICH_SECTIONS: dict[str, dict[str, Any]] = get_classifier_sections()
-
-# Confidence threshold below which review is required (ALCOA+ Accurate)
-REVIEW_THRESHOLD = 0.70
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +109,7 @@ class RuleBasedClassifier(SectionClassifier):
             if best_score == 0.0:
                 continue  # Skip blocks with no keyword hits
 
-            review_required = best_score < REVIEW_THRESHOLD
+            review_required = best_score < get_review_threshold(best_code)
             legacy = best_score < 0.40  # Very low score → likely legacy format
 
             sections.append(
@@ -312,7 +309,7 @@ class RAGClassifier(SectionClassifier):
 
             section_code, content_json, confidence = result
             section_name = _ICH_SECTIONS.get(section_code, {}).get("name", "Unknown")
-            review_required = confidence < REVIEW_THRESHOLD
+            review_required = confidence < get_review_threshold(section_code)
             legacy = confidence < 0.40
 
             sections.append(

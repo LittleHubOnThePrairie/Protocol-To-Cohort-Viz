@@ -20,31 +20,20 @@ if TYPE_CHECKING:
     from ..extraction.models import ExtractedTable, TextBlock
 
 from .models import IchSection
+from .schema_loader import (
+    get_priority_sections,
+    get_soa_min_columns,
+    get_soa_min_visit_matches,
+    get_soa_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
-PRIORITY_SECTIONS: frozenset[str] = frozenset({"B.4", "B.5", "B.10", "B.14"})
-
-# Re-use the SoA header detection from table_bridge
-_VISIT_RE = re.compile(
-    r"\bvisit\b"
-    r"|\bday\s*-?\d+"
-    r"|\bweek\s*-?\d+"
-    r"|\bmonth\s*\d+"
-    r"|\bscreening\b"
-    r"|\bbaseline\b"
-    r"|\bfollow[\s-]*up\b"
-    r"|\bdischarge\b"
-    r"|\badmission\b"
-    r"|\brandomiz"
-    r"|\bend\s+of\s+(?:study|treatment|trial)\b"
-    r"|\beot\b"
-    r"|\beos\b",
-    re.IGNORECASE,
-)
-
-_MIN_SOA_COLUMNS = 5
-_MIN_SOA_VISIT_MATCHES = 3
+# Loaded from YAML configuration (PTCV-69).
+PRIORITY_SECTIONS: frozenset[str] = get_priority_sections()
+_VISIT_RE: re.Pattern[str] = get_soa_pattern()
+_MIN_SOA_COLUMNS: int = get_soa_min_columns()
+_MIN_SOA_VISIT_MATCHES: int = get_soa_min_visit_matches()
 
 
 @dataclasses.dataclass

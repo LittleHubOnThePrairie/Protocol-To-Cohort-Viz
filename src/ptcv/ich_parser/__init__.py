@@ -16,12 +16,14 @@ Public API:
 
 from .models import IchSection, ReviewQueueEntry
 from .classifier import SectionClassifier, RuleBasedClassifier, RAGClassifier
+from .fidelity_checker import FidelityChecker
 from .format_detector import FormatDetector, FormatDetectionResult, ProtocolFormat
 from .m11_parser import M11ProtocolParser
 from .review_queue import ReviewQueue
 from .parser import IchParser
 
 __all__ = [
+    "FidelityChecker",
     "IchParser",
     "IchSection",
     "ReviewQueueEntry",

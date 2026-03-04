@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from ..soa_extractor.models import ExtractResult
     from ..sdtm.models import SdtmGenerationResult
     from ..sdtm.validation.models import ValidationResult
+    from ..ich_parser.fidelity_checker import FidelityResult
 
 
 # Expected pipeline stage names (in order) — PTCV-60 reordering
@@ -103,6 +104,7 @@ class PipelineResult:
         coverage_result: Output from PTCV-60 CoverageReviewer.
         sdtm_result: Output from PTCV-22 SdtmService.
         validation_result: Output from PTCV-23 ValidationService.
+        fidelity_result: Output from PTCV-65 FidelityChecker (opt-in).
 
         parse_result: Deprecated alias — kept for backward compat.
             Use retemplating_result instead.
@@ -129,6 +131,9 @@ class PipelineResult:
 
     # Deprecated: kept for backward compatibility
     parse_result: Optional["ParseResult"] = None
+
+    # PTCV-65: Optional fidelity check result (opt-in stage)
+    fidelity_result: Optional["FidelityResult"] = None
 
     def verify_lineage_chain(self) -> LineageChainVerification:
         """Verify that sha256 values form an unbroken chain across stages.

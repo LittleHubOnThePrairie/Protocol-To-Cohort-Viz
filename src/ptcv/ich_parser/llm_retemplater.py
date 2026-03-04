@@ -37,12 +37,16 @@ from ..storage import FilesystemAdapter, StorageGateway
 from .models import IchSection, ReviewQueueEntry
 from .parquet_writer import sections_to_parquet
 from .review_queue import ReviewQueue
-from .schema_loader import get_section_defs, get_section_order
+from .schema_loader import (
+    get_review_threshold,
+    get_section_defs,
+    get_section_order,
+    get_stage_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
 _USER = "ptcv-llm-retemplater"
-_REVIEW_THRESHOLD = 0.70
 _DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
 
 # Maximum text characters per LLM chunk (~30K tokens with prompt)
@@ -464,12 +468,10 @@ class LlmRetemplater:
         page_range: tuple[int, int],
         registry_id: str,
         soa_summary: Optional[dict],
+        stage: str = "retemplater",
     ) -> str:
         """Build the page-level classification prompt for Claude."""
-        section_defs = "\n".join(
-            f"  {code}: {desc}"
-            for code, desc in sorted(_ICH_SECTION_DEFS.items())
-        )
+        section_defs = get_stage_prompt(stage)
 
         soa_context = ""
         if soa_summary:
@@ -640,7 +642,7 @@ class LlmRetemplater:
                     ),
                     confidence_score=round(avg_confidence, 4),
                     review_required=(
-                        avg_confidence < _REVIEW_THRESHOLD
+                        avg_confidence < get_review_threshold(code)
                     ),
                     legacy_format=False,
                     content_text=full_text,
@@ -703,7 +705,7 @@ class LlmRetemplater:
                 lines.append("")
                 continue
 
-            if matched.confidence_score < _REVIEW_THRESHOLD:
+            if matched.confidence_score < get_review_threshold(code):
                 lines.append(
                     f"## {code} {name} "
                     f"(confidence: {matched.confidence_score:.2f})"

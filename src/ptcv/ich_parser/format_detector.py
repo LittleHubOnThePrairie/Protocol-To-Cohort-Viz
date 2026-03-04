@@ -23,6 +23,7 @@ class ProtocolFormat(str, Enum):
     """Detected protocol format family."""
 
     ICH_E6R3 = "ICH_E6R3"
+    ICH_M11 = "ICH_M11"
     CTD = "CTD"
     FDA_IND = "FDA_IND"
     UNKNOWN = "UNKNOWN"
@@ -89,6 +90,18 @@ _FDA_IND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
      "Investigational New Drug"),
 ]
 
+# ICH M11 CeSHarP markers (PTCV-56)
+_M11_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bCeSHarP\b"),
+     "CeSHarP reference"),
+    (re.compile(r"\bICH\s+M11\b", re.IGNORECASE),
+     "ICH M11 reference"),
+    (re.compile(r"\bm11_version\b"),
+     "M11 version field"),
+    (re.compile(r"\bmachine.readable\s+protocol\b", re.IGNORECASE),
+     "Machine-readable protocol"),
+]
+
 
 class FormatDetector:
     """Lightweight pre-parser format gate.
@@ -113,6 +126,22 @@ class FormatDetector:
         [PTCV-31 Scenario: CTD-formatted protocol detected]
         """
         markers: list[str] = []
+
+        # --- ICH M11 CeSHarP markers (check first — PTCV-56) ---
+        m11_markers: list[str] = []
+        for pattern, label in _M11_PATTERNS:
+            if pattern.search(text):
+                m11_markers.append(label)
+        if len(m11_markers) >= 2:
+            return FormatDetectionResult(
+                format=ProtocolFormat.ICH_M11,
+                confidence=min(0.80 + 0.05 * len(m11_markers), 1.0),
+                positive_markers=m11_markers,
+                recommendation=(
+                    "Protocol follows ICH M11 CeSHarP structure. "
+                    "Route to M11ProtocolParser for direct extraction."
+                ),
+            )
 
         # --- ICH markers ---
         heading_hits = _ICH_HEADING_RE.findall(text)

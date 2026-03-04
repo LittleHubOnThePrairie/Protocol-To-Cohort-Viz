@@ -1,4 +1,4 @@
-"""Tests for ICH E6(R3) schema loader (PTCV-67).
+"""Tests for ICH E6(R3) schema loader (PTCV-67, PTCV-68, PTCV-69).
 
 Feature: ICH E6(R3) YAML schema loader
   As a pipeline developer
@@ -40,9 +40,18 @@ import yaml
 from ptcv.ich_parser.schema_loader import (
     IchSchema,
     IchSectionDef,
+    StagePromptConfig,
+    get_boilerplate_pattern,
     get_classifier_sections,
+    get_min_sentence_length,
+    get_priority_sections,
+    get_review_threshold,
     get_section_defs,
     get_section_order,
+    get_soa_min_columns,
+    get_soa_min_visit_matches,
+    get_soa_pattern,
+    get_stage_prompt,
     load_ich_schema,
 )
 
@@ -193,3 +202,291 @@ class TestCaching:
         # Custom load returns correct data but is a separate object
         assert len(custom.sections) == 14
         assert isinstance(default, IchSchema)
+
+
+# ===================================================================
+# PTCV-68: Stage-specific prompt tests
+# ===================================================================
+
+
+class TestStagePromptConfig:
+    """Schema loads stage_prompts block."""
+
+    def test_stage_prompts_present(self) -> None:
+        schema = load_ich_schema()
+        assert len(schema.stage_prompts) >= 4
+
+    def test_retemplater_has_all_14(self) -> None:
+        schema = load_ich_schema()
+        cfg = schema.stage_prompts["retemplater"]
+        assert len(cfg.sections) == 14
+
+    def test_coverage_reviewer_sections(self) -> None:
+        schema = load_ich_schema()
+        cfg = schema.stage_prompts["coverage_reviewer"]
+        assert set(cfg.sections) == {"B.3", "B.4", "B.5"}
+        assert cfg.format == "compact"
+
+    def test_sdtm_generator_sections(self) -> None:
+        schema = load_ich_schema()
+        cfg = schema.stage_prompts["sdtm_generator"]
+        assert set(cfg.sections) == {"B.4", "B.7", "B.8", "B.9"}
+
+
+class TestRetemplaterStagePrompt:
+    """Scenario: Retemplater stage prompt matches existing behavior."""
+
+    def test_full_format_matches_legacy(self) -> None:
+        """get_stage_prompt('retemplater') must produce the exact same
+        string as the old inline code in _build_classification_prompt."""
+        defs = get_section_defs()
+        legacy = "\n".join(
+            f"  {code}: {desc}"
+            for code, desc in sorted(defs.items())
+        )
+        prompt = get_stage_prompt("retemplater")
+        assert prompt == legacy
+
+    def test_full_format_starts_with_b1(self) -> None:
+        prompt = get_stage_prompt("retemplater")
+        assert prompt.startswith("  B.1:")
+
+    def test_full_format_ends_with_b9(self) -> None:
+        """Sorted alphabetically by code, B.9 comes last (after B.8)."""
+        prompt = get_stage_prompt("retemplater")
+        lines = prompt.strip().split("\n")
+        assert lines[-1].strip().startswith("B.9:")
+
+    def test_full_format_contains_all_14(self) -> None:
+        prompt = get_stage_prompt("retemplater")
+        for code in _ALL_CODES:
+            assert f"  {code}:" in prompt
+
+
+class TestCompactFormat:
+    """Scenario: Compact format reduces token count."""
+
+    def test_compact_sdtm_under_150_tokens(self) -> None:
+        """sdtm_generator compact prompt (4 sections) < 150 tokens.
+
+        Approximation: len(text) / 4 is a conservative char-to-token
+        estimate for English text with Claude's tokenizer.
+        """
+        prompt = get_stage_prompt("sdtm_generator")
+        est_tokens = len(prompt) / 4
+        assert est_tokens < 150, f"Compact sdtm_generator: ~{est_tokens:.0f} tokens"
+
+    def test_full_retemplater_under_650_tokens(self) -> None:
+        prompt = get_stage_prompt("retemplater")
+        est_tokens = len(prompt) / 4
+        assert est_tokens < 650, f"Full retemplater: ~{est_tokens:.0f} tokens"
+
+    def test_compact_is_xml(self) -> None:
+        prompt = get_stage_prompt("sdtm_generator")
+        assert prompt.startswith("<ich_e6r3")
+        assert prompt.endswith("</ich_e6r3>")
+
+    def test_compact_contains_section_tags(self) -> None:
+        prompt = get_stage_prompt("sdtm_generator")
+        assert '<section code="B.4"' in prompt
+        assert '<section code="B.9"' in prompt
+
+    def test_compact_has_req_attribute(self) -> None:
+        prompt = get_stage_prompt("sdtm_generator")
+        assert 'req="M"' in prompt
+
+
+class TestStageFiltering:
+    """Scenario: Stage filtering excludes irrelevant sections."""
+
+    def test_coverage_reviewer_only_3_sections(self) -> None:
+        prompt = get_stage_prompt("coverage_reviewer")
+        assert "B.3" in prompt
+        assert "B.4" in prompt
+        assert "B.5" in prompt
+
+    def test_coverage_reviewer_excludes_others(self) -> None:
+        prompt = get_stage_prompt("coverage_reviewer")
+        assert "B.1" not in prompt
+        assert "B.2" not in prompt
+        for i in range(6, 15):
+            assert f"B.{i}" not in prompt
+
+    def test_annotation_service_3_sections(self) -> None:
+        prompt = get_stage_prompt("annotation_service")
+        assert "B.4" in prompt
+        assert "B.5" in prompt
+        assert "B.8" in prompt
+
+
+class TestUnknownStage:
+    """Scenario: Unknown stage falls back to full prompt."""
+
+    def test_unknown_returns_full_prompt(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="ptcv.ich_parser.schema_loader"):
+            prompt = get_stage_prompt("unknown_stage")
+        # Should be the same as retemplater
+        expected = get_stage_prompt("retemplater")
+        assert prompt == expected
+
+    def test_unknown_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="ptcv.ich_parser.schema_loader"):
+            get_stage_prompt("unknown_stage")
+        assert any("unknown_stage" in r.message for r in caplog.records)
+
+
+# ===================================================================
+# PTCV-69: Configuration accessor tests
+# ===================================================================
+
+
+class TestReviewThreshold:
+    """Scenario: Default review threshold matches current behavior."""
+
+    def test_default_returns_0_70(self) -> None:
+        assert get_review_threshold() == 0.70
+
+    def test_unknown_section_returns_default(self) -> None:
+        assert get_review_threshold("B.2") == 0.70
+
+    def test_none_returns_default(self) -> None:
+        assert get_review_threshold(None) == 0.70
+
+
+class TestSectionSpecificThreshold:
+    """Scenario: Section-specific threshold overrides work."""
+
+    def test_b4_override(self) -> None:
+        assert get_review_threshold("B.4") == 0.85
+
+    def test_b5_override(self) -> None:
+        assert get_review_threshold("B.5") == 0.80
+
+    def test_b1_falls_through_to_default(self) -> None:
+        assert get_review_threshold("B.1") == 0.70
+
+    def test_b14_falls_through_to_default(self) -> None:
+        assert get_review_threshold("B.14") == 0.70
+
+
+class TestDuplicateThresholdEliminated:
+    """Scenario: Duplicate threshold constants are eliminated."""
+
+    def test_llm_retemplater_no_module_constant(self) -> None:
+        """_REVIEW_THRESHOLD no longer exists in llm_retemplater."""
+        from ptcv.ich_parser import llm_retemplater
+
+        assert not hasattr(llm_retemplater, "_REVIEW_THRESHOLD")
+
+    def test_classifier_no_module_constant(self) -> None:
+        """REVIEW_THRESHOLD no longer exists in classifier."""
+        from ptcv.ich_parser import classifier
+
+        assert not hasattr(classifier, "REVIEW_THRESHOLD")
+
+
+class TestSoaPattern:
+    """Scenario: SoA detection regex from YAML matches current behavior."""
+
+    def test_matches_visit(self) -> None:
+        pat = get_soa_pattern()
+        assert pat.search("Visit 1")
+
+    def test_matches_day(self) -> None:
+        pat = get_soa_pattern()
+        assert pat.search("Day 14")
+
+    def test_matches_week(self) -> None:
+        pat = get_soa_pattern()
+        assert pat.search("Week 4")
+
+    def test_matches_screening(self) -> None:
+        pat = get_soa_pattern()
+        assert pat.search("Screening")
+
+    def test_matches_end_of_study(self) -> None:
+        pat = get_soa_pattern()
+        assert pat.search("End of Study")
+
+    def test_no_match_demographics(self) -> None:
+        pat = get_soa_pattern()
+        assert not pat.search("Patient demographics")
+
+    def test_no_match_adverse_events(self) -> None:
+        pat = get_soa_pattern()
+        assert not pat.search("Adverse events")
+
+
+class TestPrioritySections:
+    """Scenario: Priority sections from YAML match current frozenset."""
+
+    def test_returns_frozenset(self) -> None:
+        ps = get_priority_sections()
+        assert isinstance(ps, frozenset)
+
+    def test_matches_expected_set(self) -> None:
+        ps = get_priority_sections()
+        assert ps == frozenset({"B.4", "B.5", "B.10", "B.14"})
+
+
+class TestSoaMinValues:
+    """SoA detection min_columns and min_visit_matches."""
+
+    def test_min_columns_default(self) -> None:
+        assert get_soa_min_columns() == 5
+
+    def test_min_visit_matches_default(self) -> None:
+        assert get_soa_min_visit_matches() == 3
+
+
+class TestBoilerplatePattern:
+    """Scenario: Boilerplate patterns from YAML match current regex."""
+
+    def test_matches_page_number(self) -> None:
+        pat = get_boilerplate_pattern()
+        assert pat.search("Page 42")
+
+    def test_matches_confidential(self) -> None:
+        pat = get_boilerplate_pattern()
+        assert pat.search("CONFIDENTIAL")
+
+    def test_matches_version(self) -> None:
+        pat = get_boilerplate_pattern()
+        assert pat.search("Version 3.1")
+
+    def test_matches_table_of_contents(self) -> None:
+        pat = get_boilerplate_pattern()
+        assert pat.search("Table of Contents")
+
+    def test_no_match_clinical_text(self) -> None:
+        pat = get_boilerplate_pattern()
+        assert not pat.search("The primary endpoint is overall survival")
+
+
+class TestMinSentenceLength:
+    """Coverage min_sentence_length from YAML."""
+
+    def test_default_value(self) -> None:
+        assert get_min_sentence_length() == 20
+
+
+class TestConfigurationBlock:
+    """Schema loads configuration block."""
+
+    def test_configuration_present(self) -> None:
+        schema = load_ich_schema()
+        assert isinstance(schema.configuration, dict)
+        assert len(schema.configuration) > 0
+
+    def test_configuration_has_expected_keys(self) -> None:
+        schema = load_ich_schema()
+        cfg = schema.configuration
+        assert "review_threshold_default" in cfg
+        assert "section_thresholds" in cfg
+        assert "priority_sections" in cfg
+        assert "soa_detection" in cfg
+        assert "coverage" in cfg

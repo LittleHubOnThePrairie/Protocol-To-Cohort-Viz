@@ -366,3 +366,59 @@ sections:
       - "compensation"
       - "indemnity"
       - "funding"
+
+# Configurable thresholds, patterns, and constants (PTCV-69).
+# Centralises values that were previously hardcoded across multiple files.
+configuration:
+  # Confidence threshold below which human review is flagged.
+  # Replaces _REVIEW_THRESHOLD (llm_retemplater.py) and
+  # REVIEW_THRESHOLD (classifier.py).
+  review_threshold_default: 0.70
+  section_thresholds:
+    B.4: 0.85   # SoA-critical — higher bar
+    B.5: 0.80   # Eligibility criteria — important
+
+  # Sections receiving full-text + table enrichment (PTCV-52).
+  # Replaces PRIORITY_SECTIONS frozenset in priority_sections.py.
+  priority_sections: [B.4, B.5, B.10, B.14]
+
+  # SoA table detection parameters.
+  # Replaces _VISIT_RE, _MIN_SOA_COLUMNS, _MIN_SOA_VISIT_MATCHES
+  # in priority_sections.py.
+  soa_detection:
+    visit_pattern: "\\bvisit\\b|\\bday\\s*-?\\d+|\\bweek\\s*-?\\d+|\\bmonth\\s*\\d+|\\bscreening\\b|\\bbaseline\\b|\\bfollow[\\s-]*up\\b|\\bdischarge\\b|\\badmission\\b|\\brandomiz|\\bend\\s+of\\s+(?:study|treatment|trial)\\b|\\beot\\b|\\beos\\b"
+    min_columns: 5
+    min_visit_matches: 3
+
+  # Coverage reviewer boilerplate exclusion.
+  # Replaces _BOILERPLATE_RE and _MIN_SENTENCE_LEN in coverage_reviewer.py.
+  coverage:
+    boilerplate_patterns:
+      - "page\\s+\\d+"
+      - "confidential"
+      - "proprietary"
+      - "version\\s+\\d"
+      - "date\\s*:?\\s*\\d"
+      - "table\\s+of\\s+contents"
+      - "protocol\\s+number"
+      - "eudract\\s+number"
+      - "list\\s+of\\s+(?:tables|figures|abbreviations)"
+    min_sentence_length: 20
+
+# Stage-specific prompt configurations (PTCV-68).
+# Each stage lists the ICH sections it needs and the rendering format.
+#   full    — prose "  B.X: Description (...)" lines (matches legacy prompt)
+#   compact — compressed XML (<ich_e6r3><section code="B.X" ...>)
+stage_prompts:
+  retemplater:
+    sections: [B.1, B.2, B.3, B.4, B.5, B.6, B.7, B.8, B.9, B.10, B.11, B.12, B.13, B.14]
+    format: full
+  coverage_reviewer:
+    sections: [B.3, B.4, B.5]
+    format: compact
+  sdtm_generator:
+    sections: [B.4, B.7, B.8, B.9]
+    format: compact
+  annotation_service:
+    sections: [B.4, B.5, B.8]
+    format: compact
