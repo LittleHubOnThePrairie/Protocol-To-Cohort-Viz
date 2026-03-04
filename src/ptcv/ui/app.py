@@ -67,6 +67,10 @@ from ptcv.ui.components.provenance_renderer import (
     build_provenance_html,
     estimate_html_height,
 )
+from ptcv.ui.components.review_queue_viewer import (
+    get_pending_count,
+    render_review_queue,
+)
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.components.section_align import align_sections, build_comparison_html
 from ptcv.ui.pipeline_stages import (
@@ -952,6 +956,17 @@ def main() -> None:
 
     active = compute_active_stages(st.session_state["user_stages"])
 
+    # Sidebar: review queue badge (PTCV-84)
+    _registry_id = (
+        st.session_state.get("parse_cache", {})
+        .get(file_sha, {})
+        .get("registry_id")
+    )
+    _pending = get_pending_count(registry_id=_registry_id)
+    if _pending > 0:
+        with st.sidebar:
+            st.caption(f"Review Queue: {_pending} pending")
+
     # ------------------------------------------------------------------
     # Pipeline execution (PTCV-77)
     # ------------------------------------------------------------------
@@ -1245,6 +1260,14 @@ def main() -> None:
             gateway=gateway,
             protocol_text=protocol_text,
         )
+
+    # Review Queue (PTCV-84)
+    registry_id = cached.get("registry_id") if cached else None
+    pending = get_pending_count(registry_id=registry_id)
+    if pending > 0:
+        st.divider()
+        st.subheader(f"Review Queue ({pending})")
+        render_review_queue(registry_id=registry_id)
 
     # Empty state
     if not active:

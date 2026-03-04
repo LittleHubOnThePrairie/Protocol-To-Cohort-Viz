@@ -37,6 +37,19 @@ CREATE INDEX IF NOT EXISTS idx_review_queue_run_id
 
 CREATE INDEX IF NOT EXISTS idx_review_queue_registry
     ON review_queue (registry_id);
+
+CREATE TABLE IF NOT EXISTS review_decisions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id     INTEGER NOT NULL UNIQUE,
+    resolution   TEXT NOT NULL,
+    corrected_value TEXT,
+    reviewer_notes TEXT,
+    decided_at   TEXT NOT NULL,
+    FOREIGN KEY (entry_id) REFERENCES review_queue(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_decisions_entry
+    ON review_decisions (entry_id);
 """
 
 
@@ -105,7 +118,9 @@ class ReviewQueue:
         return dataclasses.replace(entry, id=row_id)
 
     def pending(self, registry_id: str | None = None) -> list[ReviewQueueEntry]:
-        """Return all pending review entries, optionally filtered by trial.
+        """Return unresolved review entries, optionally filtered by trial.
+
+        Excludes entries that have a row in review_decisions.
 
         Args:
             registry_id: Optional filter. If None, returns all entries.
@@ -115,18 +130,24 @@ class ReviewQueue:
         """
         conn = self._connect()
         try:
+            base = (
+                "SELECT rq.id, rq.run_id, rq.registry_id, "
+                "rq.section_code, rq.confidence_score, "
+                "rq.content_json, rq.queue_timestamp_utc "
+                "FROM review_queue rq "
+                "LEFT JOIN review_decisions rd "
+                "ON rq.id = rd.entry_id "
+                "WHERE rd.id IS NULL"
+            )
             if registry_id is not None:
+                base += " AND rq.registry_id = ?"
                 rows = conn.execute(
-                    "SELECT id, run_id, registry_id, section_code, "
-                    "confidence_score, content_json, queue_timestamp_utc "
-                    "FROM review_queue WHERE registry_id = ? ORDER BY id",
+                    base + " ORDER BY rq.id",
                     (registry_id,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT id, run_id, registry_id, section_code, "
-                    "confidence_score, content_json, queue_timestamp_utc "
-                    "FROM review_queue ORDER BY id"
+                    base + " ORDER BY rq.id",
                 ).fetchall()
         finally:
             conn.close()
@@ -143,6 +164,69 @@ class ReviewQueue:
             )
             for row in rows
         ]
+
+    def pending_count(
+        self, registry_id: str | None = None,
+    ) -> int:
+        """Return count of unresolved entries.
+
+        Args:
+            registry_id: Optional filter.
+
+        Returns:
+            Number of pending items.
+        """
+        conn = self._connect()
+        try:
+            base = (
+                "SELECT COUNT(*) FROM review_queue rq "
+                "LEFT JOIN review_decisions rd "
+                "ON rq.id = rd.entry_id "
+                "WHERE rd.id IS NULL"
+            )
+            if registry_id is not None:
+                base += " AND rq.registry_id = ?"
+                row = conn.execute(base, (registry_id,)).fetchone()
+            else:
+                row = conn.execute(base).fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+
+    def resolve(
+        self,
+        entry_id: int,
+        resolution: str,
+        corrected_value: str | None = None,
+        reviewer_notes: str | None = None,
+    ) -> None:
+        """Record a review decision for an entry.
+
+        Args:
+            entry_id: ID of the ReviewQueueEntry to resolve.
+            resolution: One of "approved", "rejected", "edited".
+            corrected_value: Corrected JSON value (for "edited").
+            reviewer_notes: Optional reviewer notes.
+        """
+        now = datetime.now(tz=timezone.utc).isoformat()
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO review_decisions "
+                "(entry_id, resolution, corrected_value, "
+                "reviewer_notes, decided_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    entry_id,
+                    resolution,
+                    corrected_value,
+                    reviewer_notes,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
