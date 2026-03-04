@@ -14,7 +14,10 @@ Regulatory references:
 from __future__ import annotations
 
 import dataclasses
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .schedule_validator import ScheduleIssue
 
 
 @dataclasses.dataclass
@@ -115,6 +118,14 @@ class ValidationResult:
     artifact_keys: dict[str, str]
     artifact_sha256s: dict[str, str]
     validation_timestamp_utc: str
+
+    # PTCV-57: Visit schedule feasibility validation
+    schedule_issues: list["ScheduleIssue"] = dataclasses.field(
+        default_factory=list,
+    )
+    schedule_error_count: int = 0
+    schedule_warning_count: int = 0
+    schedule_feasible: bool = True
 
     def __repr__(self) -> str:
         return (

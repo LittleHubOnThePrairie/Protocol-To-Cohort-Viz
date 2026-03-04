@@ -13,6 +13,11 @@ from .models import (
     ValidationResult,
 )
 from .p21_validator import P21Validator
+from .schedule_validator import (
+    ScheduleIssue,
+    ScheduleValidationReport,
+    VisitScheduleValidator,
+)
 from .tcg_checker import TcgChecker
 from .validation_service import ValidationService
 
@@ -21,8 +26,11 @@ __all__ = [
     "DefineXmlValidator",
     "P21Issue",
     "P21Validator",
+    "ScheduleIssue",
+    "ScheduleValidationReport",
     "TcgChecker",
     "TcgParameter",
     "ValidationResult",
     "ValidationService",
+    "VisitScheduleValidator",
 ]

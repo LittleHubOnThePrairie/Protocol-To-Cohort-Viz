@@ -7,14 +7,16 @@ Orchestrates the full validation pipeline for one SDTM generation run:
   4. Run P21Validator (Pinnacle 21 rules)
   5. Run TcgChecker (FDA TCG v5.9 Appendix B)
   6. Run DefineXmlValidator (structural + codelist checks)
-  7. Build three JSON compliance reports
-  8. Write reports to StorageGateway (immutable=False — versioned)
-  9. Append one LineageRecord per report (stage="validation")
-  10. Return ValidationResult
+  7. Run VisitScheduleValidator (PTCV-57: cross-visit feasibility)
+  8. Build four JSON compliance reports
+  9. Write reports to StorageGateway (immutable=False — versioned)
+  10. Append one LineageRecord per report (stage="validation")
+  11. Return ValidationResult
 
 Storage layout (under gateway root):
   validation-reports/{registry_id}/{run_id}/p21_report.json
   validation-reports/{registry_id}/{run_id}/tcg_completeness.json
+  validation-reports/{registry_id}/{run_id}/schedule_validation.json
   validation-reports/{registry_id}/{run_id}/compliance_summary.json
 
 Risk tier: MEDIUM — regulatory submission validation artefacts; no patient data.
@@ -45,6 +47,7 @@ from ...storage import StorageGateway
 from .define_xml_validator import DefineXmlValidator
 from .models import P21Issue, ValidationResult
 from .p21_validator import P21Validator
+from .schedule_validator import ScheduleIssue, VisitScheduleValidator
 from .tcg_checker import TcgChecker
 
 if TYPE_CHECKING:
@@ -137,6 +140,7 @@ def _build_compliance_summary(
     format_confidence: float = 0.0,
     sections_detected: int = 0,
     missing_required_sections: Optional[list[str]] = None,
+    schedule_issues: Optional[list] = None,
 ) -> bytes:
     """Build human-readable compliance summary with remediation guidance."""
     all_issues = []
@@ -185,6 +189,17 @@ def _build_compliance_summary(
             ),
         })
 
+    for si in schedule_issues or []:
+        all_issues.append({
+            "source": "Schedule Validator",
+            "rule_id": si.rule_id,
+            "severity": si.severity,
+            "domain": si.domain,
+            "variable": si.variable,
+            "description": si.description,
+            "remediation_guidance": si.remediation_guidance,
+        })
+
     _verdict_recommendation = {
         "ICH_E6R3": (
             "Protocol conforms to ICH E6(R3) Appendix B structure. "
@@ -227,6 +242,30 @@ def _build_compliance_summary(
                 format_verdict, _verdict_recommendation["NON_ICH"]
             ),
         },
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
+
+
+def _build_schedule_report(
+    issues: list[ScheduleIssue],
+    feasible: bool,
+    registry_id: str,
+    sdtm_run_id: str,
+    timestamp: str,
+) -> bytes:
+    """Serialize schedule validation issues to JSON bytes."""
+    payload = {
+        "report_type": "schedule_validation",
+        "registry_id": registry_id,
+        "sdtm_run_id": sdtm_run_id,
+        "timestamp_utc": timestamp,
+        "total_issues": len(issues),
+        "error_count": sum(1 for i in issues if i.severity == "Error"),
+        "warning_count": sum(
+            1 for i in issues if i.severity == "Warning"
+        ),
+        "feasible": feasible,
+        "issues": [dataclasses.asdict(i) for i in issues],
     }
     return json.dumps(payload, indent=2).encode("utf-8")
 
@@ -351,6 +390,16 @@ class ValidationService:
         )
 
         # ------------------------------------------------------------------
+        # Step 5b: Run schedule validator (PTCV-57)
+        # ------------------------------------------------------------------
+        tv_df = domains_df.get("TV", pd.DataFrame())
+        te_df = domains_df.get("TE", pd.DataFrame())
+
+        schedule_report = VisitScheduleValidator(
+            tv_df, te_df,
+        ).validate()
+
+        # ------------------------------------------------------------------
         # Step 6: Build report JSON bytes
         # ------------------------------------------------------------------
         p21_bytes = _build_p21_report(
@@ -360,6 +409,13 @@ class ValidationService:
             tcg_params, tcg_passed, tcg_missing, registry_id, sdtm_run_id,
             timestamp,
         )
+        schedule_bytes = _build_schedule_report(
+            schedule_report.issues,
+            schedule_report.feasible,
+            registry_id,
+            sdtm_run_id,
+            timestamp,
+        )
         summary_bytes = _build_compliance_summary(
             p21_issues, tcg_missing, define_issues,
             registry_id, sdtm_run_id, timestamp,
@@ -367,6 +423,7 @@ class ValidationService:
             format_confidence=format_confidence,
             sections_detected=sections_detected,
             missing_required_sections=missing_required_sections,
+            schedule_issues=schedule_report.issues,
         )
 
         # ------------------------------------------------------------------
@@ -390,6 +447,7 @@ class ValidationService:
         for report_name, report_bytes, report_tag in [
             ("p21_report.json", p21_bytes, "p21"),
             ("tcg_completeness.json", tcg_bytes, "tcg"),
+            ("schedule_validation.json", schedule_bytes, "schedule"),
             ("compliance_summary.json", summary_bytes, "summary"),
         ]:
             key = f"{key_prefix}/{report_name}"
@@ -423,4 +481,8 @@ class ValidationService:
             artifact_keys=artifact_keys,
             artifact_sha256s=artifact_sha256s,
             validation_timestamp_utc=timestamp,
+            schedule_issues=schedule_report.issues,
+            schedule_error_count=schedule_report.error_count,
+            schedule_warning_count=schedule_report.warning_count,
+            schedule_feasible=schedule_report.feasible,
         )
