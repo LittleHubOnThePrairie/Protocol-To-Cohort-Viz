@@ -37,6 +37,7 @@ from ..storage import FilesystemAdapter, StorageGateway
 from .models import IchSection, ReviewQueueEntry
 from .parquet_writer import sections_to_parquet
 from .review_queue import ReviewQueue
+from .corpus_loader import CorpusExemplar, get_exemplars, load_corpus
 from .schema_loader import (
     get_review_threshold,
     get_section_defs,
@@ -51,6 +52,10 @@ _DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
 
 # Maximum text characters per LLM chunk (~30K tokens with prompt)
 _MAX_CHUNK_CHARS = 100_000
+
+# Few-shot exemplar budget (PTCV-47)
+_MAX_EXEMPLAR_CHARS = 2_000  # Per exemplar
+_MAX_EXEMPLARS = 2  # Per prompt
 
 # ICH E6(R3) Appendix B section definitions — loaded from YAML (PTCV-67)
 _ICH_SECTION_DEFS: dict[str, str] = get_section_defs()
@@ -147,6 +152,7 @@ class LlmRetemplater:
         self._review_queue = review_queue
         self._claude_model = claude_model
         self._claude: Any = None  # Lazy init
+        self._corpus = load_corpus()  # PTCV-47: few-shot
 
         self._gateway.initialise()
         self._review_queue.initialise()
@@ -211,12 +217,13 @@ class LlmRetemplater:
         total_input = 0
         total_output = 0
 
-        for chunk_text, page_range in chunks:
+        for ci, (chunk_text, page_range) in enumerate(chunks):
             assignments, in_tok, out_tok = self._classify_chunk(
                 chunk_text=chunk_text,
                 page_range=page_range,
                 registry_id=registry_id,
                 soa_summary=soa_summary,
+                chunk_index=ci,
             )
             all_assignments.extend(assignments)
             total_input += in_tok
@@ -396,6 +403,7 @@ class LlmRetemplater:
         page_range: tuple[int, int],
         registry_id: str,
         soa_summary: Optional[dict],
+        chunk_index: int = 0,
     ) -> tuple[list[_PageAssignment], int, int]:
         """Call Claude to classify pages into ICH sections (Pass 1).
 
@@ -404,6 +412,7 @@ class LlmRetemplater:
         """
         prompt = self._build_classification_prompt(
             chunk_text, page_range, registry_id, soa_summary,
+            chunk_index=chunk_index,
         )
 
         client = self._get_client()
@@ -462,6 +471,62 @@ class LlmRetemplater:
 
         return assignments, input_tokens, output_tokens
 
+    # ------------------------------------------------------------------
+    # Few-shot exemplar helpers (PTCV-47)
+    # ------------------------------------------------------------------
+
+    def _select_exemplars(
+        self,
+        chunk_index: int = 0,
+    ) -> list[CorpusExemplar]:
+        """Select diverse few-shot exemplars for a classification prompt.
+
+        Rotates through available section codes based on *chunk_index*
+        so different chunks see different examples.
+
+        Returns up to ``_MAX_EXEMPLARS`` exemplars, each truncated to
+        ``_MAX_EXEMPLAR_CHARS`` in their ``.text`` field.
+        """
+        if not self._corpus:
+            return []
+
+        codes = sorted(self._corpus.keys())
+        if not codes:
+            return []
+
+        selected: list[CorpusExemplar] = []
+        n_codes = len(codes)
+
+        for i in range(_MAX_EXEMPLARS):
+            idx = (chunk_index * _MAX_EXEMPLARS + i) % n_codes
+            code = codes[idx]
+            exemplars = get_exemplars(self._corpus, code, max_exemplars=1)
+            if exemplars:
+                selected.append(exemplars[0])
+
+        return selected
+
+    @staticmethod
+    def _format_exemplar_block(
+        exemplars: list[CorpusExemplar],
+    ) -> str:
+        """Format exemplars as a prompt block with <example> tags."""
+        if not exemplars:
+            return ""
+
+        lines = [
+            "\nHere are examples of correctly classified "
+            "protocol sections:\n",
+        ]
+        for i, ex in enumerate(exemplars, 1):
+            text = ex.text[:_MAX_EXEMPLAR_CHARS]
+            lines.append(
+                f"Example {i} ({ex.section_code} "
+                f"\u2014 {ex.section_name}):\n"
+                f"<example>\n{text}\n</example>\n"
+            )
+        return "\n".join(lines)
+
     def _build_classification_prompt(
         self,
         chunk_text: str,
@@ -469,9 +534,14 @@ class LlmRetemplater:
         registry_id: str,
         soa_summary: Optional[dict],
         stage: str = "retemplater",
+        chunk_index: int = 0,
     ) -> str:
         """Build the page-level classification prompt for Claude."""
         section_defs = get_stage_prompt(stage)
+
+        # Few-shot exemplars (PTCV-47)
+        exemplars = self._select_exemplars(chunk_index)
+        exemplar_block = self._format_exemplar_block(exemplars)
 
         soa_context = ""
         if soa_summary:
@@ -493,6 +563,7 @@ class LlmRetemplater:
             f"{registry_id}) into ICH E6(R3) Appendix B "
             "sections.\n\n"
             f"ICH E6(R3) Appendix B sections:\n{section_defs}\n"
+            f"{exemplar_block}"
             f"{soa_context}\n\n"
             f"Protocol text:\n<text>\n{chunk_text[:80000]}\n"
             "</text>\n\n"
