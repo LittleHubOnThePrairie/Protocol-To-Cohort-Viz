@@ -1,11 +1,12 @@
-"""Schedule of Visits swimlane timeline component (PTCV-34).
+"""Schedule of Visits swimlane timeline component (PTCV-34, PTCV-71).
 
 Renders a multi-swimlane Plotly chart mapping UsdmActivity instances
-to four category rows across protocol visits (UsdmTimepoint).
+to five category rows across protocol visits (UsdmTimepoint).
 
 Swimlane rows:
+  Intervention        - study drug/placebo administration, dosing
   Clinical Encounter  - assessments, vitals, ECG, safety, consent
-  Specimens           - labs, pharmacokinetics
+  Specimens           - labs, pharmacokinetics, serology, biomarkers
   Imaging             - imaging procedures
   Other               - procedures, unclassified activities
 
@@ -16,9 +17,11 @@ are testable without Streamlit.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import io
+import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, NamedTuple, Sequence, Union
 
 from ptcv.soa_extractor.models import (
     UsdmActivity,
@@ -28,11 +31,93 @@ from ptcv.soa_extractor.models import (
 
 
 # ---------------------------------------------------------------------------
+# Lightweight plot-only types (PTCV-76)
+# ---------------------------------------------------------------------------
+
+class PlotTimepoint(NamedTuple):
+    """Timepoint fields needed for visualization only."""
+
+    timepoint_id: str
+    visit_name: str
+    day_offset: int
+
+
+class PlotActivity(NamedTuple):
+    """Activity fields needed for visualization only."""
+
+    activity_id: str
+    activity_name: str
+    activity_type: str
+
+
+class PlotInstance(NamedTuple):
+    """Scheduled-instance fields needed for visualization only."""
+
+    activity_id: str
+    timepoint_id: str
+    scheduled: bool
+
+
+@dataclasses.dataclass
+class SoVPlotData:
+    """Filtered view of SoA data carrying only the 9 plotting fields.
+
+    Strips ALCOA+ traceability fields (run_id, source_run_id,
+    source_sha256, etc.) that are irrelevant to visualization.
+    """
+
+    timepoints: list[PlotTimepoint]
+    activities: list[PlotActivity]
+    instances: list[PlotInstance]
+
+
+def to_plot_data(
+    timepoints: Sequence[UsdmTimepoint],
+    activities: Sequence[UsdmActivity],
+    instances: Sequence[UsdmScheduledInstance],
+) -> SoVPlotData:
+    """Convert full USDM objects to a lightweight plot-only view.
+
+    Call this at the UI boundary (app.py) so that visualization
+    functions receive only the 9 fields they actually use.
+
+    Args:
+        timepoints: Full USDM timepoints from pipeline.
+        activities: Full USDM activities from pipeline.
+        instances: Full USDM scheduled instances from pipeline.
+
+    Returns:
+        SoVPlotData with only plotting-relevant fields.
+    """
+    return SoVPlotData(
+        timepoints=[
+            PlotTimepoint(tp.timepoint_id, tp.visit_name, tp.day_offset)
+            for tp in timepoints
+        ],
+        activities=[
+            PlotActivity(a.activity_id, a.activity_name, a.activity_type)
+            for a in activities
+        ],
+        instances=[
+            PlotInstance(i.activity_id, i.timepoint_id, i.scheduled)
+            for i in instances
+        ],
+    )
+
+
+# Type aliases for functions that accept either full or plot types.
+_TP = Union[UsdmTimepoint, PlotTimepoint]
+_ACT = Union[UsdmActivity, PlotActivity]
+_INST = Union[UsdmScheduledInstance, PlotInstance]
+
+
+# ---------------------------------------------------------------------------
 # Swimlane classification
 # ---------------------------------------------------------------------------
 
-# Ordered list: first match wins
+# Ordered list: first match wins (PTCV-71: added Intervention)
 SWIMLANE_ROWS = [
+    "Intervention",
     "Clinical Encounter",
     "Specimens",
     "Imaging",
@@ -40,6 +125,8 @@ SWIMLANE_ROWS = [
 ]
 
 _TYPE_TO_SWIMLANE: dict[str, str] = {
+    "Drug Administration": "Intervention",
+    "Treatment": "Intervention",
     "Assessment": "Clinical Encounter",
     "Vital Signs": "Clinical Encounter",
     "ECG": "Clinical Encounter",
@@ -52,18 +139,81 @@ _TYPE_TO_SWIMLANE: dict[str, str] = {
     "Other": "Other",
 }
 
+# Keyword patterns for name-based reclassification (PTCV-71).
+# Checked when the coarse activity_type mapping is ambiguous.
+_INTERVENTION_RE = re.compile(
+    r"\bstudy\s+drug\b|\bplacebo\b|\b[Ii]MP\b|\binfusion\b"
+    r"|\binjection\b|\bdosing\b|\bdose\s+admin"
+    r"|\bdrug\s+admin|\btreatment\s+admin",
+    re.IGNORECASE,
+)
+_SPECIMEN_RE = re.compile(
+    r"\bserology\b|\bCBC\b|\bpregnancy\s+test\b|\burine\b"
+    r"|\bblood\s+draw\b|\bbiomarker\b|\bantibod"
+    r"|\bPCR\b|\bculture\b|\bhaematology\b|\bhematology\b"
+    r"|\bchemistry\b|\bcoagulation\b|\burinalysis\b"
+    r"|\bHep\s*[A-C]\b|\bhepatitis\b|\bblood\s+sample"
+    r"|\bspecimen\b|\bserum\b|\bplasma\b",
+    re.IGNORECASE,
+)
 
-def classify_swimlane(activity_type: str) -> str:
-    """Map a UsdmActivity.activity_type to one of 4 swimlane rows.
+
+def classify_swimlane(
+    activity_type: str, activity_name: str = "",
+) -> str:
+    """Map a UsdmActivity to one of 5 swimlane rows.
+
+    Uses the coarse ``activity_type`` first, then refines with
+    keyword matching on ``activity_name`` to fix common
+    misclassifications (PTCV-71).
 
     Args:
         activity_type: Activity type string from UsdmMapper
             (e.g. "Assessment", "Lab", "Imaging").
+        activity_name: Optional activity name for keyword-based
+            reclassification.
 
     Returns:
         One of SWIMLANE_ROWS.
     """
-    return _TYPE_TO_SWIMLANE.get(activity_type, "Other")
+    lane = _TYPE_TO_SWIMLANE.get(activity_type, "Other")
+
+    # Keyword-based reclassification when name is provided
+    if activity_name:
+        # Intervention keywords override everything except Imaging
+        if lane != "Imaging" and _INTERVENTION_RE.search(activity_name):
+            return "Intervention"
+        # Specimen keywords override Clinical Encounter and Other
+        if lane in ("Clinical Encounter", "Other") and _SPECIMEN_RE.search(
+            activity_name
+        ):
+            return "Specimens"
+
+    return lane
+
+
+# ---------------------------------------------------------------------------
+# Timepoint deduplication (PTCV-73)
+# ---------------------------------------------------------------------------
+
+def _dedup_timepoints(
+    timepoints: Sequence[_TP],
+) -> tuple[list[_TP], dict[str, str]]:
+    """Merge timepoints that share the same (visit_name, day_offset).
+
+    Returns:
+        Tuple of (unique_timepoints, id_map) where id_map maps every
+        original timepoint_id to the canonical (first-seen) timepoint_id
+        for that (visit_name, day_offset) group.
+    """
+    seen: dict[tuple[str, int], _TP] = {}
+    id_map: dict[str, str] = {}
+    for tp in timepoints:
+        key = (tp.visit_name, tp.day_offset)
+        if key not in seen:
+            seen[key] = tp
+        id_map[tp.timepoint_id] = seen[key].timepoint_id
+    return list(seen.values()), id_map
 
 
 # ---------------------------------------------------------------------------
@@ -71,14 +221,17 @@ def classify_swimlane(activity_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 def build_sov_grid(
-    timepoints: list[UsdmTimepoint],
-    activities: list[UsdmActivity],
-    instances: list[UsdmScheduledInstance],
+    timepoints: Sequence[_TP],
+    activities: Sequence[_ACT],
+    instances: Sequence[_INST],
 ) -> list[dict[str, Any]]:
     """Build a flat list of records for the swimlane chart.
 
     Each record represents one filled cell (visit x swimlane row)
     with a tooltip listing the specific activities at that intersection.
+
+    Duplicate timepoints (same visit_name + day_offset) are merged so
+    their activities appear in a single column (PTCV-73).
 
     Args:
         timepoints: USDM timepoints (visits) in protocol order.
@@ -89,26 +242,33 @@ def build_sov_grid(
         List of dicts with keys: visit_name, day_offset, swimlane,
         activities (comma-joined names), activity_count, visit_index.
     """
-    # Index lookups
-    tp_by_id = {tp.timepoint_id: tp for tp in timepoints}
+    # Deduplicate timepoints (PTCV-73)
+    unique_tps, tp_id_map = _dedup_timepoints(timepoints)
+
+    # Index lookups — use unique timepoints only
+    tp_by_id = {tp.timepoint_id: tp for tp in unique_tps}
     act_by_id = {a.activity_id: a for a in activities}
 
-    # Sort timepoints by day_offset for x-axis ordering
-    sorted_tps = sorted(timepoints, key=lambda t: t.day_offset)
+    # Sort unique timepoints by day_offset for x-axis ordering
+    sorted_tps = sorted(unique_tps, key=lambda t: t.day_offset)
     tp_order = {tp.timepoint_id: idx for idx, tp in enumerate(sorted_tps)}
 
-    # Group: (timepoint_id, swimlane) -> list[activity_name]
+    # Group: (canonical_timepoint_id, swimlane) -> list[activity_name]
     cell_activities: dict[tuple[str, str], list[str]] = defaultdict(list)
 
     for inst in instances:
         if not inst.scheduled:
             continue
         act = act_by_id.get(inst.activity_id)
-        tp = tp_by_id.get(inst.timepoint_id)
-        if act is None or tp is None:
+        # Map to canonical timepoint id
+        canonical_tp_id = tp_id_map.get(inst.timepoint_id)
+        if act is None or canonical_tp_id is None:
             continue
-        swimlane = classify_swimlane(act.activity_type)
-        cell_activities[(inst.timepoint_id, swimlane)].append(
+        tp = tp_by_id.get(canonical_tp_id)
+        if tp is None:
+            continue
+        swimlane = classify_swimlane(act.activity_type, act.activity_name)
+        cell_activities[(canonical_tp_id, swimlane)].append(
             act.activity_name
         )
 
@@ -132,9 +292,9 @@ def build_sov_grid(
 
 
 def build_sov_csv(
-    timepoints: list[UsdmTimepoint],
-    activities: list[UsdmActivity],
-    instances: list[UsdmScheduledInstance],
+    timepoints: Sequence[_TP],
+    activities: Sequence[_ACT],
+    instances: Sequence[_INST],
 ) -> str:
     """Build a CSV string from the SoA grid data.
 
@@ -167,9 +327,9 @@ def build_sov_csv(
 # ---------------------------------------------------------------------------
 
 def build_sov_figure(
-    timepoints: list[UsdmTimepoint],
-    activities: list[UsdmActivity],
-    instances: list[UsdmScheduledInstance],
+    timepoints: Sequence[_TP],
+    activities: Sequence[_ACT],
+    instances: Sequence[_INST],
     registry_id: str = "",
     low_confidence: bool = False,
 ) -> Any:
@@ -205,9 +365,13 @@ def build_sov_figure(
         )
         return fig
 
-    # Build ordered visit labels for x-axis
-    sorted_tps = sorted(timepoints, key=lambda t: t.day_offset)
-    visit_labels = [tp.visit_name for tp in sorted_tps]
+    # Deduplicate timepoints for x-axis (PTCV-73) and add day offset (PTCV-72)
+    unique_tps, _ = _dedup_timepoints(timepoints)
+    sorted_tps = sorted(unique_tps, key=lambda t: t.day_offset)
+    visit_labels = [
+        f"{tp.visit_name}<br><sub>Day {tp.day_offset}</sub>"
+        for tp in sorted_tps
+    ]
     visit_indices = list(range(len(visit_labels)))
 
     # Swimlane row positions (bottom to top: Other=0, Imaging=1, Specimens=2, Clinical=3)
@@ -216,6 +380,7 @@ def build_sov_figure(
     # Colour per swimlane
     if low_confidence:
         lane_colors = {
+            "Intervention": "rgba(200,180,160,0.6)",
             "Clinical Encounter": "rgba(180,180,200,0.6)",
             "Specimens": "rgba(180,200,180,0.6)",
             "Imaging": "rgba(200,180,180,0.6)",
@@ -223,6 +388,7 @@ def build_sov_figure(
         }
     else:
         lane_colors = {
+            "Intervention": "#FFA15A",
             "Clinical Encounter": "#636EFA",
             "Specimens": "#EF553B",
             "Imaging": "#00CC96",
@@ -319,9 +485,9 @@ def build_sov_figure(
 # ---------------------------------------------------------------------------
 
 def render_schedule_of_visits(
-    timepoints: list[UsdmTimepoint],
-    activities: list[UsdmActivity],
-    instances: list[UsdmScheduledInstance],
+    timepoints: Sequence[_TP],
+    activities: Sequence[_ACT],
+    instances: Sequence[_INST],
     registry_id: str = "",
     format_verdict: str = "",
 ) -> None:
@@ -370,10 +536,17 @@ def render_schedule_of_visits(
             mime="text/csv",
         )
     with col2:
-        png_bytes = fig.to_image(format="png", width=1200, height=400)
-        st.download_button(
-            label="Download as PNG",
-            data=png_bytes,
-            file_name=f"schedule_of_visits_{registry_id}.png",
-            mime="image/png",
-        )
+        try:
+            png_bytes = fig.to_image(format="png", width=1200, height=400)
+            st.download_button(
+                label="Download as PNG",
+                data=png_bytes,
+                file_name=f"schedule_of_visits_{registry_id}.png",
+                mime="image/png",
+            )
+        except (ValueError, ImportError, OSError):
+            st.button(
+                "Download as PNG",
+                disabled=True,
+                help="Install kaleido for PNG export: pip install kaleido",
+            )
