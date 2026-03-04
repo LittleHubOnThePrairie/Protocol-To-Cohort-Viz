@@ -54,6 +54,10 @@ from ptcv.ui.components.schedule_of_visits import (
 )
 from ptcv.ui.components.annotation_review import render_annotation_review
 from ptcv.ui.components.protocol_diff import build_diff_label, build_original_text
+from ptcv.ui.components.provenance_renderer import (
+    build_provenance_html,
+    estimate_html_height,
+)
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.components.section_align import align_sections, build_comparison_html
 from ptcv.ui.pipeline_stages import (
@@ -696,8 +700,8 @@ def _render_regeneration(cached: dict) -> None:
 
     st.subheader("ICH E6(R3) Reformatted Protocol")
 
-    tab_retemplated, tab_diff, tab_section = st.tabs(
-        ["Retemplated", "Diff", "Section Compare"],
+    tab_retemplated, tab_provenance, tab_diff, tab_section = st.tabs(
+        ["Retemplated", "Provenance", "Diff", "Section Compare"],
     )
 
     with tab_retemplated:
@@ -714,6 +718,32 @@ def _render_regeneration(cached: dict) -> None:
             file_name=dl_filename,
             mime="text/markdown",
         )
+
+    # PTCV-81: Provenance annotation view
+    with tab_provenance:
+        show_prov = st.toggle(
+            "Show annotations",
+            value=True,
+            key="provenance_toggle",
+        )
+        if show_prov and sections:
+            import streamlit.components.v1 as components
+            prov_html = build_provenance_html(
+                sections=sections,
+                registry_id=cached["registry_id"],
+            )
+            components.html(
+                prov_html,
+                height=estimate_html_height(sections),
+                scrolling=True,
+            )
+        elif not sections:
+            st.info(
+                "Run ICH Retemplating first to enable "
+                "provenance view"
+            )
+        else:
+            st.caption("Annotations hidden. Toggle above to show.")
 
     with tab_diff:
         text_block_dicts = cached.get("text_block_dicts")
