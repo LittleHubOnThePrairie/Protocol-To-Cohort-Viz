@@ -56,6 +56,13 @@ from ptcv.ui.components.schedule_of_visits import (
 )
 from ptcv.ui.components.annotation_review import render_annotation_review
 from ptcv.ui.components.protocol_diff import build_diff_label, build_original_text
+from ptcv.ui.checkpoint_manager import (
+    clear_checkpoints,
+    get_resume_label,
+    has_checkpoints,
+    load_checkpoints,
+    save_checkpoint,
+)
 from ptcv.ui.components.provenance_renderer import (
     build_provenance_html,
     estimate_html_height,
@@ -833,6 +840,40 @@ def main() -> None:
         st.session_state["fidelity_cache"] = {}
 
     # ------------------------------------------------------------------
+    # Checkpoint resume (PTCV-83)
+    # ------------------------------------------------------------------
+
+    if has_checkpoints(_DATA_ROOT, file_sha):
+        resume_label = get_resume_label(_DATA_ROOT, file_sha)
+        col_resume, col_clear = st.columns([3, 1])
+        with col_resume:
+            if st.button(
+                resume_label or "Resume pipeline",
+                key="btn_resume",
+            ):
+                restored = load_checkpoints(_DATA_ROOT, file_sha)
+                for cache_key, data in restored.items():
+                    st.session_state[cache_key][file_sha] = data
+                st.toast(
+                    f"Restored {len(restored)} stage(s) "
+                    "from checkpoint"
+                )
+                st.rerun()
+        with col_clear:
+            if st.button(
+                "Start fresh",
+                key="btn_clear_cp",
+            ):
+                clear_checkpoints(_DATA_ROOT, file_sha)
+                for ck in (
+                    "parse_cache", "soa_cache",
+                    "fidelity_cache", "sdtm_cache",
+                ):
+                    st.session_state[ck].pop(file_sha, None)
+                st.toast("Checkpoints cleared")
+                st.rerun()
+
+    # ------------------------------------------------------------------
     # Pipeline stage checkboxes (PTCV-77)
     # ------------------------------------------------------------------
 
@@ -977,6 +1018,10 @@ def main() -> None:
                                 file_sha
                             ] = result
                             cached = result
+                            save_checkpoint(
+                                _DATA_ROOT, file_sha,
+                                "parse_cache", result,
+                            )
                             status.update(
                                 label=(
                                     f"{stage.label}: "
@@ -1019,6 +1064,10 @@ def main() -> None:
                             file_sha
                         ] = soa_result
                         soa_cached = soa_result
+                        save_checkpoint(
+                            _DATA_ROOT, file_sha,
+                            "soa_cache", soa_result,
+                        )
                         status.update(
                             label=(
                                 "SoA Extraction: "
@@ -1057,6 +1106,10 @@ def main() -> None:
                             file_sha
                         ] = fidelity_result
                         fidelity_cached = fidelity_result
+                        save_checkpoint(
+                            _DATA_ROOT, file_sha,
+                            "fidelity_cache", fidelity_result,
+                        )
                         status.update(
                             label=(
                                 "Fidelity Check: "
@@ -1094,6 +1147,10 @@ def main() -> None:
                             file_sha
                         ] = sdtm_result
                         sdtm_cached = sdtm_result
+                        save_checkpoint(
+                            _DATA_ROOT, file_sha,
+                            "sdtm_cache", sdtm_result,
+                        )
                         status.update(
                             label=(
                                 "SDTM Generation: "
