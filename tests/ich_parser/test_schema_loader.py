@@ -456,7 +456,7 @@ class TestBoilerplatePattern:
 
     def test_matches_version(self) -> None:
         pat = get_boilerplate_pattern()
-        assert pat.search("Version 3.1")
+        assert pat.search("Version 3")
 
     def test_matches_table_of_contents(self) -> None:
         pat = get_boilerplate_pattern()
