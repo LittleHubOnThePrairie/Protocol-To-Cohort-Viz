@@ -53,6 +53,7 @@ from ptcv.ui.components.schedule_of_visits import (
     to_plot_data,
 )
 from ptcv.ui.components.annotation_review import render_annotation_review
+from ptcv.ui.components.protocol_diff import build_diff_label, build_original_text
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.pipeline_stages import (
     PIPELINE_STAGES,
@@ -664,11 +665,10 @@ def _display_verdict(result: dict) -> None:
 
 
 def _render_regeneration(cached: dict) -> None:
-    """Render the ICH E6(R3) regenerated protocol view (PTCV-35).
+    """Render the ICH E6(R3) regenerated protocol view (PTCV-35, PTCV-79).
 
-    Retrieves retemplated sections from storage, builds an
-    ICH-ordered markdown document, displays it in a scrollable
-    container, and provides a download button.
+    Shows two tabs: "Retemplated" (existing markdown view) and
+    "Compare" (side-by-side diff via streamlit-code-diff).
 
     Args:
         cached: Parse result dict with artifact_key, registry_id, etc.
@@ -693,21 +693,60 @@ def _render_regeneration(cached: dict) -> None:
 
     st.subheader("ICH E6(R3) Reformatted Protocol")
 
-    # Scrollable container with fixed height
-    with st.container(height=500):
-        st.markdown(md)
+    tab_retemplated, tab_compare = st.tabs(
+        ["Retemplated", "Compare Original vs Retemplated"],
+    )
 
-    # Download button
-    dl_filename = make_download_filename(
-        cached["registry_id"],
-        cached.get("amendment", "00"),
-    )
-    st.download_button(
-        label="Download as .md",
-        data=md,
-        file_name=dl_filename,
-        mime="text/markdown",
-    )
+    with tab_retemplated:
+        with st.container(height=500):
+            st.markdown(md)
+
+        dl_filename = make_download_filename(
+            cached["registry_id"],
+            cached.get("amendment", "00"),
+        )
+        st.download_button(
+            label="Download as .md",
+            data=md,
+            file_name=dl_filename,
+            mime="text/markdown",
+        )
+
+    with tab_compare:
+        text_block_dicts = cached.get("text_block_dicts")
+        if not text_block_dicts:
+            st.info(
+                "Run ICH Retemplating first to enable comparison"
+            )
+        else:
+            original = build_original_text(text_block_dicts)
+            left_label, right_label = build_diff_label(
+                cached["registry_id"],
+                cached.get("retemplating_method", ""),
+            )
+
+            mode = st.radio(
+                "Display mode",
+                ["Side by side", "Line by line"],
+                horizontal=True,
+                key="diff_mode",
+            )
+
+            try:
+                from streamlit_code_diff import st_code_diff
+                st_code_diff(
+                    old_code=original,
+                    new_code=md,
+                    old_title=left_label,
+                    new_title=right_label,
+                    split_view=(mode == "Side by side"),
+                    language="markdown",
+                )
+            except ImportError:
+                st.warning(
+                    "Install `streamlit-code-diff` for diff view: "
+                    "`pip install streamlit-code-diff`"
+                )
 
 
 def main() -> None:
