@@ -55,6 +55,7 @@ from ptcv.ui.components.schedule_of_visits import (
 from ptcv.ui.components.annotation_review import render_annotation_review
 from ptcv.ui.components.protocol_diff import build_diff_label, build_original_text
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
+from ptcv.ui.components.section_align import align_sections, build_comparison_html
 from ptcv.ui.pipeline_stages import (
     PIPELINE_STAGES,
     STAGE_BY_KEY,
@@ -665,15 +666,20 @@ def _display_verdict(result: dict) -> None:
 
 
 def _render_regeneration(cached: dict) -> None:
-    """Render the ICH E6(R3) regenerated protocol view (PTCV-35, PTCV-79).
+    """Render the ICH E6(R3) regenerated protocol view (PTCV-35, PTCV-79, PTCV-80).
 
-    Shows two tabs: "Retemplated" (existing markdown view) and
-    "Compare" (side-by-side diff via streamlit-code-diff).
+    Shows three tabs: "Retemplated" (markdown view), "Diff" (word-level
+    diff via streamlit-code-diff), and "Section Compare" (synchronized
+    scrolling with section alignment).
 
     Args:
         cached: Parse result dict with artifact_key, registry_id, etc.
     """
     gateway = _get_gateway()
+
+    # Load retemplated sections for alignment (PTCV-80)
+    section_bytes = gateway.get_artifact(cached["artifact_key"])
+    sections = parquet_to_sections(section_bytes)
 
     # PTCV-64: Use pre-generated retemplated markdown if available
     retemplated_key = cached.get("retemplated_artifact_key", "")
@@ -681,9 +687,6 @@ def _render_regeneration(cached: dict) -> None:
         md_bytes = gateway.get_artifact(retemplated_key)
         md = md_bytes.decode("utf-8")
     else:
-        # Fallback: generate markdown from sections (pre-PTCV-64)
-        section_bytes = gateway.get_artifact(cached["artifact_key"])
-        sections = parquet_to_sections(section_bytes)
         md = regenerate_ich_markdown(
             sections=sections,
             registry_id=cached["registry_id"],
@@ -693,8 +696,8 @@ def _render_regeneration(cached: dict) -> None:
 
     st.subheader("ICH E6(R3) Reformatted Protocol")
 
-    tab_retemplated, tab_compare = st.tabs(
-        ["Retemplated", "Compare Original vs Retemplated"],
+    tab_retemplated, tab_diff, tab_section = st.tabs(
+        ["Retemplated", "Diff", "Section Compare"],
     )
 
     with tab_retemplated:
@@ -712,7 +715,7 @@ def _render_regeneration(cached: dict) -> None:
             mime="text/markdown",
         )
 
-    with tab_compare:
+    with tab_diff:
         text_block_dicts = cached.get("text_block_dicts")
         if not text_block_dicts:
             st.info(
@@ -747,6 +750,21 @@ def _render_regeneration(cached: dict) -> None:
                     "Install `streamlit-code-diff` for diff view: "
                     "`pip install streamlit-code-diff`"
                 )
+
+    # PTCV-80: Section-aligned comparison with sync scrolling
+    with tab_section:
+        if not sections:
+            st.info(
+                "Run ICH Retemplating first to enable comparison"
+            )
+        else:
+            pairs = align_sections(sections, md)
+            if pairs:
+                import streamlit.components.v1 as components
+                html_content = build_comparison_html(pairs)
+                components.html(html_content, height=660, scrolling=False)
+            else:
+                st.info("No sections available for alignment.")
 
 
 def main() -> None:
