@@ -5,6 +5,780 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-05T17:07:22Z] PTCV-89: Extract Protocol TOC and Section Headers as Navigable Index
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-1
+
+**Summary:**
+Extract Protocol TOC and Section Headers as Navigable Index
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/toc_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_toc_extractor.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T17:05:13Z] PTCV-90: Semantic Section Matcher: Map Protocol Headers to Appendix B Sections
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Semantic Section Matcher: Map Protocol Headers to Appendix B Sections
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T16:19:57Z] PTCV-88: Decompose ICH E6(R3) Appendix B into Structured Query Schema
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-1
+
+**Summary:**
+Decompose ICH E6(R3) Appendix B into Structured Query Schema
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/appendix_b_queries.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_schema.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_schema.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T13:21:12Z] PTCV-86: Bug: st_code_diff() called with wrong keyword arguments crashes diff view
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Bug: st_code_diff() called with wrong keyword arguments crashes diff view
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T22:08:50Z] PTCV-85: Find industry-sponsored, multi-indication, dose-ranging trials with full protocols on ClinicalTrials.gov
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Find industry-sponsored, multi-indication, dose-ranging trials with full protocols on ClinicalTrials.gov
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/protocol_search/trial_curator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/tests/protocol_search/test_trial_curator.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T22:02:57Z] PTCV-84: Add Review Queue UI for low-confidence synonym mappings and ICH classifications
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add Review Queue UI for low-confidence synonym mappings and ICH classifications
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/review_queue.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/review_queue_viewer.py
+- C:/Dev/PTCV/tests/ich_parser/test_review_decisions.py
+- C:/Dev/PTCV/tests/ui/test_review_queue_viewer.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:54:08Z] PTCV-83: Add checkpoint resume for long-running pipelines after session disconnect
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add checkpoint resume for long-running pipelines after session disconnect
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/checkpoint_manager.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_checkpoint_manager.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:50:06Z] PTCV-82: Add pipeline stage progress visualization using st.status() containers
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add pipeline stage progress visualization using st.status() containers
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:47:09Z] PTCV-81: Add annotation hover provenance linking retemplated sections to source pages
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add annotation hover provenance linking retemplated sections to source pages
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/provenance_renderer.py
+- C:/Dev/PTCV/tests/ui/test_provenance_renderer.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:33:30Z] PTCV-80: Enhanced side-by-side comparison with synchronized scrolling and section alignment
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Enhanced side-by-side comparison with synchronized scrolling and section alignment
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/section_align.py
+- C:/Dev/PTCV/tests/ui/test_section_align.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:28:14Z] PTCV-79: Add side-by-side original vs retemplated protocol view using streamlit-code-diff
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add side-by-side original vs retemplated protocol view using streamlit-code-diff
+
+**Files Modified:**
+- C:/Dev/PTCV/requirements.txt
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/protocol_diff.py
+- C:/Dev/PTCV/tests/ui/test_protocol_diff.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T21:09:22Z] PTCV-78: Add model cost-tier selector (Opus/Sonnet) to retemplating workflow
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add model cost-tier selector (Opus/Sonnet) to retemplating workflow
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_model_tier.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:47:47Z] PTCV-77: Replace workflow selectbox with multi-select checkbox grid and dependency auto-enablement
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Replace workflow selectbox with multi-select checkbox grid and dependency auto-enablement
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/pipeline_stages.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_pipeline_stages.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:40:27Z] PTCV-76: Create SoVPlotData filtered view for schedule_of_visits.py visualization
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Create SoVPlotData filtered view for schedule_of_visits.py visualization
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_sov_plot_data.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:19Z] PTCV-74: SoA extractor produces timepoints from non-visit boilerplate text
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoA extractor produces timepoints from non-visit boilerplate text
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-73: SoV chart x-axis flooded with duplicate Screening/Day 7 timepoints
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoV chart x-axis flooded with duplicate Screening/Day 7 timepoints
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-72: SoV timeline x-axis missing day-offset schedule labels
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoV timeline x-axis missing day-offset schedule labels
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-71: Add Intervention swimlane and fix specimen activity classification in SoV timeline
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add Intervention swimlane and fix specimen activity classification in SoV timeline
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-70: SoV PNG download crashes app
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoV PNG download crashes app
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-69: Move review thresholds, SoA patterns, and boilerplate regexes to YAML configuration
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Move review thresholds, SoA patterns, and boilerplate regexes to YAML configuration
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:18Z] PTCV-63: PDF text extraction fails on landscape-oriented pages
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+PDF text extraction fails on landscape-oriented pages
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-62: Add Anthropic_API_Key secret to PTCV secrets manager
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add Anthropic_API_Key secret to PTCV secrets manager
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-58: Integrate CDISC Library REST API for controlled terminology validation
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Integrate CDISC Library REST API for controlled terminology validation
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-56: Implement ICH M11 CeSHarP machine-readable protocol parser for direct SoA extraction
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement ICH M11 CeSHarP machine-readable protocol parser for direct SoA extraction
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-55: Parameterize natural history data search from SoA-derived endpoints and visit windows
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Parameterize natural history data search from SoA-derived endpoints and visit windows
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-54: Generate synthetic SDTM datasets from SoA-derived schemas
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Generate synthetic SDTM datasets from SoA-derived schemas
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-53: Map extracted SoA tables to mock SDTM domains (TV, TA, TE, SE)
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Map extracted SoA tables to mock SDTM domains (TV, TA, TE, SE)
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T20:17:17Z] PTCV-52: Targeted extraction pipeline for ICH E6(R3) B4, B5, B10, B14 sections
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Targeted extraction pipeline for ICH E6(R3) B4, B5, B10, B14 sections
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/__init__.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/src/ptcv/ui/components/schedule_of_visits.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+11 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T19:52:37Z] PTCV-48: [Fallback Tier] Expand RAGClassifier context window from 3K to 8K chars
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+[Fallback Tier] Expand RAGClassifier context window from 3K to 8K chars
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/tests/ich_parser/test_classifier_context.py
+- C:/Dev/PTCV/tests/ich_parser/conftest.py
+- C:/Dev/PTCV/tests/ich_parser/test_classifier.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T19:09:10Z] PTCV-47: Implement dynamic few-shot prompting in LlmRetemplater classification prompt
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement dynamic few-shot prompting in LlmRetemplater classification prompt
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/tests/ich_parser/test_retemplater_few_shot.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T18:36:08Z] PTCV-57: Implement visit schedule feasibility validator with cross-visit window and ordering checks
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement visit schedule feasibility validator with cross-visit window and ordering checks
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/schedule_validator.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/models.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/validation_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/validation/__init__.py
+- C:/Dev/PTCV/tests/sdtm/validation/test_schedule_validator.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-04T18:33:00Z] PTCV-65: Implement retemplating fidelity checker to detect hallucinations and content loss
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Implement retemplating fidelity checker to detect hallucinations and content loss
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/fidelity_checker.py
+- C:/Dev/PTCV/tests/ich_parser/test_fidelity_checker.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-04T18:18:35Z] PTCV-68: Create stage-specific compressed ICH prompt templates with relevance filtering
 
 **Status Change:** In Progress -> Done
