@@ -42,6 +42,25 @@ PIPELINE_STAGES: tuple[PipelineStage, ...] = (
     ),
     PipelineStage("sov", "Schedule of Visits", ("soa",), ""),
     PipelineStage("annotations", "Annotation Review", ("extraction",), ""),
+    # PTCV-95: Query-driven pipeline stages.
+    PipelineStage(
+        "query_index", "Protocol Index", ("extraction",), "query_cache",
+    ),
+    PipelineStage(
+        "query_match", "Section Matching", ("query_index",), "query_cache",
+    ),
+    PipelineStage(
+        "query_extract", "Query Extraction",
+        ("query_match",), "query_cache",
+    ),
+    PipelineStage(
+        "query_assemble", "Template Assembly",
+        ("query_extract",), "query_cache",
+    ),
+    PipelineStage(
+        "benchmark", "Benchmark",
+        ("retemplating", "query_assemble"), "benchmark_cache",
+    ),
 )
 
 STAGE_BY_KEY: dict[str, PipelineStage] = {s.key: s for s in PIPELINE_STAGES}

@@ -71,6 +71,9 @@ from ptcv.ui.components.review_queue_viewer import (
     get_pending_count,
     render_review_queue,
 )
+from ptcv.ui.components.benchmark_viewer import render_benchmark
+from ptcv.ui.components.query_pipeline import render_query_pipeline
+from ptcv.ui.components.refinement_panel import render_refinement_panel
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.components.section_align import align_sections, build_comparison_html
 from ptcv.ui.pipeline_stages import STAGE_BY_KEY
@@ -842,7 +845,10 @@ def main() -> None:
     st.caption(f"{source}/{file_path.name}")
 
     # Initialise caches
-    for ck in ("parse_cache", "soa_cache", "sdtm_cache", "fidelity_cache"):
+    for ck in (
+        "parse_cache", "soa_cache", "sdtm_cache", "fidelity_cache",
+        "query_cache", "benchmark_cache",
+    ):
         if ck not in st.session_state:
             st.session_state[ck] = {}
 
@@ -860,9 +866,13 @@ def main() -> None:
         f"Review ({pending})" if pending > 0 else "Review"
     )
 
-    tab_process, tab_results, tab_quality, tab_soa, tab_review = st.tabs(
-        ["Process", "Results", "Quality", "SoA & SDTM", review_label],
-    )
+    (
+        tab_process, tab_results, tab_quality, tab_soa,
+        tab_query, tab_benchmark, tab_refinement, tab_review,
+    ) = st.tabs([
+        "Process", "Results", "Quality", "SoA & SDTM",
+        "Query Pipeline", "Benchmark", "Refinement", review_label,
+    ])
 
     # === Process tab ===
     with tab_process:
@@ -1177,6 +1187,20 @@ def main() -> None:
                     "Run SoA Extraction first to enable "
                     "SDTM generation."
                 )
+
+    # === Query Pipeline tab (PTCV-95) ===
+    with tab_query:
+        render_query_pipeline(file_path, file_sha)
+
+    # === Benchmark tab (PTCV-95) ===
+    with tab_benchmark:
+        query_cached = st.session_state["query_cache"].get(file_sha)
+        render_benchmark(file_path, file_sha, query_cached)
+
+    # === Refinement tab (PTCV-95) ===
+    with tab_refinement:
+        query_cached = st.session_state["query_cache"].get(file_sha)
+        render_refinement_panel(registry_id, query_cached)
 
     # === Review tab ===
     with tab_review:

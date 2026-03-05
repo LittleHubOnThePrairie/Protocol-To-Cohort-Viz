@@ -28,8 +28,8 @@ from ptcv.ui.pipeline_stages import (
 class TestStageStructure:
     """Pipeline DAG is well-formed."""
 
-    def test_seven_stages_defined(self) -> None:
-        assert len(PIPELINE_STAGES) == 7
+    def test_twelve_stages_defined(self) -> None:
+        assert len(PIPELINE_STAGES) == 12
 
     def test_all_stage_keys_unique(self) -> None:
         keys = [s.key for s in PIPELINE_STAGES]
@@ -49,6 +49,22 @@ class TestStageStructure:
     def test_sdtm_depends_on_extraction_soa_retemplating(self) -> None:
         prereqs = set(STAGE_BY_KEY["sdtm"].prerequisites)
         assert prereqs == {"extraction", "soa", "retemplating"}
+
+    def test_query_index_depends_on_extraction(self) -> None:
+        assert STAGE_BY_KEY["query_index"].prerequisites == ("extraction",)
+
+    def test_query_match_depends_on_query_index(self) -> None:
+        assert STAGE_BY_KEY["query_match"].prerequisites == ("query_index",)
+
+    def test_query_extract_depends_on_query_match(self) -> None:
+        assert STAGE_BY_KEY["query_extract"].prerequisites == ("query_match",)
+
+    def test_query_assemble_depends_on_query_extract(self) -> None:
+        assert STAGE_BY_KEY["query_assemble"].prerequisites == ("query_extract",)
+
+    def test_benchmark_depends_on_retemplating_and_query_assemble(self) -> None:
+        prereqs = set(STAGE_BY_KEY["benchmark"].prerequisites)
+        assert prereqs == {"retemplating", "query_assemble"}
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +183,21 @@ class TestExecutionOrder:
         assert set(order) == {"extraction", "soa"}
 
     def test_full_pipeline_order(self) -> None:
-        """All 7 stages selected — verify global order."""
+        """All 12 stages selected — verify global order."""
         all_keys = {s.key for s in PIPELINE_STAGES}
         order = get_execution_order(all_keys)
-        assert len(order) == 7
+        assert len(order) == 12
         # Extraction always first
         assert order[0] == "extraction"
+
+    def test_query_chain_order(self) -> None:
+        """Query-driven stages run in dependency order."""
+        active = compute_active_stages({"query_assemble"})
+        order = get_execution_order(active)
+        assert order.index("extraction") < order.index("query_index")
+        assert order.index("query_index") < order.index("query_match")
+        assert order.index("query_match") < order.index("query_extract")
+        assert order.index("query_extract") < order.index("query_assemble")
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +251,19 @@ class TestEdgeCases:
             "fidelity", "retemplating", "extraction",
             "sov", "soa",
         }
+
+    def test_benchmark_transitively_needs_extraction(self) -> None:
+        prereqs = get_all_prerequisites("benchmark")
+        assert "extraction" in prereqs
+        assert "query_index" in prereqs
+        assert "query_match" in prereqs
+        assert "query_extract" in prereqs
+        assert "query_assemble" in prereqs
+        assert "retemplating" in prereqs
+
+    def test_query_cache_shared_across_query_stages(self) -> None:
+        for key in ("query_index", "query_match", "query_extract", "query_assemble"):
+            assert STAGE_BY_KEY[key].cache_key == "query_cache"
+
+    def test_benchmark_uses_benchmark_cache(self) -> None:
+        assert STAGE_BY_KEY["benchmark"].cache_key == "benchmark_cache"

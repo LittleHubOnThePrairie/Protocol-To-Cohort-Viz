@@ -1,0 +1,436 @@
+"""Query-driven pipeline component for Streamlit UI (PTCV-95).
+
+Orchestrates the full query-driven pipeline:
+  extract_protocol_index -> SectionMatcher.match -> QueryExtractor.extract
+  -> assemble_template
+
+Pure-Python helpers are separated from Streamlit rendering for testability.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Optional
+
+from ptcv.ui.components.confidence_badge import (
+    confidence_color,
+    confidence_label,
+    format_confidence,
+)
+
+logger = logging.getLogger(__name__)
+
+# Maximum chars to show in content preview columns.
+_CONTENT_PREVIEW_LEN = 120
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python helpers (testable, no Streamlit imports)
+# ---------------------------------------------------------------------------
+
+
+def run_query_pipeline(
+    pdf_path: str | Path,
+    cohere_api_key: str | None = None,
+) -> dict[str, Any]:
+    """Orchestrate the full query-driven pipeline.
+
+    Args:
+        pdf_path: Path to the protocol PDF.
+        cohere_api_key: Optional Cohere API key for embedding-based
+            matching. Falls back to keyword matching without it.
+
+    Returns:
+        Dict with keys: ``protocol_index``, ``match_result``,
+        ``extraction_result``, ``assembled``, ``assembled_markdown``,
+        ``coverage``.
+
+    Raises:
+        Exception: Re-raised from any pipeline stage.
+    """
+    from ptcv.ich_parser.toc_extractor import extract_protocol_index
+    from ptcv.ich_parser.section_matcher import SectionMatcher
+    from ptcv.ich_parser.query_extractor import QueryExtractor
+    from ptcv.ich_parser.template_assembler import (
+        QueryExtractionHit,
+        SourceReference,
+        assemble_template,
+    )
+
+    # Stage 1: Extract protocol index
+    protocol_index = extract_protocol_index(pdf_path)
+
+    # Stage 2: Section matching
+    key = cohere_api_key or os.environ.get("COHERE_API_KEY")
+    matcher = SectionMatcher(cohere_api_key=key)
+    match_result = matcher.match(protocol_index)
+
+    # Stage 3: Query extraction
+    extractor = QueryExtractor()
+    extraction_result = extractor.extract(protocol_index, match_result)
+
+    # Stage 4: Template assembly
+    hits = []
+    for ext in extraction_result.extractions:
+        parent = ext.section_id.rsplit(".", 1)[0] if "." in ext.section_id else ext.section_id
+        hits.append(QueryExtractionHit(
+            query_id=ext.query_id,
+            section_id=ext.section_id,
+            parent_section=parent,
+            query_text="",
+            extracted_content=ext.content,
+            confidence=ext.confidence,
+            source=SourceReference(
+                section_header=ext.source_section,
+            ),
+        ))
+
+    assembled = assemble_template(hits)
+
+    return {
+        "protocol_index": protocol_index,
+        "match_result": match_result,
+        "extraction_result": extraction_result,
+        "assembled": assembled,
+        "assembled_markdown": assembled.to_markdown(),
+        "coverage": assembled.coverage,
+    }
+
+
+def format_toc_tree(toc_entries: list[Any]) -> list[dict[str, Any]]:
+    """Flatten TOC entries for tabular display.
+
+    Args:
+        toc_entries: List of ``TOCEntry`` dataclass instances.
+
+    Returns:
+        List of dicts with keys: ``level``, ``number``, ``title``,
+        ``page``.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry in toc_entries:
+        indent = "  " * (getattr(entry, "level", 1) - 1)
+        rows.append({
+            "level": getattr(entry, "level", 1),
+            "number": getattr(entry, "number", ""),
+            "title": f"{indent}{getattr(entry, 'title', '')}",
+            "page": getattr(entry, "page_ref", 0),
+        })
+    return rows
+
+
+def format_match_table(match_result: Any) -> list[dict[str, Any]]:
+    """Format section mappings for tabular display.
+
+    Args:
+        match_result: ``MatchResult`` from ``SectionMatcher.match()``.
+
+    Returns:
+        List of dicts with keys: ``protocol_section``, ``ich_section``,
+        ``score``, ``confidence``, ``method``.
+    """
+    rows: list[dict[str, Any]] = []
+    for mapping in getattr(match_result, "mappings", []):
+        matches = getattr(mapping, "matches", [])
+        if matches:
+            best = matches[0]
+            rows.append({
+                "protocol_section": (
+                    f"{getattr(mapping, 'protocol_section_number', '')} "
+                    f"{getattr(mapping, 'protocol_section_title', '')}"
+                ).strip(),
+                "ich_section": (
+                    f"{getattr(best, 'ich_section_code', '')} "
+                    f"{getattr(best, 'ich_section_name', '')}"
+                ).strip(),
+                "score": round(
+                    getattr(best, "boosted_score", 0.0)
+                    or getattr(best, "similarity_score", 0.0),
+                    3,
+                ),
+                "confidence": getattr(
+                    getattr(best, "confidence", None), "value", "LOW"
+                ) if hasattr(getattr(best, "confidence", None), "value") else str(
+                    getattr(best, "confidence", "LOW")
+                ),
+                "method": getattr(best, "match_method", ""),
+            })
+        else:
+            rows.append({
+                "protocol_section": (
+                    f"{getattr(mapping, 'protocol_section_number', '')} "
+                    f"{getattr(mapping, 'protocol_section_title', '')}"
+                ).strip(),
+                "ich_section": "(unmapped)",
+                "score": 0.0,
+                "confidence": "LOW",
+                "method": "",
+            })
+    return rows
+
+
+def format_extraction_table(
+    extraction_result: Any,
+) -> list[dict[str, Any]]:
+    """Format query extractions for tabular display.
+
+    Args:
+        extraction_result: ``ExtractionResult`` from
+            ``QueryExtractor.extract()``.
+
+    Returns:
+        List of dicts with keys: ``query_id``, ``section``,
+        ``content_preview``, ``confidence``, ``method``.
+    """
+    rows: list[dict[str, Any]] = []
+    for ext in getattr(extraction_result, "extractions", []):
+        content = getattr(ext, "content", "")
+        preview = (
+            content[:_CONTENT_PREVIEW_LEN] + "..."
+            if len(content) > _CONTENT_PREVIEW_LEN
+            else content
+        )
+        rows.append({
+            "query_id": getattr(ext, "query_id", ""),
+            "section": getattr(ext, "section_id", ""),
+            "content_preview": preview,
+            "confidence": format_confidence(
+                getattr(ext, "confidence", 0.0)
+            ),
+            "method": getattr(ext, "extraction_method", ""),
+        })
+    return rows
+
+
+def format_gap_table(extraction_result: Any) -> list[dict[str, Any]]:
+    """Format extraction gaps for tabular display.
+
+    Args:
+        extraction_result: ``ExtractionResult`` from
+            ``QueryExtractor.extract()``.
+
+    Returns:
+        List of dicts with keys: ``query_id``, ``section``, ``reason``.
+    """
+    rows: list[dict[str, Any]] = []
+    for gap in getattr(extraction_result, "gaps", []):
+        rows.append({
+            "query_id": getattr(gap, "query_id", ""),
+            "section": getattr(gap, "section_id", ""),
+            "reason": getattr(gap, "reason", "unknown"),
+        })
+    return rows
+
+
+def format_coverage_metrics(coverage: Any) -> dict[str, Any]:
+    """Extract key coverage metrics from a CoverageReport.
+
+    Args:
+        coverage: ``CoverageReport`` from ``AssembledProtocol.coverage``.
+
+    Returns:
+        Dict with keys: ``total``, ``populated``, ``gaps``,
+        ``avg_confidence``, ``high_pct``, ``review_pct``, ``low_pct``.
+    """
+    total = getattr(coverage, "total_sections", 0)
+    populated = getattr(coverage, "populated_count", 0)
+    gaps = getattr(coverage, "gap_count", 0)
+    avg_conf = getattr(coverage, "avg_confidence", 0.0)
+    high = getattr(coverage, "high_confidence_count", 0)
+    review = getattr(coverage, "review_confidence_count", 0)
+    low = getattr(coverage, "low_confidence_count", 0)
+
+    return {
+        "total": total,
+        "populated": populated,
+        "gaps": gaps,
+        "avg_confidence": round(avg_conf, 3),
+        "high_pct": round(high / total * 100, 1) if total else 0.0,
+        "review_pct": round(review / total * 100, 1) if total else 0.0,
+        "low_pct": round(low / total * 100, 1) if total else 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Streamlit rendering
+# ---------------------------------------------------------------------------
+
+
+def render_query_pipeline(file_path: Path, file_sha: str) -> None:
+    """Render the Query Pipeline tab.
+
+    Runs the full query-driven pipeline on the selected PDF and
+    displays: Protocol Index, Section Matching, Extraction Results,
+    and Assembled Template.
+
+    Args:
+        file_path: Absolute path to the selected PDF.
+        file_sha: SHA-256 hex digest for session caching.
+    """
+    import streamlit as st
+
+    # Cache init
+    if "query_cache" not in st.session_state:
+        st.session_state["query_cache"] = {}
+
+    cached = st.session_state["query_cache"].get(file_sha)
+
+    if cached:
+        st.success("Query pipeline complete. Results below.")
+    else:
+        if st.button(
+            "Run Query Pipeline",
+            type="primary",
+            key="btn_query_pipeline",
+        ):
+            with st.status(
+                "Running query-driven pipeline...",
+                expanded=True,
+            ) as status:
+                t0 = time.monotonic()
+                try:
+                    st.write("Extracting protocol index...")
+                    result = run_query_pipeline(str(file_path))
+                    elapsed = time.monotonic() - t0
+                    st.session_state["query_cache"][file_sha] = result
+                    cached = result
+                    status.update(
+                        label=(
+                            "Query Pipeline: "
+                            f"Complete ({elapsed:.1f}s)"
+                        ),
+                        state="complete",
+                    )
+                except Exception:
+                    elapsed = time.monotonic() - t0
+                    status.update(
+                        label=(
+                            "Query Pipeline: "
+                            f"Error ({elapsed:.1f}s)"
+                        ),
+                        state="error",
+                    )
+                    st.code(traceback.format_exc(), language="text")
+                    return
+
+    if not cached:
+        st.info(
+            "Click **Run Query Pipeline** to extract and classify "
+            "this protocol using the query-driven approach."
+        )
+        return
+
+    # --- Protocol Index ---
+    protocol_index = cached["protocol_index"]
+    st.subheader("Protocol Index")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Pages", getattr(protocol_index, "page_count", 0))
+    with col2:
+        st.metric(
+            "TOC entries",
+            len(getattr(protocol_index, "toc_entries", [])),
+        )
+    with col3:
+        st.metric(
+            "Section headers",
+            len(getattr(protocol_index, "section_headers", [])),
+        )
+
+    toc_rows = format_toc_tree(
+        getattr(protocol_index, "toc_entries", [])
+    )
+    if toc_rows:
+        with st.expander("Table of Contents", expanded=False):
+            st.dataframe(toc_rows, use_container_width=True)
+
+    st.divider()
+
+    # --- Section Matching ---
+    match_result = cached["match_result"]
+    st.subheader("Section Matching")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            "Auto-mapped",
+            getattr(match_result, "auto_mapped_count", 0),
+        )
+    with col2:
+        st.metric("Review", getattr(match_result, "review_count", 0))
+    with col3:
+        st.metric(
+            "Unmapped", getattr(match_result, "unmapped_count", 0),
+        )
+
+    match_rows = format_match_table(match_result)
+    if match_rows:
+        with st.expander("Section Mappings", expanded=False):
+            st.dataframe(match_rows, use_container_width=True)
+
+    st.divider()
+
+    # --- Extraction Results ---
+    extraction_result = cached["extraction_result"]
+    st.subheader("Query Extraction")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            "Answered",
+            getattr(extraction_result, "answered_queries", 0),
+        )
+    with col2:
+        st.metric(
+            "Total queries",
+            getattr(extraction_result, "total_queries", 0),
+        )
+    with col3:
+        coverage = getattr(extraction_result, "coverage", 0.0)
+        st.metric("Coverage", f"{coverage:.0%}")
+
+    ext_rows = format_extraction_table(extraction_result)
+    if ext_rows:
+        with st.expander("Extractions", expanded=False):
+            st.dataframe(ext_rows, use_container_width=True)
+
+    gap_rows = format_gap_table(extraction_result)
+    if gap_rows:
+        with st.expander(f"Gaps ({len(gap_rows)})", expanded=False):
+            st.dataframe(gap_rows, use_container_width=True)
+
+    st.divider()
+
+    # --- Assembled Template ---
+    assembled = cached["assembled"]
+    st.subheader("Assembled Appendix B Template")
+
+    cov = cached["coverage"]
+    cov_metrics = format_coverage_metrics(cov)
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Sections", cov_metrics["total"])
+    with col2:
+        st.metric("Populated", cov_metrics["populated"])
+    with col3:
+        st.metric("Gaps", cov_metrics["gaps"])
+    with col4:
+        st.metric(
+            "Avg confidence",
+            f"{cov_metrics['avg_confidence']:.2f}",
+        )
+
+    md = cached["assembled_markdown"]
+    with st.expander("Template Preview", expanded=True):
+        with st.container(height=500):
+            st.markdown(md)
+
+    st.download_button(
+        label="Download as .md",
+        data=md,
+        file_name="assembled_appendix_b.md",
+        mime="text/markdown",
+        key="btn_dl_assembled",
+    )
