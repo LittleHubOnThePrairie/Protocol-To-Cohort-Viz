@@ -73,14 +73,7 @@ from ptcv.ui.components.review_queue_viewer import (
 )
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.components.section_align import align_sections, build_comparison_html
-from ptcv.ui.pipeline_stages import (
-    PIPELINE_STAGES,
-    STAGE_BY_KEY,
-    compute_active_stages,
-    get_all_dependents,
-    get_all_prerequisites,
-    get_execution_order,
-)
+from ptcv.ui.pipeline_stages import STAGE_BY_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +82,9 @@ _DATA_ROOT = Path("C:/Dev/PTCV/data")
 _PROTOCOLS_DIR = _DATA_ROOT / "protocols"
 
 # LLM retemplating available when API key is set
-_HAS_ANTHROPIC_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
+def _has_anthropic_key() -> bool:
+    """Check at runtime so key set after import is detected."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 # Model tier definitions (PTCV-78)
 _MODEL_TIERS: dict[str, dict[str, str | float]] = {
@@ -269,7 +264,7 @@ def _run_parse(
 
     # Stage 3: Retemplating — routed by model tier (PTCV-78)
     tier_cfg = _MODEL_TIERS.get(model_tier, _MODEL_TIERS[_DEFAULT_TIER])
-    if _HAS_ANTHROPIC_KEY and tier_cfg["method"] == "llm":
+    if _has_anthropic_key() and tier_cfg["method"] == "llm":
         # Opus tier: full LLM retemplater
         retemplater = LlmRetemplater(
             gateway=gateway,
@@ -293,7 +288,7 @@ def _run_parse(
         output_tokens = retemplate_result.output_tokens
         retemplated_artifact_key = retemplate_result.retemplated_artifact_key
         retemplating_method = "llm"
-    elif _HAS_ANTHROPIC_KEY and tier_cfg["method"] == "rag":
+    elif _has_anthropic_key() and tier_cfg["method"] == "rag":
         # Sonnet tier: RAGClassifier (Cohere + Sonnet) via IchParser
         protocol_text = "\n".join(str(d["text"]) for d in text_block_dicts)
         classifier = RAGClassifier(claude_model=str(tier_cfg["model_id"]))
@@ -781,11 +776,15 @@ def _render_regeneration(cached: dict) -> None:
             try:
                 from streamlit_code_diff import st_code_diff
                 st_code_diff(
-                    old_code=original,
-                    new_code=md,
-                    old_title=left_label,
-                    new_title=right_label,
-                    split_view=(mode == "Side by side"),
+                    old_string=original,
+                    new_string=md,
+                    filename=left_label,
+                    new_filename=right_label,
+                    output_format=(
+                        "side-by-side"
+                        if mode == "Side by side"
+                        else "line-by-line"
+                    ),
                     language="markdown",
                 )
             except ImportError:
@@ -810,6 +809,14 @@ def _render_regeneration(cached: dict) -> None:
                 st.info("No sections available for alignment.")
 
 
+def _is_cached(file_sha: str, stage_key: str) -> bool:
+    """Check if a stage's result is already cached for this file."""
+    cache_key = STAGE_BY_KEY[stage_key].cache_key
+    if not cache_key:
+        return False
+    return file_sha in st.session_state.get(cache_key, {})
+
+
 def main() -> None:
     """Streamlit application entry point."""
     st.set_page_config(
@@ -819,273 +826,130 @@ def main() -> None:
     )
     st.title("Protocol-To-Cohort-Viz")
 
-    # Sidebar: file browser
+    # Sidebar: file browser only
     source, file_path = render_file_browser(_PROTOCOLS_DIR)
 
     if file_path is None:
         st.info("Select a protocol file from the sidebar to get started.")
         return
 
-    st.markdown(f"**Selected:** `{source}/{file_path.name}`")
-
     # Read PDF and compute SHA for caching
     pdf_bytes = file_path.read_bytes()
     file_sha = _compute_sha256(pdf_bytes)
     page_count = _count_pdf_pages(pdf_bytes)
+    registry_id = _extract_registry_id(file_path.name)
+
+    st.caption(f"{source}/{file_path.name}")
 
     # Initialise caches
-    if "parse_cache" not in st.session_state:
-        st.session_state["parse_cache"] = {}
-    if "soa_cache" not in st.session_state:
-        st.session_state["soa_cache"] = {}
-    if "sdtm_cache" not in st.session_state:
-        st.session_state["sdtm_cache"] = {}
-    if "fidelity_cache" not in st.session_state:
-        st.session_state["fidelity_cache"] = {}
+    for ck in ("parse_cache", "soa_cache", "sdtm_cache", "fidelity_cache"):
+        if ck not in st.session_state:
+            st.session_state[ck] = {}
+
+    # Read cached results
+    cached = st.session_state["parse_cache"].get(file_sha)
+    soa_cached = st.session_state["soa_cache"].get(file_sha)
+    fidelity_cached = st.session_state["fidelity_cache"].get(file_sha)
+    sdtm_cached = st.session_state["sdtm_cache"].get(file_sha)
 
     # ------------------------------------------------------------------
-    # Checkpoint resume (PTCV-83)
+    # Tabbed wizard
     # ------------------------------------------------------------------
-
-    if has_checkpoints(_DATA_ROOT, file_sha):
-        resume_label = get_resume_label(_DATA_ROOT, file_sha)
-        col_resume, col_clear = st.columns([3, 1])
-        with col_resume:
-            if st.button(
-                resume_label or "Resume pipeline",
-                key="btn_resume",
-            ):
-                restored = load_checkpoints(_DATA_ROOT, file_sha)
-                for cache_key, data in restored.items():
-                    st.session_state[cache_key][file_sha] = data
-                st.toast(
-                    f"Restored {len(restored)} stage(s) "
-                    "from checkpoint"
-                )
-                st.rerun()
-        with col_clear:
-            if st.button(
-                "Start fresh",
-                key="btn_clear_cp",
-            ):
-                clear_checkpoints(_DATA_ROOT, file_sha)
-                for ck in (
-                    "parse_cache", "soa_cache",
-                    "fidelity_cache", "sdtm_cache",
-                ):
-                    st.session_state[ck].pop(file_sha, None)
-                st.toast("Checkpoints cleared")
-                st.rerun()
-
-    # ------------------------------------------------------------------
-    # Pipeline stage checkboxes (PTCV-77)
-    # ------------------------------------------------------------------
-
-    if "user_stages" not in st.session_state:
-        st.session_state["user_stages"] = set()
-
-    def _on_stage_toggle(stage_key: str) -> None:
-        """Handle checkbox toggle with auto-enable/disable logic."""
-        new_val = st.session_state[f"cb_{stage_key}"]
-        user_stages: set[str] = st.session_state["user_stages"]
-
-        if new_val:
-            user_stages.add(stage_key)
-            # Auto-enable all transitive prerequisites
-            for prereq in get_all_prerequisites(stage_key):
-                user_stages.add(prereq)
-                st.session_state[f"cb_{prereq}"] = True
-        else:
-            user_stages.discard(stage_key)
-            # Cascade disable all transitive dependents
-            for dep in get_all_dependents(stage_key):
-                user_stages.discard(dep)
-                st.session_state[f"cb_{dep}"] = False
-
-    def _is_cached(stage_key: str) -> bool:
-        """Check if a stage's result is already cached for this file."""
-        cache_key = STAGE_BY_KEY[stage_key].cache_key
-        if not cache_key:
-            return False
-        return file_sha in st.session_state.get(cache_key, {})
-
-    # Sidebar: model cost tier (PTCV-78)
-    with st.sidebar:
-        st.subheader("Model Tier")
-        tier_options = list(_MODEL_TIERS.keys())
-        selected_tier = st.radio(
-            "Retemplating model",
-            tier_options,
-            index=tier_options.index(_DEFAULT_TIER),
-            key="model_tier",
-            label_visibility="collapsed",
-        )
-
-        if page_count > 0 and _HAS_ANTHROPIC_KEY:
-            low, high = estimate_cost(page_count, selected_tier)
-            st.caption(
-                f"Est. cost ({page_count} pages): "
-                f"${low:.2f}\u2013${high:.2f}"
-            )
-        elif not _HAS_ANTHROPIC_KEY:
-            st.caption("No API key — deterministic fallback")
-
-    # Sidebar: pipeline stage checkboxes
-    with st.sidebar:
-        st.subheader("Pipeline Stages")
-
-        user_stages: set[str] = st.session_state["user_stages"]
-        active = compute_active_stages(user_stages)
-
-        for stage in PIPELINE_STAGES:
-            is_auto = stage.key in active and stage.key not in user_stages
-            is_cached = _is_cached(stage.key)
-
-            label = stage.label
-            if is_auto:
-                label += " *(auto)*"
-            if is_cached:
-                label += " [cached]"
-
-            st.checkbox(
-                label,
-                key=f"cb_{stage.key}",
-                on_change=_on_stage_toggle,
-                args=(stage.key,),
-            )
-
-    active = compute_active_stages(st.session_state["user_stages"])
-
-    # Sidebar: review queue badge (PTCV-84)
-    _registry_id = (
-        st.session_state.get("parse_cache", {})
-        .get(file_sha, {})
-        .get("registry_id")
+    pending = get_pending_count(registry_id=registry_id)
+    review_label = (
+        f"Review ({pending})" if pending > 0 else "Review"
     )
-    _pending = get_pending_count(registry_id=_registry_id)
-    if _pending > 0:
-        with st.sidebar:
-            st.caption(f"Review Queue: {_pending} pending")
 
-    # ------------------------------------------------------------------
-    # Pipeline execution (PTCV-77)
-    # ------------------------------------------------------------------
+    tab_process, tab_results, tab_quality, tab_soa, tab_review = st.tabs(
+        ["Process", "Results", "Quality", "SoA & SDTM", review_label],
+    )
 
-    cached = st.session_state.get("parse_cache", {}).get(file_sha)
-    soa_cached = st.session_state.get("soa_cache", {}).get(file_sha)
-    fidelity_cached = st.session_state.get(
-        "fidelity_cache", {},
-    ).get(file_sha)
-    sdtm_cached = st.session_state.get("sdtm_cache", {}).get(file_sha)
-
-    if st.button("Run Pipeline", disabled=not active):
-        gateway = _get_gateway()
-        execution_order = get_execution_order(active)
-        pipeline_error = False
-
-        for stage_key in execution_order:
-            stage = STAGE_BY_KEY[stage_key]
-
-            # Skip display-only stages (no execution needed)
-            if not stage.cache_key:
-                continue
-
-            # Stop pipeline on prior error (PTCV-82)
-            if pipeline_error:
-                st.status(
-                    f"{stage.label}: Skipped (prior error)",
-                    state="error",
-                )
-                continue
-
-            # Cached stages: show status instead of toast (PTCV-82)
-            if _is_cached(stage_key):
-                st.status(
-                    f"{stage.label}: Cached",
-                    state="complete",
-                )
-                continue
-
-            # Execute stage with timing and error handling
-            if stage_key in ("extraction", "retemplating"):
-                # Both resolve via _run_parse()
-                if cached is None:
-                    with st.status(
-                        f"Running {stage.label}...",
-                        expanded=True,
-                    ) as status:
-                        t0 = time.monotonic()
-                        tier = st.session_state.get(
-                            "model_tier", _DEFAULT_TIER,
-                        )
-                        st.write(
-                            f"Extracting and retemplating "
-                            f"{page_count} pages "
-                            f"({tier})..."
-                        )
-                        try:
-                            result = _run_parse(
-                                pdf_bytes, file_path.name,
-                                gateway, model_tier=tier,
-                            )
-                            elapsed = time.monotonic() - t0
-                            st.session_state["parse_cache"][
-                                file_sha
-                            ] = result
-                            cached = result
-                            save_checkpoint(
-                                _DATA_ROOT, file_sha,
-                                "parse_cache", result,
-                            )
-                            status.update(
-                                label=(
-                                    f"{stage.label}: "
-                                    f"Complete ({elapsed:.1f}s)"
-                                ),
-                                state="complete",
-                            )
-                        except Exception:
-                            elapsed = time.monotonic() - t0
-                            status.update(
-                                label=(
-                                    f"{stage.label}: "
-                                    f"Error ({elapsed:.1f}s)"
-                                ),
-                                state="error",
-                            )
-                            st.code(
-                                traceback.format_exc(),
-                                language="text",
-                            )
-                            pipeline_error = True
-                else:
-                    st.status(
-                        f"{stage.label}: Cached",
-                        state="complete",
+    # === Process tab ===
+    with tab_process:
+        # Checkpoint resume (PTCV-83)
+        if has_checkpoints(_DATA_ROOT, file_sha):
+            resume_label = get_resume_label(_DATA_ROOT, file_sha)
+            col_r, col_c = st.columns([3, 1])
+            with col_r:
+                if st.button(
+                    resume_label or "Resume pipeline",
+                    key="btn_resume",
+                ):
+                    restored = load_checkpoints(_DATA_ROOT, file_sha)
+                    for ck, data in restored.items():
+                        st.session_state[ck][file_sha] = data
+                    st.toast(
+                        f"Restored {len(restored)} stage(s) "
+                        "from checkpoint",
                     )
+                    st.rerun()
+            with col_c:
+                if st.button("Start fresh", key="btn_clear_cp"):
+                    clear_checkpoints(_DATA_ROOT, file_sha)
+                    for ck in (
+                        "parse_cache", "soa_cache",
+                        "fidelity_cache", "sdtm_cache",
+                    ):
+                        st.session_state[ck].pop(file_sha, None)
+                    st.toast("Checkpoints cleared")
+                    st.rerun()
 
-            elif stage_key == "soa":
+        # Settings expander
+        with st.expander("Settings", expanded=False):
+            tier_options = list(_MODEL_TIERS.keys())
+            selected_tier = st.radio(
+                "Retemplating model",
+                tier_options,
+                index=tier_options.index(_DEFAULT_TIER),
+                key="model_tier",
+            )
+            if page_count > 0 and _has_anthropic_key():
+                low, high = estimate_cost(page_count, selected_tier)
+                st.caption(
+                    f"Est. cost ({page_count} pages): "
+                    f"${low:.2f}\u2013${high:.2f}"
+                )
+            elif not _has_anthropic_key():
+                st.caption("No API key — deterministic fallback")
+
+        # Process button
+        if cached:
+            st.success(
+                "Protocol processed. See **Results** tab.",
+            )
+        else:
+            if st.button(
+                "Process Protocol",
+                type="primary",
+                key="btn_process",
+            ):
+                gateway = _get_gateway()
+                tier = st.session_state.get(
+                    "model_tier", _DEFAULT_TIER,
+                )
                 with st.status(
-                    "Running SoA Extraction...", expanded=True,
+                    f"Extracting and retemplating "
+                    f"{page_count} pages ({tier})...",
+                    expanded=True,
                 ) as status:
                     t0 = time.monotonic()
-                    st.write("Discovering tables and timepoints...")
                     try:
-                        soa_result = _run_soa_extraction(
-                            cached, pdf_bytes, gateway,
+                        result = _run_parse(
+                            pdf_bytes, file_path.name,
+                            gateway, model_tier=tier,
                         )
                         elapsed = time.monotonic() - t0
-                        st.session_state["soa_cache"][
+                        st.session_state["parse_cache"][
                             file_sha
-                        ] = soa_result
-                        soa_cached = soa_result
+                        ] = result
+                        cached = result
                         save_checkpoint(
                             _DATA_ROOT, file_sha,
-                            "soa_cache", soa_result,
+                            "parse_cache", result,
                         )
                         status.update(
                             label=(
-                                "SoA Extraction: "
+                                "Extraction + Retemplating: "
                                 f"Complete ({elapsed:.1f}s)"
                             ),
                             state="complete",
@@ -1094,7 +958,7 @@ def main() -> None:
                         elapsed = time.monotonic() - t0
                         status.update(
                             label=(
-                                "SoA Extraction: "
+                                "Extraction + Retemplating: "
                                 f"Error ({elapsed:.1f}s)"
                             ),
                             state="error",
@@ -1103,18 +967,47 @@ def main() -> None:
                             traceback.format_exc(),
                             language="text",
                         )
-                        pipeline_error = True
 
-            elif stage_key == "fidelity":
+    # === Results tab ===
+    with tab_results:
+        if cached:
+            _display_verdict(cached)
+            st.divider()
+            _render_regeneration(cached)
+        else:
+            st.info(
+                "Go to the **Process** tab and click "
+                "**Process Protocol** to get started."
+            )
+
+    # === Quality tab ===
+    with tab_quality:
+        if not cached:
+            st.info(
+                "Process the protocol first to enable "
+                "quality checks."
+            )
+        elif fidelity_cached:
+            _display_fidelity(fidelity_cached)
+        else:
+            if st.button(
+                "Run Fidelity Check",
+                type="primary",
+                key="btn_fidelity",
+            ):
+                gateway = _get_gateway()
                 with st.status(
-                    "Running Fidelity Check...", expanded=True,
+                    "Running Fidelity Check...",
+                    expanded=True,
                 ) as status:
                     t0 = time.monotonic()
-                    st.write("Comparing retemplated vs original...")
+                    st.write(
+                        "Comparing retemplated vs original...",
+                    )
                     try:
                         fidelity_result = _run_fidelity_check(
                             cached, gateway,
-                            enable_llm=_HAS_ANTHROPIC_KEY,
+                            enable_llm=_has_anthropic_key(),
                         )
                         elapsed = time.monotonic() - t0
                         st.session_state["fidelity_cache"][
@@ -1132,6 +1025,7 @@ def main() -> None:
                             ),
                             state="complete",
                         )
+                        st.rerun()
                     except Exception:
                         elapsed = time.monotonic() - t0
                         status.update(
@@ -1145,136 +1039,179 @@ def main() -> None:
                             traceback.format_exc(),
                             language="text",
                         )
-                        pipeline_error = True
 
-            elif stage_key == "sdtm":
-                with st.status(
-                    "Running SDTM Generation...", expanded=True,
-                ) as status:
-                    t0 = time.monotonic()
-                    st.write("Generating SDTM domains...")
-                    try:
-                        sdtm_result = _run_sdtm_generation(
-                            cached, soa_cached, gateway,
-                        )
-                        elapsed = time.monotonic() - t0
-                        st.session_state["sdtm_cache"][
-                            file_sha
-                        ] = sdtm_result
-                        sdtm_cached = sdtm_result
-                        save_checkpoint(
-                            _DATA_ROOT, file_sha,
-                            "sdtm_cache", sdtm_result,
-                        )
-                        status.update(
-                            label=(
-                                "SDTM Generation: "
-                                f"Complete ({elapsed:.1f}s)"
-                            ),
-                            state="complete",
-                        )
-                    except Exception:
-                        elapsed = time.monotonic() - t0
-                        status.update(
-                            label=(
-                                "SDTM Generation: "
-                                f"Error ({elapsed:.1f}s)"
-                            ),
-                            state="error",
-                        )
-                        st.code(
-                            traceback.format_exc(),
-                            language="text",
-                        )
-                        pipeline_error = True
-
-    # ------------------------------------------------------------------
-    # Display results for all active stages (PTCV-77)
-    # ------------------------------------------------------------------
-
-    # Extraction: ICH compliance verdict
-    if "extraction" in active and cached:
-        _display_verdict(cached)
-
-    # ICH Retemplating: regenerated protocol view
-    if "retemplating" in active and cached:
-        st.divider()
-        _render_regeneration(cached)
-
-    # Fidelity Check
-    if "fidelity" in active and fidelity_cached:
-        st.divider()
-        _display_fidelity(fidelity_cached)
-
-    # Schedule of Visits (PTCV-76: plot-only view)
-    if "sov" in active and soa_cached:
-        st.divider()
-        plot_data = to_plot_data(
-            soa_cached["timepoints"],
-            soa_cached["activities"],
-            soa_cached["instances"],
-        )
-        render_schedule_of_visits(
-            timepoints=plot_data.timepoints,
-            activities=plot_data.activities,
-            instances=plot_data.instances,
-            registry_id=soa_cached["registry_id"],
-            format_verdict=soa_cached["format_verdict"],
-        )
-
-    # SDTM Generation
-    if "sdtm" in active and sdtm_cached:
-        st.divider()
-        render_sdtm_viewer(
-            sdtm_result=sdtm_cached["sdtm_result"],
-            sections=sdtm_cached["sections"],
-            has_soa=sdtm_cached["has_soa"],
-            gateway=_get_gateway(),
-            registry_id=sdtm_cached["registry_id"],
-            format_verdict=sdtm_cached["format_verdict"],
-        )
-
-    # Annotation Review
-    if "annotations" in active and cached:
-        st.divider()
-        gateway = _get_gateway()
-        section_bytes = gateway.get_artifact(cached["artifact_key"])
-        review_sections = parquet_to_sections(section_bytes)
-        protocol_text = ""
-        text_key = cached.get("text_artifact_key")
-        if text_key:
-            text_bytes = gateway.get_artifact(text_key)
-            text_blocks = parquet_to_text_blocks(text_bytes)
-            text_blocks_sorted = sorted(
-                text_blocks,
-                key=lambda b: (b.page_number, b.block_index),
+    # === SoA & SDTM tab ===
+    with tab_soa:
+        if not cached:
+            st.info(
+                "Process the protocol first to enable "
+                "SoA extraction and SDTM generation."
             )
-            protocol_text = "\n".join(
-                b.text
-                for b in text_blocks_sorted
-                if b.text.strip()
-            )
-        render_annotation_review(
-            sections=review_sections,
-            registry_id=cached["registry_id"],
-            gateway=gateway,
-            protocol_text=protocol_text,
-        )
+        else:
+            # SoA extraction
+            if soa_cached:
+                plot_data = to_plot_data(
+                    soa_cached["timepoints"],
+                    soa_cached["activities"],
+                    soa_cached["instances"],
+                )
+                render_schedule_of_visits(
+                    timepoints=plot_data.timepoints,
+                    activities=plot_data.activities,
+                    instances=plot_data.instances,
+                    registry_id=soa_cached["registry_id"],
+                    format_verdict=soa_cached["format_verdict"],
+                )
+            else:
+                if st.button(
+                    "Run SoA Extraction",
+                    type="primary",
+                    key="btn_soa",
+                ):
+                    gateway = _get_gateway()
+                    with st.status(
+                        "Running SoA Extraction...",
+                        expanded=True,
+                    ) as status:
+                        t0 = time.monotonic()
+                        st.write(
+                            "Discovering tables and "
+                            "timepoints...",
+                        )
+                        try:
+                            soa_result = _run_soa_extraction(
+                                cached, pdf_bytes, gateway,
+                            )
+                            elapsed = time.monotonic() - t0
+                            st.session_state["soa_cache"][
+                                file_sha
+                            ] = soa_result
+                            soa_cached = soa_result
+                            save_checkpoint(
+                                _DATA_ROOT, file_sha,
+                                "soa_cache", soa_result,
+                            )
+                            status.update(
+                                label=(
+                                    "SoA Extraction: "
+                                    f"Complete ({elapsed:.1f}s)"
+                                ),
+                                state="complete",
+                            )
+                            st.rerun()
+                        except Exception:
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    "SoA Extraction: "
+                                    f"Error ({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.code(
+                                traceback.format_exc(),
+                                language="text",
+                            )
 
-    # Review Queue (PTCV-84)
-    registry_id = cached.get("registry_id") if cached else None
-    pending = get_pending_count(registry_id=registry_id)
-    if pending > 0:
-        st.divider()
-        st.subheader(f"Review Queue ({pending})")
+            st.divider()
+
+            # SDTM generation
+            if sdtm_cached:
+                render_sdtm_viewer(
+                    sdtm_result=sdtm_cached["sdtm_result"],
+                    sections=sdtm_cached["sections"],
+                    has_soa=sdtm_cached["has_soa"],
+                    gateway=_get_gateway(),
+                    registry_id=sdtm_cached["registry_id"],
+                    format_verdict=sdtm_cached["format_verdict"],
+                )
+            elif soa_cached:
+                if st.button(
+                    "Generate SDTM",
+                    type="primary",
+                    key="btn_sdtm",
+                ):
+                    gateway = _get_gateway()
+                    with st.status(
+                        "Running SDTM Generation...",
+                        expanded=True,
+                    ) as status:
+                        t0 = time.monotonic()
+                        st.write("Generating SDTM domains...")
+                        try:
+                            sdtm_result = _run_sdtm_generation(
+                                cached, soa_cached, gateway,
+                            )
+                            elapsed = time.monotonic() - t0
+                            st.session_state["sdtm_cache"][
+                                file_sha
+                            ] = sdtm_result
+                            sdtm_cached = sdtm_result
+                            save_checkpoint(
+                                _DATA_ROOT, file_sha,
+                                "sdtm_cache", sdtm_result,
+                            )
+                            status.update(
+                                label=(
+                                    "SDTM Generation: "
+                                    f"Complete ({elapsed:.1f}s)"
+                                ),
+                                state="complete",
+                            )
+                            st.rerun()
+                        except Exception:
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    "SDTM Generation: "
+                                    f"Error ({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.code(
+                                traceback.format_exc(),
+                                language="text",
+                            )
+            else:
+                st.caption(
+                    "Run SoA Extraction first to enable "
+                    "SDTM generation."
+                )
+
+    # === Review tab ===
+    with tab_review:
+        if cached:
+            gateway = _get_gateway()
+            section_bytes = gateway.get_artifact(
+                cached["artifact_key"],
+            )
+            review_sections = parquet_to_sections(section_bytes)
+            protocol_text = ""
+            text_key = cached.get("text_artifact_key")
+            if text_key:
+                text_bytes = gateway.get_artifact(text_key)
+                text_blocks = parquet_to_text_blocks(text_bytes)
+                text_blocks_sorted = sorted(
+                    text_blocks,
+                    key=lambda b: (
+                        b.page_number, b.block_index,
+                    ),
+                )
+                protocol_text = "\n".join(
+                    b.text
+                    for b in text_blocks_sorted
+                    if b.text.strip()
+                )
+            render_annotation_review(
+                sections=review_sections,
+                registry_id=registry_id,
+                gateway=gateway,
+                protocol_text=protocol_text,
+            )
+            st.divider()
+
+        # Review Queue — always filtered to current protocol
         render_review_queue(registry_id=registry_id)
-
-    # Empty state
-    if not active:
-        st.caption(
-            "Select pipeline stages from the sidebar and "
-            "click **Run Pipeline** to start."
-        )
 
 
 if __name__ == "__main__":
