@@ -22,6 +22,7 @@ Public API:
     AssembledProtocol    — Assembled protocol output (PTCV-92)
     run_benchmark        — Benchmark entry point (PTCV-93)
     BenchmarkReport      — Aggregate benchmark report (PTCV-93)
+    RefinementStore      — Iterative refinement feedback store (PTCV-94)
 """
 
 from .models import IchSection, ReviewQueueEntry
@@ -45,6 +46,7 @@ from .section_matcher import (
     SectionMapping,
 )
 from .benchmark import BenchmarkReport, run_benchmark
+from .refinement_store import RefinementStore
 from .template_assembler import AssembledProtocol, assemble_template
 from .toc_extractor import ProtocolIndex, extract_protocol_index
 from .parser import IchParser
@@ -78,5 +80,6 @@ __all__ = [
     "assemble_template",
     "extract_protocol_index",
     "load_query_schema",
+    "RefinementStore",
     "run_benchmark",
 ]
