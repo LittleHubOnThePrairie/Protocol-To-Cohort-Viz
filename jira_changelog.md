@@ -5,6 +5,23 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-05T21:06:01Z] PTCV-103: Streamlit UI: Expose LLM transformation toggle and metrics in Query Pipeline tab
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit UI: Expose LLM transformation toggle and metrics in Query Pipeline tab
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-05T20:41:44Z] PTCV-98: LLM-driven content transformation in query extraction instead of verbatim copy
 
 **Status Change:** In Progress -> Done

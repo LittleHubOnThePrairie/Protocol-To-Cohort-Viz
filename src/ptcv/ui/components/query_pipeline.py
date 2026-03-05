@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _CONTENT_PREVIEW_LEN = 120
 
 # Bump when pipeline output schema changes to invalidate stale caches.
-_PIPELINE_CACHE_VERSION = 2  # v2: added enriched_match_result (PTCV-96)
+_PIPELINE_CACHE_VERSION = 3  # v3: enable_transformation toggle (PTCV-103)
 
 
 # ---------------------------------------------------------------------------
@@ -38,20 +38,21 @@ _PIPELINE_CACHE_VERSION = 2  # v2: added enriched_match_result (PTCV-96)
 
 def run_query_pipeline(
     pdf_path: str | Path,
-    cohere_api_key: str | None = None,
     anthropic_api_key: str | None = None,
     enable_summarization: bool = True,
+    enable_transformation: bool = False,
 ) -> dict[str, Any]:
     """Orchestrate the full query-driven pipeline.
 
     Args:
         pdf_path: Path to the protocol PDF.
-        cohere_api_key: Optional Cohere API key for embedding-based
-            matching. Falls back to keyword matching without it.
         anthropic_api_key: Optional Anthropic API key for LLM-driven
             sub-section scoring. Falls back to keyword-only if absent.
         enable_summarization: Whether to run the sub-section enrichment
             stage (PTCV-96). Defaults to *True*.
+        enable_transformation: Whether to apply LLM-driven content
+            transformation for high-confidence extractions
+            (PTCV-103). Defaults to *False*.
 
     Returns:
         Dict with keys: ``protocol_index``, ``match_result``,
@@ -74,9 +75,8 @@ def run_query_pipeline(
     # Stage 1: Extract protocol index
     protocol_index = extract_protocol_index(pdf_path)
 
-    # Stage 2: Section matching
-    key = cohere_api_key or os.environ.get("COHERE_API_KEY")
-    matcher = SectionMatcher(cohere_api_key=key)
+    # Stage 2: Section matching (keyword-only, PTCV-102)
+    matcher = SectionMatcher()
     match_result = matcher.match(protocol_index)
 
     # Stage 2.5: Sub-section enrichment (PTCV-96)
@@ -86,8 +86,12 @@ def run_query_pipeline(
         summarizer = SummarizationMatcher(anthropic_api_key=api_key)
         enriched_result = summarizer.refine(match_result, protocol_index)
 
-    # Stage 3: Query extraction
-    extractor = QueryExtractor()
+    # Stage 3: Query extraction (PTCV-103: optional LLM transform)
+    api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+    extractor = QueryExtractor(
+        enable_transformation=enable_transformation,
+        anthropic_api_key=api_key,
+    )
     extraction_result = extractor.extract(protocol_index, match_result)
 
     # Stage 4: Template assembly
@@ -294,6 +298,26 @@ def format_gap_table(extraction_result: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def count_extraction_methods(
+    extraction_result: Any,
+) -> dict[str, int]:
+    """Count extractions by method type (PTCV-103).
+
+    Args:
+        extraction_result: ``ExtractionResult`` from
+            ``QueryExtractor.extract()``.
+
+    Returns:
+        Dict mapping method name to count, e.g.
+        ``{"text_short": 5, "llm_transform": 3}``.
+    """
+    counts: dict[str, int] = {}
+    for ext in getattr(extraction_result, "extractions", []):
+        method = getattr(ext, "extraction_method", "unknown")
+        counts[method] = counts.get(method, 0) + 1
+    return counts
+
+
 def format_coverage_metrics(coverage: Any) -> dict[str, Any]:
     """Extract key coverage metrics from a CoverageReport.
 
@@ -341,8 +365,31 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
     """
     import streamlit as st
 
+    # --- Options (PTCV-103) ---
+    transform_on = st.checkbox(
+        "Enable LLM Transformation",
+        value=False,
+        help=(
+            "Reframe high-confidence extractions using Claude "
+            "Sonnet to directly address each Appendix B query. "
+            "Requires ANTHROPIC_API_KEY."
+        ),
+        key="chk_enable_transform",
+    )
+
+    if transform_on and not os.environ.get("ANTHROPIC_API_KEY"):
+        st.warning(
+            "LLM Transformation requires an Anthropic API key. "
+            "Set **ANTHROPIC_API_KEY** in your environment or "
+            "`.secrets` file. Pipeline will run in verbatim mode."
+        )
+
     # Cache init — version-stamped key invalidates stale entries.
-    cache_key = f"{file_sha}_v{_PIPELINE_CACHE_VERSION}"
+    # Include transform toggle in cache key so toggling re-runs.
+    cache_key = (
+        f"{file_sha}_v{_PIPELINE_CACHE_VERSION}"
+        f"_t{int(transform_on)}"
+    )
     if "query_cache" not in st.session_state:
         st.session_state["query_cache"] = {}
 
@@ -363,7 +410,10 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                 t0 = time.monotonic()
                 try:
                     st.write("Extracting protocol index...")
-                    result = run_query_pipeline(str(file_path))
+                    result = run_query_pipeline(
+                        str(file_path),
+                        enable_transformation=transform_on,
+                    )
                     elapsed = time.monotonic() - t0
                     st.session_state["query_cache"][cache_key] = result
                     cached = result
@@ -476,6 +526,12 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
     # --- Extraction Results ---
     extraction_result = cached["extraction_result"]
     st.subheader("Query Extraction")
+    method_counts = count_extraction_methods(extraction_result)
+    transformed_count = method_counts.get("llm_transform", 0)
+    verbatim_count = sum(
+        v for k, v in method_counts.items() if k != "llm_transform"
+    )
+
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric(
@@ -490,6 +546,14 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
     with col3:
         coverage = getattr(extraction_result, "coverage", 0.0)
         st.metric("Coverage", f"{coverage:.0%}")
+
+    # Transformation metrics (PTCV-103)
+    if transformed_count > 0:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("LLM Transformed", transformed_count)
+        with col2:
+            st.metric("Verbatim", verbatim_count)
 
     ext_rows = format_extraction_table(extraction_result)
     if ext_rows:

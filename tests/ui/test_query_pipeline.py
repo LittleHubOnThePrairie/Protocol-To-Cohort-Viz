@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from ptcv.ui.components.query_pipeline import (
     _CONTENT_PREVIEW_LEN,
+    count_extraction_methods,
     format_coverage_metrics,
     format_extraction_table,
     format_gap_table,
@@ -455,6 +456,52 @@ class TestFormatSubsectionMatchTable:
         rows = format_subsection_match_table(result)
         assert rows[0]["summarization_score"] == -1.0
         assert rows[0]["method"] == "keyword_fallback"
+
+
+# ---------------------------------------------------------------------------
+# TestCountExtractionMethods (PTCV-103)
+# ---------------------------------------------------------------------------
+
+
+class TestCountExtractionMethods:
+    """Tests for count_extraction_methods()."""
+
+    def test_empty(self) -> None:
+        result = _extraction_result()
+        assert count_extraction_methods(result) == {}
+
+    def test_all_verbatim(self) -> None:
+        exts = [
+            _extraction(extraction_method="text_short"),
+            _extraction(extraction_method="passthrough"),
+            _extraction(extraction_method="text_short"),
+        ]
+        result = _extraction_result(extractions=exts)
+        counts = count_extraction_methods(result)
+        assert counts == {"text_short": 2, "passthrough": 1}
+        assert "llm_transform" not in counts
+
+    def test_mixed_methods(self) -> None:
+        exts = [
+            _extraction(extraction_method="text_short"),
+            _extraction(extraction_method="llm_transform"),
+            _extraction(extraction_method="passthrough"),
+            _extraction(extraction_method="llm_transform"),
+        ]
+        result = _extraction_result(extractions=exts)
+        counts = count_extraction_methods(result)
+        assert counts["llm_transform"] == 2
+        assert counts["text_short"] == 1
+        assert counts["passthrough"] == 1
+
+    def test_all_transformed(self) -> None:
+        exts = [
+            _extraction(extraction_method="llm_transform"),
+            _extraction(extraction_method="llm_transform"),
+        ]
+        result = _extraction_result(extractions=exts)
+        counts = count_extraction_methods(result)
+        assert counts == {"llm_transform": 2}
 
 
 # ---------------------------------------------------------------------------
