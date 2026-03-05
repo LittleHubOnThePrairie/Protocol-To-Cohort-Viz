@@ -100,6 +100,7 @@ class ExtractionMetadata:
     table_count: int
     text_block_count: int
     extraction_timestamp_utc: str = ""
+    landscape_pages: str = ""
 
 
 @dataclasses.dataclass

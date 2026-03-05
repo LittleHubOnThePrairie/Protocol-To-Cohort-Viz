@@ -5,6 +5,127 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-05T20:41:44Z] PTCV-98: LLM-driven content transformation in query extraction instead of verbatim copy
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+LLM-driven content transformation in query extraction instead of verbatim copy
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/benchmark.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/llm_retemplater.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/parser.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/schema_loader.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/extraction/format_detector.py
+- C:/Dev/PTCV/src/ptcv/extraction/models.py
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/src/ptcv/protocol_search/clinicaltrials_service.py
+- C:/Dev/PTCV/src/ptcv/sdtm/__init__.py
+- C:/Dev/PTCV/src/ptcv/sdtm/models.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/mapper.py
+- C:/Dev/PTCV/src/ptcv/ui/components/ich_regenerator.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_parser.py
+- C:/Dev/PTCV/tests/ich_parser/test_schema_loader.py
+- C:/Dev/PTCV/tests/ich_parser/test_template_assembler.py
+- C:/Dev/PTCV/tests/soa_extractor/test_mapper.py
+- C:/Dev/PTCV/tests/ui/test_schedule_of_visits.py
+
+**Test Coverage:**
+16 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T18:43:54Z] PTCV-95: Streamlit UI: Expose query-driven pipeline workflow steps and metadata rendering
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit UI: Expose query-driven pipeline workflow steps and metadata rendering
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/confidence_badge.py
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/src/ptcv/ui/components/benchmark_viewer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/refinement_panel.py
+- C:/Dev/PTCV/tests/ui/test_confidence_badge.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+- C:/Dev/PTCV/tests/ui/test_benchmark_viewer.py
+- C:/Dev/PTCV/tests/ui/test_refinement_panel.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ui/pipeline_stages.py
+- C:/Dev/PTCV/tests/ui/test_pipeline_stages.py
+
+**Test Coverage:**
+6 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T18:10:00Z] PTCV-94: Iterative Refinement: Feedback Loop for Header Mapping and Query Accuracy
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Iterative Refinement: Feedback Loop for Header Mapping and Query Accuracy
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/refinement_store.py
+- C:/Dev/PTCV/tests/ich_parser/test_refinement_store.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T17:59:24Z] PTCV-93: Benchmark Query-Driven Extraction Against Text-First Classification Baseline
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Benchmark Query-Driven Extraction Against Text-First Classification Baseline
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/benchmark.py
+- C:/Dev/PTCV/tests/ich_parser/test_benchmark.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-05T17:28:38Z] PTCV-91: Query-Driven Extraction Engine: Run Appendix B Queries Against Protocol Sections
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Query-Driven Extraction Engine: Run Appendix B Queries Against Protocol Sections
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-05T17:26:29Z] PTCV-92: Template Assembly: Migrate Extracted Content into ICH E6(R3) Appendix B Format
 
 **Status Change:** In Progress -> Done

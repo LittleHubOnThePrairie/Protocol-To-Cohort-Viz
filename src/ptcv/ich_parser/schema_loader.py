@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from ptcv.ich_parser.query_schema import section_sort_key as _section_sort_key
+
 logger = logging.getLogger(__name__)
 
 # Default schema path — relative to project root
@@ -184,7 +186,7 @@ def _render_full(sections: list[IchSectionDef]) -> str:
     """
     return "\n".join(
         f"  {s.code}: {s.description}"
-        for s in sorted(sections, key=lambda s: s.code)
+        for s in sorted(sections, key=lambda s: _section_sort_key(s.code))
     )
 
 

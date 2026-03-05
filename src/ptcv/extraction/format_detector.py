@@ -19,12 +19,14 @@ class ProtocolFormat(str, Enum):
         PDF: Portable Document Format.
         CTR_XML: CDISC ODM extension (EU CTR format).
         WORD: Microsoft Word Open XML (.docx).
+        ICH_M11: ICH M11 CeSHarP machine-readable protocol (XML/JSON).
         UNKNOWN: Unrecognised format.
     """
 
     PDF = "pdf"
     CTR_XML = "ctr-xml"
     WORD = "word"
+    ICH_M11 = "m11"
     UNKNOWN = "unknown"
 
 
@@ -36,6 +38,10 @@ _ZIP_MAGIC = b"PK\x03\x04"
 
 # XML markers that indicate a CDISC ODM / EU-CTR file
 _ODM_MARKERS = (b"<ODM", b"<ClinicalData", b"<Study")
+
+# ICH M11 CeSHarP markers (XML namespace or JSON schema)
+_M11_XML_MARKERS = (b"ich.org/m11", b"cesharp", b"CeSHarP", b"<M11Protocol")
+_M11_JSON_MARKERS = (b'"ich_m11"', b'"cesharp"', b'"CeSHarP"', b'"m11_version"')
 
 
 class FormatDetector:
@@ -66,6 +72,12 @@ class FormatDetector:
 
         if header.startswith(_PDF_MAGIC):
             return ProtocolFormat.PDF
+
+        # ICH M11 CeSHarP — check before generic XML/JSON (PTCV-56)
+        if any(marker in header for marker in _M11_XML_MARKERS):
+            return ProtocolFormat.ICH_M11
+        if any(marker in header for marker in _M11_JSON_MARKERS):
+            return ProtocolFormat.ICH_M11
 
         # XML-based formats (CTR-XML / ODM)
         header_stripped = header.lstrip(b"\xef\xbb\xbf")  # strip BOM
@@ -118,5 +130,7 @@ class FormatDetector:
             ".xml": ProtocolFormat.CTR_XML,
             ".docx": ProtocolFormat.WORD,
             ".doc": ProtocolFormat.WORD,
+            ".m11": ProtocolFormat.ICH_M11,
+            ".cesharp": ProtocolFormat.ICH_M11,
         }
         return mapping.get(ext, ProtocolFormat.UNKNOWN)

@@ -40,6 +40,7 @@ from ..extraction.models import ExtractionResult
 from ..extraction.extraction_service import ExtractionService
 from ..extraction.parquet_writer import parquet_to_tables, parquet_to_text_blocks
 from ..ich_parser.coverage_reviewer import CoverageReviewer, CoverageResult
+from ..ich_parser.fidelity_checker import FidelityChecker, FidelityResult
 from ..ich_parser.llm_retemplater import LlmRetemplater, RetemplatingResult
 from ..ich_parser.parquet_writer import parquet_to_sections
 from ..ich_parser.priority_sections import extract_priority_sections
@@ -86,6 +87,7 @@ class PipelineOrchestrator:
         review_queue: Optional[ReviewQueue] = None,
         ct_review_queue: Optional[CtReviewQueue] = None,
         retemplater: Optional[LlmRetemplater] = None,
+        enable_fidelity_check: bool = False,
     ) -> None:
         if gateway is None:
             gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
@@ -98,6 +100,7 @@ class PipelineOrchestrator:
         self._review_queue = review_queue
         self._ct_review_queue = ct_review_queue
         self._retemplater = retemplater
+        self._enable_fidelity_check = enable_fidelity_check
 
     # ------------------------------------------------------------------
     # Public interface
@@ -413,6 +416,81 @@ class PipelineOrchestrator:
         checkpoints.append(coverage_cp)
 
         # ----------------------------------------------------------------
+        # Stage 4a: Fidelity Check (PTCV-65) — OPTIONAL
+        # LLM semantic comparison of original vs retemplated.
+        # ----------------------------------------------------------------
+        fidelity_result: Optional[FidelityResult] = None
+        if self._enable_fidelity_check:
+            logger.info(
+                "Stage fidelity_check: running FidelityChecker"
+            )
+            checker = FidelityChecker(enable_llm=True)
+            fidelity_result = checker.check(
+                original_text_blocks=text_block_dicts,
+                retemplated_sections=sections,
+                registry_id=registry_id,
+                source_sha256=retemplating_result.artifact_sha256,
+            )
+
+            import hashlib
+
+            fidelity_payload = json.dumps({
+                "stage": "fidelity_check",
+                "overall_score": fidelity_result.overall_score,
+                "fidelity_passed": fidelity_result.fidelity_passed,
+                "total_hallucinations": (
+                    fidelity_result.total_hallucinations
+                ),
+                "total_omissions": fidelity_result.total_omissions,
+                "method": fidelity_result.method,
+                "input_tokens": fidelity_result.input_tokens,
+                "output_tokens": fidelity_result.output_tokens,
+            }).encode("utf-8")
+            fidelity_sha256 = hashlib.sha256(
+                fidelity_payload,
+            ).hexdigest()
+
+            fidelity_cp = self._write_checkpoint(
+                pipeline_run_id=pipeline_run_id,
+                stage="fidelity_check",
+                stage_run_id=fidelity_result.run_id,
+                artifact_key=(
+                    f"pipeline/{pipeline_run_id}/"
+                    "stage-05a-fidelity-check.json"
+                ),
+                payload={
+                    "stage": "fidelity_check",
+                    "overall_score": (
+                        fidelity_result.overall_score
+                    ),
+                    "fidelity_passed": (
+                        fidelity_result.fidelity_passed
+                    ),
+                    "total_hallucinations": (
+                        fidelity_result.total_hallucinations
+                    ),
+                    "total_omissions": (
+                        fidelity_result.total_omissions
+                    ),
+                    "method": fidelity_result.method,
+                },
+                artifact_sha256=fidelity_sha256,
+                source_sha256=(
+                    retemplating_result.artifact_sha256
+                ),
+            )
+            checkpoints.append(fidelity_cp)
+
+            if not fidelity_result.fidelity_passed:
+                logger.warning(
+                    "Fidelity check FAILED: score=%.2f "
+                    "hallucinations=%d omissions=%d",
+                    fidelity_result.overall_score,
+                    fidelity_result.total_hallucinations,
+                    fidelity_result.total_omissions,
+                )
+
+        # ----------------------------------------------------------------
         # Stage 4b: Priority section extraction (PTCV-52)
         # ----------------------------------------------------------------
         priority_results = extract_priority_sections(
@@ -534,6 +612,7 @@ class PipelineOrchestrator:
             protocol_sha256=source_sha256,
             stage_checkpoints=checkpoints,
             pipeline_timestamp_utc=timestamp,
+            fidelity_result=fidelity_result,
         )
 
     # ------------------------------------------------------------------

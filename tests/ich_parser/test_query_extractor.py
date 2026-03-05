@@ -1,6 +1,8 @@
-"""Tests for query-driven extraction engine (PTCV-91)."""
+"""Tests for query-driven extraction engine (PTCV-91, PTCV-98)."""
 
 from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -726,3 +728,261 @@ class TestCriteriaBoundary:
         result = _extract_criteria_section(text, "exclusion")
         assert "Pregnant" in result
         assert "Age >= 18" not in result
+
+
+# -----------------------------------------------------------------------
+# TestLLMTransformation (PTCV-98)
+# -----------------------------------------------------------------------
+
+
+def _mock_anthropic_response(
+    transformed: str, confidence: float
+) -> MagicMock:
+    """Build a mock Anthropic messages.create() response."""
+    import json as _json
+
+    block = MagicMock()
+    block.text = _json.dumps(
+        {"transformed": transformed, "confidence": confidence}
+    )
+    resp = MagicMock()
+    resp.content = [block]
+    resp.usage = MagicMock(input_tokens=100, output_tokens=50)
+    return resp
+
+
+class TestLLMTransformation:
+    """LLM transformation tests (PTCV-98)."""
+
+    def test_transformation_disabled_by_default(self) -> None:
+        """Default init has transformation off."""
+        qe = QueryExtractor()
+        assert qe._use_llm is False
+        assert qe._transform_calls == 0
+
+    @patch.dict("os.environ", {}, clear=False)
+    def test_transformation_requires_api_key(self) -> None:
+        """enable_transformation=True + no key → verbatim."""
+        # Ensure no key in env for this test
+        import os
+        env_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            qe = QueryExtractor(
+                enable_transformation=True,
+                anthropic_api_key="",
+            )
+            assert qe._use_llm is False
+        finally:
+            if env_key:
+                os.environ["ANTHROPIC_API_KEY"] = env_key
+
+    def test_transform_only_high_confidence(self) -> None:
+        """Below threshold → verbatim; above → LLM called."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = (
+            _mock_anthropic_response("Transformed text", 0.90)
+        )
+
+        qe = QueryExtractor(
+            transformation_threshold=0.80,
+        )
+        qe._client = mock_client
+        qe._use_llm = True
+
+        # HIGH confidence scoped — should transform
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study of Drug X"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping(
+                "1", "General", "B.1",
+                confidence=MatchConfidence.HIGH,
+            ),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        assert len(result.extractions) == 1
+        ext = result.extractions[0]
+        # text_short with "Protocol Title:" gets 0.92 confidence
+        # 0.92 >= 0.80 threshold → LLM called
+        assert ext.extraction_method == "llm_transform"
+        assert ext.content == "Transformed text"
+
+    def test_transform_not_on_unscoped(self) -> None:
+        """Unscoped search → never transformed."""
+        mock_client = MagicMock()
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+
+        # No route for B.5 → falls back to full_text
+        protocol = _make_protocol_index(
+            content_spans={"1": "General info"},
+            full_text="General info. NCT12345678",
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        queries = [
+            _make_query(
+                query_id="B.5.1.q1",
+                schema_section="B.5",
+                expected_type="identifier",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        if result.extractions:
+            assert (
+                result.extractions[0].extraction_method
+                != "llm_transform"
+            )
+        # LLM should NOT have been called
+        mock_client.messages.create.assert_not_called()
+
+    def test_transform_not_on_review_tier(self) -> None:
+        """REVIEW confidence after penalty < 0.80 → no transform."""
+        mock_client = MagicMock()
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+
+        protocol = _make_protocol_index(
+            content_spans={
+                "5": "Protocol Title: Test Study"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping(
+                "5", "Selection", "B.1",
+                confidence=MatchConfidence.REVIEW,
+            ),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        # REVIEW penalty (0.85x) on 0.92 → 0.782 < 0.80 threshold
+        if result.extractions:
+            assert (
+                result.extractions[0].extraction_method
+                != "llm_transform"
+            )
+        mock_client.messages.create.assert_not_called()
+
+    def test_transform_method_name(self) -> None:
+        """Successful transform sets method to llm_transform."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = (
+            _mock_anthropic_response(
+                "The protocol title is Drug X Phase 2.",
+                0.95,
+            )
+        )
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study of Drug X"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        assert result.extractions[0].extraction_method == (
+            "llm_transform"
+        )
+
+    def test_transform_fallback_on_error(self) -> None:
+        """LLM exception → graceful fallback to verbatim."""
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = (
+            RuntimeError("API error")
+        )
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study of Drug X"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        # Should still extract — just verbatim
+        assert len(result.extractions) == 1
+        assert (
+            result.extractions[0].extraction_method != "llm_transform"
+        )
+
+    def test_transform_confidence_blend(self) -> None:
+        """Blended confidence = 0.6 * det + 0.4 * llm."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = (
+            _mock_anthropic_response("Transformed", 0.90)
+        )
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study of Drug X"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        ext = result.extractions[0]
+        # text_short "Protocol Title:" → det_conf = 0.92
+        # Blended: 0.6 * 0.92 + 0.4 * 0.90 = 0.552 + 0.36 = 0.912
+        expected = round(0.6 * 0.92 + 0.4 * 0.90, 4)
+        assert ext.confidence == expected

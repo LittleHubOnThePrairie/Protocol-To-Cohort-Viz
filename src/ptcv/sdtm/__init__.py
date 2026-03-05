@@ -17,7 +17,7 @@ from .domain_generators import (
     TsGenerator,
     TvGenerator,
 )
-from .models import CtReviewQueueEntry, SdtmGenerationResult
+from .models import CtReviewQueueEntry, SdtmGenerationResult, SoaCellMetadata
 from .review_queue import CtReviewQueue
 from .sdtm_service import SdtmService
 from .validation import (
@@ -25,10 +25,13 @@ from .validation import (
     DefineXmlValidator,
     P21Issue,
     P21Validator,
+    ScheduleIssue,
+    ScheduleValidationReport,
     TcgChecker,
     TcgParameter,
     ValidationResult,
     ValidationService,
+    VisitScheduleValidator,
 )
 
 __all__ = [
@@ -41,8 +44,11 @@ __all__ = [
     "DefineXmlValidator",
     "P21Issue",
     "P21Validator",
+    "ScheduleIssue",
+    "ScheduleValidationReport",
     "SdtmGenerationResult",
     "SdtmService",
+    "SoaCellMetadata",
     "TaGenerator",
     "TcgChecker",
     "TcgParameter",
@@ -52,4 +58,5 @@ __all__ = [
     "TvGenerator",
     "ValidationResult",
     "ValidationService",
+    "VisitScheduleValidator",
 ]

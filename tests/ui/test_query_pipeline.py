@@ -16,6 +16,7 @@ from ptcv.ui.components.query_pipeline import (
     format_extraction_table,
     format_gap_table,
     format_match_table,
+    format_subsection_match_table,
     format_toc_tree,
 )
 
@@ -362,6 +363,101 @@ class TestFormatCoverageMetrics:
 
 
 # ---------------------------------------------------------------------------
+# TestFormatSubsectionMatchTable (PTCV-96)
+# ---------------------------------------------------------------------------
+
+
+def _sub_match(
+    sub_code: str = "B.5.1",
+    parent_code: str = "B.5",
+    sub_name: str = "Inclusion criteria",
+    composite: float = 0.82,
+    summarization: float = 0.90,
+    confidence: str = "high",
+    method: str = "embedding+summarization",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        sub_section_code=sub_code,
+        parent_section_code=parent_code,
+        sub_section_name=sub_name,
+        embedding_score=0.85,
+        keyword_score=0.60,
+        summarization_score=summarization,
+        composite_score=composite,
+        confidence=SimpleNamespace(value=confidence),
+        match_method=method,
+    )
+
+
+def _enriched_mapping(
+    number: str = "5",
+    title: str = "Subject Selection",
+    sub_matches: list | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        protocol_section_number=number,
+        protocol_section_title=title,
+        matches=[],
+        auto_mapped=True,
+        sub_section_matches=sub_matches or [],
+        parent_coverage=frozenset(),
+    )
+
+
+def _enriched_result(
+    enriched_mappings: list | None = None,
+    sub_auto_rate: float = 0.50,
+    llm_calls: int = 4,
+    llm_fallback: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        mappings=[],
+        auto_mapped_count=1,
+        review_count=0,
+        unmapped_count=0,
+        auto_map_rate=1.0,
+        enriched_mappings=enriched_mappings or [],
+        sub_section_auto_map_rate=sub_auto_rate,
+        llm_calls_made=llm_calls,
+        llm_fallback=llm_fallback,
+    )
+
+
+class TestFormatSubsectionMatchTable:
+    """Tests for format_subsection_match_table() (PTCV-96)."""
+
+    def test_none_returns_empty(self) -> None:
+        """None enriched result returns empty list."""
+        assert format_subsection_match_table(None) == []
+
+    def test_with_matches(self) -> None:
+        """Sub-section matches are formatted correctly."""
+        sub1 = _sub_match("B.5.1", "B.5", "Inclusion criteria", 0.82, 0.90)
+        sub2 = _sub_match("B.5.2", "B.5", "Exclusion criteria", 0.71, 0.75)
+        em = _enriched_mapping(sub_matches=[sub1, sub2])
+        result = _enriched_result(enriched_mappings=[em])
+        rows = format_subsection_match_table(result)
+        assert len(rows) == 2
+        assert rows[0]["sub_section"] == "B.5.1 Inclusion criteria"
+        assert rows[0]["parent_section"] == "B.5"
+        assert rows[0]["composite_score"] == 0.82
+        assert rows[0]["confidence"] == "high"
+
+    def test_fallback_mode(self) -> None:
+        """Fallback mode sub-matches show -1.0 summarization."""
+        sub = _sub_match(
+            summarization=-1.0, method="keyword_fallback",
+        )
+        em = _enriched_mapping(sub_matches=[sub])
+        result = _enriched_result(
+            enriched_mappings=[em], llm_fallback=True,
+        )
+        rows = format_subsection_match_table(result)
+        assert rows[0]["summarization_score"] == -1.0
+        assert rows[0]["method"] == "keyword_fallback"
+
+
+# ---------------------------------------------------------------------------
 # TestRunQueryPipeline
 # ---------------------------------------------------------------------------
 
@@ -399,6 +495,7 @@ class TestRunQueryPipeline:
             mock_run.return_value = {
                 "protocol_index": mock_index,
                 "match_result": mock_match,
+                "enriched_match_result": None,
                 "extraction_result": mock_ext,
                 "assembled": mock_assembled,
                 "assembled_markdown": "# Template",
@@ -408,6 +505,7 @@ class TestRunQueryPipeline:
 
         assert "protocol_index" in result
         assert "match_result" in result
+        assert "enriched_match_result" in result
         assert "extraction_result" in result
         assert "assembled" in result
         assert "assembled_markdown" in result

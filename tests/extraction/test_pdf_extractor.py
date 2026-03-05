@@ -1,7 +1,8 @@
 """Tests for ptcv.extraction.pdf_extractor.
 
-Covers multi-page table reconstruction (PTCV-19 Scenario 3) and the
-pdfplumber→camelot cascade (PTCV-19 Scenario 2).
+Covers multi-page table reconstruction (PTCV-19 Scenario 3), the
+pdfplumber→camelot cascade (PTCV-19 Scenario 2), and landscape page
+rotation normalisation (PTCV-63).
 
 Qualification phase: IQ/OQ
 Risk tier: MEDIUM
@@ -31,16 +32,17 @@ class TestPdfExtractorTextExtraction:
         self.extractor = PdfExtractor(min_words_for_text_block=3)
 
     def test_extract_returns_text_blocks(self, minimal_pdf_bytes):
-        blocks, tables, page_count = self.extractor.extract(
+        blocks, tables, page_count, landscape = self.extractor.extract(
             minimal_pdf_bytes, _RUN, _REG, _SHA
         )
         assert page_count >= 1
         # Text blocks may vary by pdfplumber version/PDF structure
         assert isinstance(blocks, list)
         assert isinstance(tables, list)
+        assert isinstance(landscape, list)
 
     def test_block_fields_set(self, minimal_pdf_bytes):
-        blocks, _, _ = self.extractor.extract(
+        blocks, _, _, _ = self.extractor.extract(
             minimal_pdf_bytes, _RUN, _REG, _SHA
         )
         for blk in blocks:
@@ -178,7 +180,7 @@ class TestCamelotFallback:
                     },
                 )()
             ]
-            _, tables, _ = self.extractor.extract(
+            _, tables, _, _ = self.extractor.extract(
                 minimal_pdf_bytes, _RUN, _REG, _SHA
             )
             # fallback was called (pdfplumber found no tables in minimal PDF)
@@ -208,7 +210,7 @@ class TestRealPdfExtraction:
         self.extractor = PdfExtractor()
 
     def test_real_pdf_extracts_text_and_metadata(self, real_pdf_bytes):
-        blocks, tables, page_count = self.extractor.extract(
+        blocks, tables, page_count, _landscape = self.extractor.extract(
             real_pdf_bytes, _RUN, "NCT00112827", _SHA
         )
         assert page_count > 0
@@ -216,3 +218,194 @@ class TestRealPdfExtraction:
         assert len(blocks) > 0
         # All blocks must have correct run_id
         assert all(b.run_id == _RUN for b in blocks)
+
+
+# -------------------------------------------------------------------
+# PTCV-63: Landscape page rotation normalisation
+# -------------------------------------------------------------------
+
+
+def _make_landscape_pdf() -> bytes:
+    """Create a 2-page PDF: page 1 portrait, page 2 landscape content.
+
+    Page 2 uses a rotated text matrix (0, 10, -10, 0) to simulate
+    landscape content rendered on a portrait page — the same pattern
+    seen in NCT03045302 pages 67-69.
+    """
+    import fitz
+
+    doc = fitz.open()
+
+    # Page 1: normal portrait text
+    page1 = doc.new_page(width=595, height=842)
+    page1.insert_text(
+        (50, 100),
+        "This is normal portrait text on page one.",
+        fontsize=12,
+    )
+
+    # Page 2: landscape content via rotated text matrix
+    page2 = doc.new_page(width=595, height=842)
+    # Insert text with 90-degree rotation using a text writer
+    tw = fitz.TextWriter(page2.rect)
+    tw.append(
+        (100, 50),
+        "Schedule of Activities Visit Table",
+        fontsize=12,
+    )
+    # The TextWriter writes normal text. To simulate the rotation,
+    # we insert via a rotated morph transform.
+    page2.insert_text(
+        (100, 50),
+        "Schedule of Activities Visit Table",
+        fontsize=12,
+        rotate=90,
+    )
+    page2.insert_text(
+        (100, 100),
+        "V1 V2 V3 V4 V5 Screening Treatment",
+        fontsize=10,
+        rotate=90,
+    )
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+class TestLandscapePageDetection:
+    """PTCV-63: landscape content pages are detected and normalised."""
+
+    def setup_method(self):
+        self.extractor = PdfExtractor(min_words_for_text_block=2)
+
+    def test_portrait_pdf_no_landscape_detected(self, minimal_pdf_bytes):
+        """Normal portrait PDF has no landscape pages."""
+        _, _, _, landscape = self.extractor.extract(
+            minimal_pdf_bytes, _RUN, _REG, _SHA
+        )
+        assert landscape == []
+
+    def test_landscape_pdf_detected(self):
+        """Pages with rotated text matrices are detected."""
+        pdf_bytes = _make_landscape_pdf()
+        _, _, page_count, landscape = self.extractor.extract(
+            pdf_bytes, _RUN, _REG, _SHA
+        )
+        assert page_count == 2
+        # Page 2 should be detected as landscape
+        assert 2 in landscape
+        # Page 1 should NOT be in landscape list
+        assert 1 not in landscape
+
+    def test_landscape_text_reads_correctly(self):
+        """Rotated page text is extracted in correct reading order."""
+        pdf_bytes = _make_landscape_pdf()
+        blocks, _, _, landscape = self.extractor.extract(
+            pdf_bytes, _RUN, _REG, _SHA
+        )
+        # Find text blocks from page 2
+        page2_texts = [
+            b.text for b in blocks if b.page_number == 2
+        ]
+        # Text should read forwards, not backwards
+        full_text = " ".join(page2_texts)
+        # Should contain "Schedule" not "eludehcS"
+        assert "eludehcS" not in full_text
+        if page2_texts:
+            assert any(
+                "Schedule" in t or "Visit" in t or "V1" in t
+                for t in page2_texts
+            )
+
+    def test_normalize_returns_unmodified_for_normal_pdf(
+        self, minimal_pdf_bytes
+    ):
+        """Normal PDFs pass through without modification."""
+        result_bytes, landscape = PdfExtractor._normalize_page_rotation(
+            minimal_pdf_bytes,
+        )
+        assert landscape == []
+        # Bytes may differ slightly due to PyMuPDF round-trip, but
+        # the key assertion is that no pages were rotated.
+
+    def test_normalize_detects_rotated_pages(self):
+        """PyMuPDF detects rotated content via line direction vectors."""
+        pdf_bytes = _make_landscape_pdf()
+        _, landscape = PdfExtractor._normalize_page_rotation(pdf_bytes)
+        assert 2 in landscape
+
+    def test_normalize_graceful_without_fitz(self, minimal_pdf_bytes):
+        """If PyMuPDF is not installed, falls back gracefully."""
+        with patch.dict("sys.modules", {"fitz": None}):
+            result_bytes, landscape = (
+                PdfExtractor._normalize_page_rotation(minimal_pdf_bytes)
+            )
+            assert landscape == []
+            assert result_bytes == minimal_pdf_bytes
+
+
+class TestLandscapeRealProtocol:
+    """PTCV-63 Scenario 2: NCT03045302 landscape SoA extraction."""
+
+    def setup_method(self):
+        self.extractor = PdfExtractor()
+
+    @pytest.fixture()
+    def nct03045302_bytes(self) -> bytes:
+        pdf_path = Path(
+            "C:/Dev/PTCV/data/protocols/clinicaltrials/"
+            "NCT03045302_1.0.pdf"
+        )
+        if not pdf_path.exists():
+            pytest.skip("NCT03045302 PDF not available")
+        return pdf_path.read_bytes()
+
+    def test_landscape_pages_detected(self, nct03045302_bytes):
+        """Pages 67-69 and 76-77 detected as landscape content."""
+        _, _, _, landscape = self.extractor.extract(
+            nct03045302_bytes, _RUN, "NCT03045302", _SHA
+        )
+        assert 67 in landscape
+        assert 68 in landscape
+        assert 69 in landscape
+
+    def test_soa_text_extracted_correctly(self, nct03045302_bytes):
+        """SoA text on landscape pages reads forwards."""
+        blocks, _, _, _ = self.extractor.extract(
+            nct03045302_bytes, _RUN, "NCT03045302", _SHA
+        )
+        page67_texts = [
+            b.text for b in blocks if b.page_number == 67
+        ]
+        full = " ".join(page67_texts)
+        # Text should read "Study Schedule" not "ydutS eludehcS"
+        assert "ydutS" not in full
+        assert "Schedule" in full or "Study" in full
+
+    def test_soa_table_headers_correct(self, nct03045302_bytes):
+        """Table extracted from landscape page has correct headers."""
+        _, tables, _, _ = self.extractor.extract(
+            nct03045302_bytes, _RUN, "NCT03045302", _SHA
+        )
+        # Find tables on pages 67-68
+        soa_tables = [
+            t for t in tables if t.page_number in (67, 68)
+        ]
+        assert len(soa_tables) > 0
+        header = json.loads(soa_tables[0].header_row)
+        # Should contain visit-like headers, not reversed text
+        header_text = " ".join(str(h) for h in header)
+        assert "ydutS" not in header_text
+
+    def test_portrait_pages_unchanged(self, nct03045302_bytes):
+        """Portrait pages (e.g. page 1) extract normally."""
+        blocks, _, _, _ = self.extractor.extract(
+            nct03045302_bytes, _RUN, "NCT03045302", _SHA
+        )
+        page1_texts = [
+            b.text for b in blocks if b.page_number == 1
+        ]
+        assert len(page1_texts) > 0
+        full = " ".join(page1_texts)
+        # "CONFIDENTIAL" should appear normally
+        assert "CONFIDENTIAL" in full or "Protocol" in full

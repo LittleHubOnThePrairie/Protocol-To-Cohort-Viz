@@ -1,4 +1,4 @@
-"""Unit tests for schedule of visits swimlane component (PTCV-34).
+"""Unit tests for schedule of visits swimlane component (PTCV-34, PTCV-71).
 
 Tests the pure-Python helpers (classify_swimlane, build_sov_grid,
 build_sov_csv, build_sov_figure) without Streamlit runtime.
@@ -9,6 +9,10 @@ Covers GHERKIN scenarios:
   - Imaging row lists imaging modality
   - Non-ICH protocol produces empty/minimal schedule
   - CSV download has correct structure
+  - Intervention swimlane displays drug administration (PTCV-71)
+  - Specimen-based tests classified correctly (PTCV-71)
+  - Existing Clinical Encounter activities unchanged (PTCV-71)
+  - Backward-compatible classify_swimlane signature (PTCV-71)
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from ptcv.soa_extractor.models import (
 )
 from ptcv.ui.components.schedule_of_visits import (
     SWIMLANE_ROWS,
+    _dedup_timepoints,
     build_sov_csv,
     build_sov_figure,
     build_sov_grid,
@@ -104,6 +109,8 @@ class TestClassifySwimlane:
     """Tests for classify_swimlane()."""
 
     @pytest.mark.parametrize("activity_type,expected", [
+        ("Drug Administration", "Intervention"),
+        ("Treatment", "Intervention"),
         ("Assessment", "Clinical Encounter"),
         ("Vital Signs", "Clinical Encounter"),
         ("ECG", "Clinical Encounter"),
@@ -121,11 +128,81 @@ class TestClassifySwimlane:
     def test_unknown_type_defaults_to_other(self) -> None:
         assert classify_swimlane("SomethingNew") == "Other"
 
-    def test_swimlane_rows_has_four_entries(self) -> None:
-        assert len(SWIMLANE_ROWS) == 4
+    def test_swimlane_rows_has_five_entries(self) -> None:
+        """PTCV-71: 5 swimlane rows including Intervention."""
+        assert len(SWIMLANE_ROWS) == 5
         assert set(SWIMLANE_ROWS) == {
-            "Clinical Encounter", "Specimens", "Imaging", "Other",
+            "Intervention", "Clinical Encounter", "Specimens",
+            "Imaging", "Other",
         }
+
+    def test_intervention_is_first_row(self) -> None:
+        """PTCV-71: Intervention swimlane is the topmost row."""
+        assert SWIMLANE_ROWS[0] == "Intervention"
+
+    def test_backward_compatible_no_name(self) -> None:
+        """PTCV-71: classify_swimlane(type) still works without name."""
+        assert classify_swimlane("Assessment") == "Clinical Encounter"
+        assert classify_swimlane("Lab") == "Specimens"
+
+
+class TestKeywordReclassification:
+    """PTCV-71: Keyword-based reclassification via activity_name."""
+
+    @pytest.mark.parametrize("name", [
+        "Study drug administration",
+        "Placebo infusion",
+        "IMP dosing",
+        "IV injection of drug",
+        "Drug administration Day 1",
+        "Treatment administration",
+    ])
+    def test_intervention_keywords(self, name: str) -> None:
+        """Activities with intervention keywords → Intervention."""
+        assert classify_swimlane("Other", name) == "Intervention"
+        assert classify_swimlane("Procedure", name) == "Intervention"
+
+    @pytest.mark.parametrize("name,expected", [
+        ("Urine pregnancy test", "Specimens"),
+        ("HepB/HepC serology", "Specimens"),
+        ("CBC", "Specimens"),
+        ("Blood draw", "Specimens"),
+        ("Biomarker assay", "Specimens"),
+        ("Anti-drug antibody", "Specimens"),
+        ("PCR test", "Specimens"),
+        ("Throat culture", "Specimens"),
+        ("Haematology panel", "Specimens"),
+        ("Chemistry panel", "Specimens"),
+        ("Coagulation tests", "Specimens"),
+        ("Urinalysis", "Specimens"),
+        ("Blood sample collection", "Specimens"),
+        ("Serum creatinine", "Specimens"),
+        ("Plasma concentration", "Specimens"),
+        ("Hepatitis B screening", "Specimens"),
+    ])
+    def test_specimen_keywords(self, name: str, expected: str) -> None:
+        """Activities with specimen keywords → Specimens."""
+        assert classify_swimlane("Assessment", name) == expected
+
+    def test_specimen_keyword_does_not_override_lab(self) -> None:
+        """Lab type already maps to Specimens — no change needed."""
+        assert classify_swimlane("Lab", "CBC") == "Specimens"
+
+    def test_specimen_keyword_does_not_override_imaging(self) -> None:
+        """Imaging type is not overridden by specimen keywords."""
+        assert classify_swimlane("Imaging", "Blood sample MRI") == "Imaging"
+
+    def test_intervention_does_not_override_imaging(self) -> None:
+        """Imaging type is not overridden by intervention keywords."""
+        assert classify_swimlane("Imaging", "Study drug imaging") == "Imaging"
+
+    def test_clinical_encounter_unchanged_without_keywords(self) -> None:
+        """Vital Signs 'Blood pressure' stays Clinical Encounter."""
+        assert classify_swimlane("Vital Signs", "Blood pressure") == "Clinical Encounter"
+
+    def test_intervention_overrides_clinical_encounter(self) -> None:
+        """An Assessment named 'Study drug' → Intervention."""
+        assert classify_swimlane("Assessment", "Study drug dose") == "Intervention"
 
 
 # ---------------------------------------------------------------------------
@@ -299,16 +376,137 @@ class TestBuildSovFigure:
             TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
         )
         ticktext = fig.layout.xaxis.ticktext
-        assert "Screening" in ticktext
-        assert "C1D1" in ticktext
-        assert "EOT" in ticktext
+        joined = " ".join(ticktext)
+        assert "Screening" in joined
+        assert "C1D1" in joined
+        assert "EOT" in joined
+
+    def test_figure_xaxis_has_day_offsets(self) -> None:
+        """PTCV-72: X-axis labels include day offsets."""
+        fig = build_sov_figure(
+            TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
+        )
+        ticktext = fig.layout.xaxis.ticktext
+        joined = " ".join(ticktext)
+        assert "Day -14" in joined  # Screening
+        assert "Day 1" in joined    # C1D1
+        assert "Day 84" in joined   # EOT
 
     def test_figure_yaxis_has_swimlane_labels(self) -> None:
         fig = build_sov_figure(
             TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
         )
         ticktext = fig.layout.yaxis.ticktext
+        assert "Intervention" in ticktext
         assert "Clinical Encounter" in ticktext
         assert "Specimens" in ticktext
         assert "Imaging" in ticktext
         assert "Other" in ticktext
+
+
+# ---------------------------------------------------------------------------
+# PTCV-71: Intervention swimlane grid integration
+# ---------------------------------------------------------------------------
+
+class TestInterventionSwimlaneGrid:
+    """PTCV-71: Drug administration appears in Intervention swimlane."""
+
+    def test_drug_admin_type_in_intervention(self) -> None:
+        """Activity type 'Drug Administration' → Intervention row."""
+        acts = [_act("a20", "Study Drug", "Drug Administration")]
+        insts = [_inst("a20", "v2")]
+        grid = build_sov_grid(TIMEPOINTS, acts, insts)
+        intervention = [r for r in grid if r["swimlane"] == "Intervention"]
+        assert len(intervention) == 1
+        assert "Study Drug" in intervention[0]["activities"]
+
+    def test_keyword_reclassification_in_grid(self) -> None:
+        """Activity with name 'Placebo infusion' reclassified in grid."""
+        acts = [_act("a21", "Placebo infusion", "Procedure")]
+        insts = [_inst("a21", "v1")]
+        grid = build_sov_grid(TIMEPOINTS, acts, insts)
+        intervention = [r for r in grid if r["swimlane"] == "Intervention"]
+        assert len(intervention) == 1
+        assert "Placebo infusion" in intervention[0]["activities"]
+
+    def test_specimen_reclassification_in_grid(self) -> None:
+        """Activity 'Urine pregnancy test' (Assessment) → Specimens."""
+        acts = [_act("a22", "Urine pregnancy test", "Assessment")]
+        insts = [_inst("a22", "v1")]
+        grid = build_sov_grid(TIMEPOINTS, acts, insts)
+        specimens = [r for r in grid if r["swimlane"] == "Specimens"]
+        assert len(specimens) == 1
+        assert "Urine pregnancy test" in specimens[0]["activities"]
+
+
+# ---------------------------------------------------------------------------
+# PTCV-73: Timepoint deduplication
+# ---------------------------------------------------------------------------
+
+class TestTimepointDedup:
+    """PTCV-73: Duplicate timepoints collapsed on x-axis."""
+
+    def test_dedup_merges_same_name_and_offset(self) -> None:
+        """25 timepoints with same name+offset → 1 unique."""
+        tps = [
+            _tp(f"dup-{i}", "Screening", day_offset=7)
+            for i in range(25)
+        ]
+        unique, id_map = _dedup_timepoints(tps)
+        assert len(unique) == 1
+        assert unique[0].visit_name == "Screening"
+        # All map to the same canonical id
+        assert len(set(id_map.values())) == 1
+
+    def test_dedup_preserves_distinct_visits(self) -> None:
+        """Distinct (name, offset) pairs remain separate."""
+        unique, id_map = _dedup_timepoints(TIMEPOINTS)
+        assert len(unique) == 3  # Screening, C1D1, EOT
+
+    def test_dedup_same_name_different_offset(self) -> None:
+        """Same name but different day offsets stay separate."""
+        tps = [
+            _tp("t1", "Visit", day_offset=1),
+            _tp("t2", "Visit", day_offset=14),
+        ]
+        unique, _ = _dedup_timepoints(tps)
+        assert len(unique) == 2
+
+    def test_grid_merges_duplicate_timepoint_activities(self) -> None:
+        """Activities from duplicate timepoints merge into one column."""
+        # 3 duplicate Screening timepoints, each with a different activity
+        tps = [
+            _tp("dup-1", "Screening", day_offset=7),
+            _tp("dup-2", "Screening", day_offset=7),
+            _tp("dup-3", "Screening", day_offset=7),
+        ]
+        acts = [
+            _act("a30", "Vital Signs", "Vital Signs"),
+            _act("a31", "CBC", "Lab"),
+            _act("a32", "MRI Brain", "Imaging"),
+        ]
+        insts = [
+            _inst("a30", "dup-1"),
+            _inst("a31", "dup-2"),
+            _inst("a32", "dup-3"),
+        ]
+        grid = build_sov_grid(tps, acts, insts)
+        # All activities collapsed under one "Screening" visit
+        visit_names = {r["visit_name"] for r in grid}
+        assert visit_names == {"Screening"}
+        # 3 swimlane rows (Clinical Encounter, Specimens, Imaging)
+        swimlanes = {r["swimlane"] for r in grid}
+        assert swimlanes == {"Clinical Encounter", "Specimens", "Imaging"}
+
+    @pytest.mark.skipif(not HAS_PLOTLY, reason="plotly not installed")
+    def test_figure_xaxis_deduped(self) -> None:
+        """Figure x-axis shows 1 column, not 25, for duplicate timepoints."""
+        tps = [
+            _tp(f"dup-{i}", "Screening", day_offset=7)
+            for i in range(25)
+        ]
+        acts = [_act("a40", "Vital Signs", "Vital Signs")]
+        insts = [_inst("a40", "dup-0")]
+        fig = build_sov_figure(tps, acts, insts)
+        assert len(fig.layout.xaxis.ticktext) == 1
+        assert "Screening" in fig.layout.xaxis.ticktext[0]

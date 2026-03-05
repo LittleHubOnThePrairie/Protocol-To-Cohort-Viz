@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 
 _USER = "ptcv-extraction-service"
 
+# Minimum fraction of sampled lines that must have rotated direction
+# vectors before we classify a page as landscape-content.
+_ROTATION_THRESHOLD = 0.5
+
+# Maximum number of text blocks to sample for rotation detection.
+_ROTATION_SAMPLE_LIMIT = 20
+
 
 class PdfExtractor:
     """Extracts text blocks and tables from PDF bytes.
@@ -48,13 +55,93 @@ class PdfExtractor:
     def __init__(self, min_words_for_text_block: int = 3) -> None:
         self._min_words = min_words_for_text_block
 
+    # ------------------------------------------------------------------
+    # Page rotation normalisation (PTCV-63)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_page_rotation(
+        pdf_bytes: bytes,
+    ) -> tuple[bytes, list[int]]:
+        """Detect and fix pages with rotated content.
+
+        Some PDFs render landscape tables by applying a 90-degree
+        rotation transform in the content stream rather than setting
+        the ``/Rotate`` page attribute.  pdfplumber does not handle
+        this case, producing reversed text.
+
+        This method uses PyMuPDF (fitz) to detect such pages via their
+        text-line direction vectors, then sets ``/Rotate = 90`` so that
+        pdfplumber reads them correctly.
+
+        Args:
+            pdf_bytes: Raw PDF file contents.
+
+        Returns:
+            Tuple of (normalized_pdf_bytes, landscape_page_numbers)
+            where landscape_page_numbers is a list of 1-based page
+            numbers that were rotated.
+        """
+        try:
+            import fitz
+        except ImportError:
+            logger.warning(
+                "PyMuPDF (fitz) not installed — landscape page "
+                "detection disabled."
+            )
+            return pdf_bytes, []
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        landscape_pages: list[int] = []
+
+        try:
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
+                # Skip pages that already have explicit rotation.
+                if page.rotation != 0:
+                    continue
+
+                blocks = page.get_text("dict").get("blocks", [])
+                rotated = 0
+                total = 0
+                for block in blocks:
+                    if "lines" not in block:
+                        continue
+                    for line in block["lines"]:
+                        d = line.get("dir", (1.0, 0.0))
+                        total += 1
+                        # Normal text: dir ≈ (1, 0).
+                        # Rotated text: dir ≈ (0, ±1).
+                        if abs(d[0]) < 0.1 and abs(d[1]) > 0.1:
+                            rotated += 1
+                        if total >= _ROTATION_SAMPLE_LIMIT:
+                            break
+                    if total >= _ROTATION_SAMPLE_LIMIT:
+                        break
+
+                if total > 0 and rotated / total >= _ROTATION_THRESHOLD:
+                    page.set_rotation(90)
+                    landscape_pages.append(page_idx + 1)  # 1-based
+
+            if landscape_pages:
+                logger.info(
+                    "Landscape content detected on pages %s — "
+                    "rotation applied.",
+                    landscape_pages,
+                )
+                pdf_bytes = doc.tobytes()
+        finally:
+            doc.close()
+
+        return pdf_bytes, landscape_pages
+
     def extract(
         self,
         pdf_bytes: bytes,
         run_id: str,
         registry_id: str,
         source_sha256: str,
-    ) -> tuple[list["TextBlock"], list["ExtractedTable"], int]:
+    ) -> tuple[list["TextBlock"], list["ExtractedTable"], int, list[int]]:
         """Extract text blocks and tables from a PDF.
 
         Uses pdfplumber as the primary extractor; falls back to Camelot
@@ -67,11 +154,18 @@ class PdfExtractor:
             source_sha256: SHA-256 of the source PDF file.
 
         Returns:
-            Tuple of (text_blocks, tables, page_count).
+            Tuple of (text_blocks, tables, page_count, landscape_pages).
+            landscape_pages is a list of 1-based page numbers where
+            rotated content was detected and normalised.
         """
         import io
 
         import pdfplumber
+
+        # Pre-process: detect and fix landscape-content pages (PTCV-63).
+        pdf_bytes, landscape_pages = self._normalize_page_rotation(
+            pdf_bytes,
+        )
 
         text_blocks: list[TextBlock] = []
         raw_tables_by_page: list[list[list[list[str]]]] = []
@@ -127,7 +221,7 @@ class PdfExtractor:
         )
         tables.extend(tables_from_fallback)
 
-        return text_blocks, tables, page_count
+        return text_blocks, tables, page_count, landscape_pages
 
     # ------------------------------------------------------------------
     # Text extraction

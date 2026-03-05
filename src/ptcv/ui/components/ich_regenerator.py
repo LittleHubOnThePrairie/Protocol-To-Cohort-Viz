@@ -31,14 +31,21 @@ _REVIEW_THRESHOLD = 0.70
 
 
 def _extract_text(section: "IchSection") -> str:
-    """Extract readable text from an IchSection's content_json.
+    """Extract readable text from an IchSection.
+
+    Prefers full content_text (PTCV-64) over content_json excerpt.
 
     Args:
         section: Classified ICH section.
 
     Returns:
-        Best-effort text content from the JSON payload.
+        Best-effort text content.
     """
+    # PTCV-64: Use full content_text when available
+    if section.content_text:
+        return section.content_text
+
+    # Fallback to content_json extraction (pre-PTCV-64 data)
     try:
         data = json.loads(section.content_json)
     except (json.JSONDecodeError, TypeError):

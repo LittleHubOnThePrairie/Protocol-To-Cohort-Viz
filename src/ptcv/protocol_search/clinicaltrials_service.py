@@ -138,11 +138,53 @@ class ClinicalTrialsService:
         self._integrity = DataIntegrityGuard()
         self._timeout = timeout
 
+    @staticmethod
+    def _build_advanced_filter(
+        sponsor_class: str = "",
+        date_from: str = "",
+        has_protocol_doc: bool = False,
+    ) -> str:
+        """Build ``filter.advanced`` AREA[] clauses.
+
+        Constructs the ClinicalTrials.gov v2 advanced filter string
+        from individual filter components, joining with ``AND``.
+
+        [PTCV-39: ICH E6(R3)-aligned sampling strategy]
+
+        Args:
+            sponsor_class: Sponsor classification filter.  Valid values:
+                ``INDUSTRY``, ``NIH``, ``FED``, ``OTHER``, ``NETWORK``,
+                ``INDIV``.  Empty string disables the filter.
+            date_from: Minimum ``StudyFirstPostDate`` in ``MM/DD/YYYY``
+                format.  Only studies posted on or after this date are
+                returned.  Empty string disables the filter.
+            has_protocol_doc: When True, restrict to studies that have
+                a sponsor-uploaded protocol document
+                (``LargeDocHasProtocol``).
+
+        Returns:
+            Combined advanced filter string, or empty string if no
+            filters are active.
+        """
+        clauses: list[str] = []
+        if sponsor_class:
+            clauses.append(f"AREA[LeadSponsorClass]{sponsor_class}")
+        if date_from:
+            clauses.append(
+                f"AREA[StudyFirstPostDate]RANGE[{date_from}, MAX]"
+            )
+        if has_protocol_doc:
+            clauses.append("AREA[LargeDocHasProtocol]true")
+        return " AND ".join(clauses)
+
     def search(
         self,
         condition: str = "",
         phase: str = "",
         status: str = "",
+        sponsor_class: str = "",
+        date_from: str = "",
+        has_protocol_doc: bool = False,
         page_size: int = _DEFAULT_PAGE_SIZE,
         max_results: int = 0,
         page_token: str = "",
@@ -154,11 +196,21 @@ class ClinicalTrialsService:
         Follows pagination automatically until max_results is reached
         or no more pages remain.
         [PTCV-18 Scenario: Search ClinicalTrials.gov protocols]
+        [PTCV-39 Scenario: Sponsor-filtered and temporal filtering]
 
         Args:
             condition: Condition or disease filter (e.g., "oncology").
             phase: Phase filter (e.g., "PHASE2").
             status: Overall status filter (e.g., "RECRUITING").
+            sponsor_class: Lead sponsor classification.  Use
+                ``"INDUSTRY"`` to restrict to industry-sponsored trials.
+                Other values: ``"NIH"``, ``"FED"``, ``"OTHER"``,
+                ``"NETWORK"``, ``"INDIV"``.
+            date_from: Minimum ``StudyFirstPostDate`` in ``MM/DD/YYYY``
+                format (e.g., ``"10/01/2024"``).  Only studies posted on
+                or after this date are returned.
+            has_protocol_doc: When True, restrict to studies with a
+                sponsor-uploaded protocol PDF.
             page_size: Results per page (max 1,000).
             max_results: Stop after collecting this many results.
                          0 means fetch all available pages.
@@ -176,8 +228,16 @@ class ClinicalTrialsService:
             user_id=who,
             reason=(
                 f"Protocol search: condition={condition!r} "
-                f"phase={phase!r} status={status!r}"
+                f"phase={phase!r} status={status!r} "
+                f"sponsor_class={sponsor_class!r} "
+                f"date_from={date_from!r}"
             ),
+        )
+
+        advanced_filter = self._build_advanced_filter(
+            sponsor_class=sponsor_class,
+            date_from=date_from,
+            has_protocol_doc=has_protocol_doc,
         )
 
         results: list[SearchResult] = []
@@ -189,7 +249,8 @@ class ClinicalTrialsService:
                 "format": "json",
                 "fields": (
                     "NCTId,BriefTitle,OfficialTitle,OverallStatus,"
-                    "Phase,LeadSponsorName,Condition,ProtocolSection"
+                    "Phase,LeadSponsorName,LeadSponsorClass,"
+                    "Condition,ProtocolSection"
                 ),
             }
             if condition:
@@ -198,6 +259,8 @@ class ClinicalTrialsService:
                 params["query.term"] = phase
             if status:
                 params["filter.overallStatus"] = status
+            if advanced_filter:
+                params["filter.advanced"] = advanced_filter
             if current_token:
                 params["pageToken"] = current_token
 
@@ -254,6 +317,8 @@ class ClinicalTrialsService:
         condition: str = "",
         phase: str = "",
         fmt: str = "PDF",
+        sponsor_class: str = "",
+        date_from: str = "",
         max_results: int = 500,
         who: str = "ptcv-service",
     ) -> list[str]:
@@ -265,11 +330,16 @@ class ClinicalTrialsService:
         present are returned.
 
         [PTCV-28 Scenario: Pre-filter search to PDF-available trials]
+        [PTCV-39 Scenario: Sponsor/date filtering for PDF-available trials]
 
         Args:
             condition: Condition or disease filter.
             phase: Phase filter (e.g., "PHASE2").
             fmt: Document format to look for ("PDF" or "SAP").
+            sponsor_class: Lead sponsor classification (e.g.,
+                ``"INDUSTRY"``).
+            date_from: Minimum ``StudyFirstPostDate`` in ``MM/DD/YYYY``
+                format.
             max_results: Upper bound on studies to scan.
             who: User/service identifier for audit trail.
 
@@ -286,8 +356,15 @@ class ClinicalTrialsService:
             user_id=who,
             reason=(
                 f"PDF-filtered search: condition={condition!r} "
-                f"phase={phase!r} fmt={fmt!r}"
+                f"phase={phase!r} fmt={fmt!r} "
+                f"sponsor_class={sponsor_class!r} "
+                f"date_from={date_from!r}"
             ),
+        )
+
+        advanced_filter = self._build_advanced_filter(
+            sponsor_class=sponsor_class,
+            date_from=date_from,
         )
 
         matching_ids: list[str] = []
@@ -305,6 +382,8 @@ class ClinicalTrialsService:
                 params["query.cond"] = condition
             if phase:
                 params["query.term"] = phase
+            if advanced_filter:
+                params["filter.advanced"] = advanced_filter
             if current_token:
                 params["pageToken"] = current_token
 
@@ -329,6 +408,43 @@ class ClinicalTrialsService:
                 break
 
         return matching_ids
+
+    def search_industry_protocols(
+        self,
+        date_from: str = "10/01/2024",
+        condition: str = "",
+        phase: str = "",
+        max_results: int = 100,
+        who: str = "ptcv-service",
+    ) -> list[SearchResult]:
+        """Search for industry-sponsored trials with protocol PDFs.
+
+        Convenience method combining ``LeadSponsorClass=INDUSTRY``,
+        ``LargeDocHasProtocol=true``, and a temporal floor into a single
+        call.  Designed for ICH E6(R3)-aligned sampling (PTCV-39).
+
+        Args:
+            date_from: Minimum ``StudyFirstPostDate`` in ``MM/DD/YYYY``
+                format.  Defaults to ``"10/01/2024"`` to target the
+                post-ICH-E6(R3) adoption window.
+            condition: Condition or disease filter.
+            phase: Phase filter (e.g., "PHASE3").
+            max_results: Maximum results to return.
+            who: User/service identifier for audit trail.
+
+        Returns:
+            List of SearchResult instances for industry-sponsored
+            trials that have uploaded protocol documents.
+        """
+        return self.search(
+            condition=condition,
+            phase=phase,
+            sponsor_class="INDUSTRY",
+            date_from=date_from,
+            has_protocol_doc=True,
+            max_results=max_results,
+            who=who,
+        )
 
     def download(
         self,

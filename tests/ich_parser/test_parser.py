@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ptcv.ich_parser import IchParser, IchSection, RuleBasedClassifier
-from ptcv.ich_parser.classifier import REVIEW_THRESHOLD
+from ptcv.ich_parser.schema_loader import get_review_threshold
 from ptcv.ich_parser.parquet_writer import parquet_to_sections
 from ptcv.storage import FilesystemAdapter
 
@@ -120,7 +120,7 @@ class TestIchParserScenarios:
         pending = rq.pending()
         # Every pending entry should have confidence below REVIEW_THRESHOLD
         for entry in pending:
-            assert entry.confidence_score < REVIEW_THRESHOLD
+            assert entry.confidence_score < get_review_threshold()
 
         assert result.review_count == len(pending)
 

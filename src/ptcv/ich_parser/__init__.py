@@ -23,6 +23,8 @@ Public API:
     run_benchmark        — Benchmark entry point (PTCV-93)
     BenchmarkReport      — Aggregate benchmark report (PTCV-93)
     RefinementStore      — Iterative refinement feedback store (PTCV-94)
+    SummarizationMatcher — Sub-section matching + LLM scoring (PTCV-96)
+    EnrichedMatchResult  — Match result enriched with sub-sections (PTCV-96)
 """
 
 from .models import IchSection, ReviewQueueEntry
@@ -36,7 +38,7 @@ from .query_extractor import (
     QueryExtraction,
     QueryExtractor,
 )
-from .query_schema import AppendixBQuery, load_query_schema
+from .query_schema import AppendixBQuery, load_query_schema, section_sort_key
 from .review_queue import ReviewQueue
 from .section_matcher import (
     MatchConfidence,
@@ -47,6 +49,15 @@ from .section_matcher import (
 )
 from .benchmark import BenchmarkReport, run_benchmark
 from .refinement_store import RefinementStore
+from .summarization_matcher import (
+    EnrichedMatchResult,
+    EnrichedSectionMapping,
+    SubSectionDef,
+    SubSectionMatch,
+    SummarizationMatcher,
+    build_subsection_registry,
+    compute_composite_score,
+)
 from .template_assembler import AssembledProtocol, assemble_template
 from .toc_extractor import ProtocolIndex, extract_protocol_index
 from .parser import IchParser
@@ -80,6 +91,14 @@ __all__ = [
     "assemble_template",
     "extract_protocol_index",
     "load_query_schema",
+    "section_sort_key",
     "RefinementStore",
     "run_benchmark",
+    "EnrichedMatchResult",
+    "EnrichedSectionMapping",
+    "SubSectionDef",
+    "SubSectionMatch",
+    "SummarizationMatcher",
+    "build_subsection_registry",
+    "compute_composite_score",
 ]

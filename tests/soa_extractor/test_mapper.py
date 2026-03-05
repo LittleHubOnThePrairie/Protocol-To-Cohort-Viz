@@ -8,7 +8,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
 import pytest
-from ptcv.soa_extractor.mapper import UsdmMapper, _EPOCH_FOR_TYPE
+from ptcv.soa_extractor.mapper import (
+    UsdmMapper,
+    _EPOCH_FOR_TYPE,
+    _is_boilerplate_header,
+)
 from ptcv.soa_extractor.models import RawSoaTable
 from ptcv.soa_extractor.resolver import SynonymResolver, VISIT_TYPES
 
@@ -215,3 +219,195 @@ class TestSynonymMappings:
     def test_epoch_for_type_covers_all_types(self):
         for vtype in VISIT_TYPES:
             assert vtype in _EPOCH_FOR_TYPE, f"{vtype} missing from _EPOCH_FOR_TYPE"
+
+
+# -------------------------------------------------------------------
+# Boilerplate header filtering (PTCV-74)
+# -------------------------------------------------------------------
+
+class TestIsBoilerplateHeader:
+    """Unit tests for _is_boilerplate_header()."""
+
+    @pytest.mark.parametrize("header", [
+        "Page 22 of 58",
+        "Page 5",
+        "page 30 of 58",
+        "PAGE 1",
+    ])
+    def test_page_numbers_are_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is True
+
+    @pytest.mark.parametrize("header", [
+        "Final Protocol Version 1.0",
+        "Protocol No. ABC-123",
+        "Protocol Version 2",
+        "Amendment 2",
+        "Version 3.0",
+    ])
+    def test_protocol_metadata_is_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is True
+
+    @pytest.mark.parametrize("header", [
+        "01 June 2016",
+        "January 15, 2024",
+        "2024-01-15",
+        "15-Mar-2022",
+        "12/03/2021",
+    ])
+    def test_bare_dates_are_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is True
+
+    @pytest.mark.parametrize("header", [
+        "employees or immediate relatives of the Sponsor",
+        "inclusion criteria for subjects",
+        "exclusion criteria",
+        "Investigator's Brochure",
+        "Clinical Study Report",
+    ])
+    def test_nonvisit_content_is_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is True
+
+    @pytest.mark.parametrize("header", [
+        "Table of Contents",
+        "List of Tables",
+        "List of Figures",
+        "Confidential",
+        "Proprietary Information",
+    ])
+    def test_document_structure_is_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is True
+
+    def test_long_header_is_boilerplate(self):
+        header = "A" * 61
+        assert _is_boilerplate_header(header) is True
+
+    def test_empty_header_is_boilerplate(self):
+        assert _is_boilerplate_header("") is True
+        assert _is_boilerplate_header("  ") is True
+
+    @pytest.mark.parametrize("header", [
+        "Screening",
+        "Baseline",
+        "Day 1",
+        "Day -14",
+        "Week 4",
+        "Week 12 ± 3",
+        "Visit 3",
+        "C1D1",
+        "Cycle 2 Day 1",
+        "End of Study",
+        "Early Termination",
+        "Follow-up",
+        "Month 6",
+        "Year 1",
+        "Unscheduled",
+        "Randomization",
+        "Pre-treatment",
+    ])
+    def test_valid_visit_names_are_not_boilerplate(self, header):
+        assert _is_boilerplate_header(header) is False
+
+
+class TestBoilerplateFilteringInMapper:
+    """Integration: boilerplate headers don't produce timepoints."""
+
+    def test_page_numbers_filtered_from_timepoints(self, mapper):
+        table = make_table(
+            ["Screening", "Page 22 of 58", "Week 2"],
+            activities=[("ECG", [True, True, True])],
+        )
+        _, tps, _, insts, syns = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        visit_names = [tp.visit_name for tp in tps]
+        assert "Page 22 of 58" not in visit_names
+        assert len(tps) == 2
+        # No instances linked to the boilerplate column
+        tp_ids = {tp.timepoint_id for tp in tps}
+        for inst in insts:
+            assert inst.timepoint_id in tp_ids
+
+    def test_bare_dates_filtered_from_timepoints(self, mapper):
+        table = make_table(
+            ["Screening", "01 June 2016", "Week 4"],
+            activities=[("Vitals", [True, True, True])],
+        )
+        _, tps, _, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        visit_names = [tp.visit_name for tp in tps]
+        assert "01 June 2016" not in visit_names
+        assert len(tps) == 2
+
+    def test_protocol_metadata_filtered(self, mapper):
+        table = make_table(
+            ["Final Protocol Version 1.0", "Screening", "Baseline"],
+            activities=[("ECG", [True, True, True])],
+        )
+        _, tps, _, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        visit_names = [tp.visit_name for tp in tps]
+        assert "Final Protocol Version 1.0" not in visit_names
+        assert len(tps) == 2
+
+    def test_eligibility_text_filtered(self, mapper):
+        table = make_table(
+            ["Screening", "employees or immediate relatives of the Sponsor"],
+            activities=[("Labs", [True, True])],
+        )
+        _, tps, _, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert len(tps) == 1
+        assert tps[0].visit_name == "Screening"
+
+    def test_valid_visits_preserved_alongside_boilerplate(self, mapper):
+        """All valid visits survive when mixed with boilerplate."""
+        table = make_table(
+            [
+                "Page 5",
+                "Screening",
+                "01 June 2016",
+                "Day 1",
+                "Page 30 of 58",
+                "Week 4",
+                "employees or immediate relatives of the Sponsor",
+                "End of Study",
+            ],
+            activities=[
+                ("ECG", [True] * 8),
+            ],
+        )
+        _, tps, _, insts, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        visit_names = [tp.visit_name for tp in tps]
+        assert visit_names == ["Screening", "Day 1", "Week 4", "End of Study"]
+        # Instances only link to valid timepoints
+        tp_ids = {tp.timepoint_id for tp in tps}
+        assert all(inst.timepoint_id in tp_ids for inst in insts)
+
+    def test_synonyms_not_created_for_boilerplate(self, mapper):
+        table = make_table(
+            ["Page 22 of 58", "Screening"],
+            activities=[("ECG", [True, True])],
+        )
+        _, _, _, _, syns = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        originals = {s.original_text for s in syns}
+        assert "Page 22 of 58" not in originals
+        assert len(syns) == 1
+
+    def test_all_boilerplate_produces_empty_result(self, mapper):
+        table = make_table(
+            ["Page 1", "Page 2", "01 June 2016"],
+            activities=[("ECG", [True, True, True])],
+        )
+        epochs, tps, acts, insts, syns = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert len(tps) == 0
+        assert len(insts) == 0
+        assert len(syns) == 0

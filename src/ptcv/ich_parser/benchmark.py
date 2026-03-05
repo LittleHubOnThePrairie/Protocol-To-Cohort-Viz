@@ -35,6 +35,7 @@ from ptcv.annotations.span_mapper import (
     map_sections_to_spans,
 )
 from ptcv.ich_parser.classifier import RuleBasedClassifier
+from ptcv.ich_parser.query_schema import section_sort_key
 from ptcv.ich_parser.models import IchSection
 from ptcv.ich_parser.query_extractor import (
     ExtractionResult,
@@ -756,7 +757,7 @@ def _metrics_to_dict(m: PipelineMetrics) -> dict:
         "avg_span_length": m.avg_span_length,
         "gap_rate": m.gap_rate,
         "section_count": m.section_count,
-        "section_codes": sorted(m.section_codes),
+        "section_codes": sorted(m.section_codes, key=section_sort_key),
         "high_confidence_pct": m.high_confidence_pct,
         "medium_confidence_pct": m.medium_confidence_pct,
         "low_confidence_pct": m.low_confidence_pct,

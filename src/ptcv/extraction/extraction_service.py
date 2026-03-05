@@ -126,12 +126,16 @@ class ExtractionService:
         # Capture a single contemporaneous timestamp for all artifacts
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        landscape_pages: list[int] = []
+
         if fmt == ProtocolFormat.PDF:
-            text_blocks, tables, page_count = self._pdf_extractor.extract(
-                pdf_bytes=protocol_data,
-                run_id=run_id,
-                registry_id=registry_id,
-                source_sha256=source_sha256,
+            text_blocks, tables, page_count, landscape_pages = (
+                self._pdf_extractor.extract(
+                    pdf_bytes=protocol_data,
+                    run_id=run_id,
+                    registry_id=registry_id,
+                    source_sha256=source_sha256,
+                )
             )
             # Determine the predominant extractor for metadata
             extractor_used = _predominant_extractor(tables) or "pdfplumber"
@@ -152,11 +156,13 @@ class ExtractionService:
                 "Unknown format for %s; attempting PDF extraction.",
                 registry_id,
             )
-            text_blocks, tables, page_count = self._pdf_extractor.extract(
-                pdf_bytes=protocol_data,
-                run_id=run_id,
-                registry_id=registry_id,
-                source_sha256=source_sha256,
+            text_blocks, tables, page_count, landscape_pages = (
+                self._pdf_extractor.extract(
+                    pdf_bytes=protocol_data,
+                    run_id=run_id,
+                    registry_id=registry_id,
+                    source_sha256=source_sha256,
+                )
             )
             extractor_used = _predominant_extractor(tables) or "pdfplumber"
 
@@ -167,6 +173,8 @@ class ExtractionService:
             tbl.extraction_timestamp_utc = timestamp
 
         # Build metadata record
+        import json as _json
+
         meta = ExtractionMetadata(
             run_id=run_id,
             source_registry_id=registry_id,
@@ -177,6 +185,7 @@ class ExtractionService:
             table_count=len(tables),
             text_block_count=len(text_blocks),
             extraction_timestamp_utc=timestamp,
+            landscape_pages=_json.dumps(landscape_pages),
         )
 
         # Serialise to Parquet

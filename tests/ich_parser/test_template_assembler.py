@@ -105,9 +105,10 @@ class TestPopulatesSections:
         result = assemble_template(hits)
 
         codes = [s.section_code for s in result.sections]
-        # All 16 sections present, in B.1-B.16 order
+        # All 16 sections present, in natural B.1-B.16 order (PTCV-97)
         assert codes[0] == "B.1"
-        assert codes[1] == "B.10"  # sorted alphanumerically
+        assert codes[1] == "B.2"
+        assert codes.index("B.9") < codes.index("B.10")
         # Verify populated ones appear and are marked populated
         populated_codes = {s.section_code for s in result.sections if s.populated}
         assert {"B.1", "B.2", "B.6", "B.7", "B.8", "B.10"} == populated_codes
@@ -431,3 +432,28 @@ class TestEdgeCases:
         assert b1 is not None
         assert b1.required_query_count == required_count
         assert b1.answered_required_count == 1
+
+
+# -----------------------------------------------------------------------
+# PTCV-97: Natural section ordering
+# -----------------------------------------------------------------------
+
+class TestNaturalSectionOrdering:
+    """Assembled template sections must use natural numeric order."""
+
+    def test_assembled_sections_natural_order(self):
+        """B.1 through B.16 in natural order, not lexicographic."""
+        result = assemble_template([])
+        codes = [s.section_code for s in result.sections]
+        expected = [f"B.{i}" for i in range(1, 17)]
+        assert codes == expected
+
+    def test_markdown_sections_natural_order(self):
+        """Markdown output has section headers in natural order."""
+        result = assemble_template([])
+        md = result.to_markdown()
+        # Find all "## B.X ..." headers and extract section codes
+        import re
+        headers = re.findall(r"^## (B\.\d+) ", md, re.MULTILINE)
+        expected = [f"B.{i}" for i in range(1, 17)]
+        assert headers == expected

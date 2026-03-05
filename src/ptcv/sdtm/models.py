@@ -73,3 +73,30 @@ class SdtmGenerationResult:
             f"domains={domains}, "
             f"ct_unmapped={self.ct_unmapped_count})"
         )
+
+
+@dataclasses.dataclass
+class SoaCellMetadata:
+    """Cell-level metadata for one (visit, assessment) intersection in the SoA.
+
+    Captures the status, categorisation, and timing context for each cell
+    in the Schedule of Activities matrix. Derived from PTCV-1 research on
+    ICH M11 CeSHarP cell semantics and Faro Smart Design categorisation.
+
+    Attributes:
+        visitnum: 1-based visit number from TV domain.
+        assessment: Assessment/activity name from SoA row label.
+        status: Cell status — required, optional, conditional, or not_applicable.
+        condition: Conditional rule text (e.g. "PRN", "EARLY_TERM"), empty if none.
+        category: Faro-style category — safety, efficacy, or operational.
+        cdash_domain: CDASH/SDTM domain code (e.g. "VS", "LB").
+        timing_window_days: (early_days, late_days) allowable window from TV.
+    """
+
+    visitnum: int
+    assessment: str
+    status: str
+    condition: str
+    category: str
+    cdash_domain: str
+    timing_window_days: tuple[int, int]

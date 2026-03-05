@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 # Maximum chars to show in content preview columns.
 _CONTENT_PREVIEW_LEN = 120
 
+# Bump when pipeline output schema changes to invalidate stale caches.
+_PIPELINE_CACHE_VERSION = 2  # v2: added enriched_match_result (PTCV-96)
+
 
 # ---------------------------------------------------------------------------
 # Pure-Python helpers (testable, no Streamlit imports)
@@ -36,6 +39,8 @@ _CONTENT_PREVIEW_LEN = 120
 def run_query_pipeline(
     pdf_path: str | Path,
     cohere_api_key: str | None = None,
+    anthropic_api_key: str | None = None,
+    enable_summarization: bool = True,
 ) -> dict[str, Any]:
     """Orchestrate the full query-driven pipeline.
 
@@ -43,17 +48,22 @@ def run_query_pipeline(
         pdf_path: Path to the protocol PDF.
         cohere_api_key: Optional Cohere API key for embedding-based
             matching. Falls back to keyword matching without it.
+        anthropic_api_key: Optional Anthropic API key for LLM-driven
+            sub-section scoring. Falls back to keyword-only if absent.
+        enable_summarization: Whether to run the sub-section enrichment
+            stage (PTCV-96). Defaults to *True*.
 
     Returns:
         Dict with keys: ``protocol_index``, ``match_result``,
-        ``extraction_result``, ``assembled``, ``assembled_markdown``,
-        ``coverage``.
+        ``enriched_match_result``, ``extraction_result``, ``assembled``,
+        ``assembled_markdown``, ``coverage``.
 
     Raises:
         Exception: Re-raised from any pipeline stage.
     """
     from ptcv.ich_parser.toc_extractor import extract_protocol_index
     from ptcv.ich_parser.section_matcher import SectionMatcher
+    from ptcv.ich_parser.summarization_matcher import SummarizationMatcher
     from ptcv.ich_parser.query_extractor import QueryExtractor
     from ptcv.ich_parser.template_assembler import (
         QueryExtractionHit,
@@ -68,6 +78,13 @@ def run_query_pipeline(
     key = cohere_api_key or os.environ.get("COHERE_API_KEY")
     matcher = SectionMatcher(cohere_api_key=key)
     match_result = matcher.match(protocol_index)
+
+    # Stage 2.5: Sub-section enrichment (PTCV-96)
+    enriched_result = None
+    if enable_summarization:
+        api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        summarizer = SummarizationMatcher(anthropic_api_key=api_key)
+        enriched_result = summarizer.refine(match_result, protocol_index)
 
     # Stage 3: Query extraction
     extractor = QueryExtractor()
@@ -94,6 +111,7 @@ def run_query_pipeline(
     return {
         "protocol_index": protocol_index,
         "match_result": match_result,
+        "enriched_match_result": enriched_result,
         "extraction_result": extraction_result,
         "assembled": assembled,
         "assembled_markdown": assembled.to_markdown(),
@@ -169,6 +187,56 @@ def format_match_table(match_result: Any) -> list[dict[str, Any]]:
                 "score": 0.0,
                 "confidence": "LOW",
                 "method": "",
+            })
+    return rows
+
+
+def format_subsection_match_table(
+    enriched_result: Any,
+) -> list[dict[str, Any]]:
+    """Format sub-section matches for tabular display (PTCV-96).
+
+    Args:
+        enriched_result: ``EnrichedMatchResult`` from
+            ``SummarizationMatcher.refine()``, or *None*.
+
+    Returns:
+        List of dicts with keys: ``protocol_section``,
+        ``parent_section``, ``sub_section``, ``composite_score``,
+        ``summarization_score``, ``confidence``, ``method``.
+    """
+    if enriched_result is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for em in getattr(enriched_result, "enriched_mappings", []):
+        proto = (
+            f"{getattr(em, 'protocol_section_number', '')} "
+            f"{getattr(em, 'protocol_section_title', '')}"
+        ).strip()
+        for sub in getattr(em, "sub_section_matches", []):
+            conf = getattr(
+                getattr(sub, "confidence", None), "value", "low"
+            ) if hasattr(getattr(sub, "confidence", None), "value") else str(
+                getattr(sub, "confidence", "low")
+            )
+            rows.append({
+                "protocol_section": proto,
+                "parent_section": getattr(
+                    sub, "parent_section_code", ""
+                ),
+                "sub_section": (
+                    f"{getattr(sub, 'sub_section_code', '')} "
+                    f"{getattr(sub, 'sub_section_name', '')}"
+                ).strip(),
+                "composite_score": round(
+                    getattr(sub, "composite_score", 0.0), 3
+                ),
+                "summarization_score": round(
+                    getattr(sub, "summarization_score", -1.0), 3
+                ),
+                "confidence": conf,
+                "method": getattr(sub, "match_method", ""),
             })
     return rows
 
@@ -273,11 +341,12 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
     """
     import streamlit as st
 
-    # Cache init
+    # Cache init — version-stamped key invalidates stale entries.
+    cache_key = f"{file_sha}_v{_PIPELINE_CACHE_VERSION}"
     if "query_cache" not in st.session_state:
         st.session_state["query_cache"] = {}
 
-    cached = st.session_state["query_cache"].get(file_sha)
+    cached = st.session_state["query_cache"].get(cache_key)
 
     if cached:
         st.success("Query pipeline complete. Results below.")
@@ -296,7 +365,7 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                     st.write("Extracting protocol index...")
                     result = run_query_pipeline(str(file_path))
                     elapsed = time.monotonic() - t0
-                    st.session_state["query_cache"][file_sha] = result
+                    st.session_state["query_cache"][cache_key] = result
                     cached = result
                     status.update(
                         label=(
@@ -372,6 +441,37 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
             st.dataframe(match_rows, use_container_width=True)
 
     st.divider()
+
+    # --- Sub-Section Matching (PTCV-96) ---
+    enriched_result = cached.get("enriched_match_result")
+    if enriched_result is not None:
+        st.subheader("Sub-Section Matching")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric(
+                "Sub-section auto-map",
+                f"{getattr(enriched_result, 'sub_section_auto_map_rate', 0.0):.0%}",
+            )
+        with col2:
+            st.metric(
+                "LLM calls",
+                getattr(enriched_result, "llm_calls_made", 0),
+            )
+        with col3:
+            mode = (
+                "Fallback" if getattr(enriched_result, "llm_fallback", True)
+                else "Active"
+            )
+            st.metric("LLM mode", mode)
+
+        sub_rows = format_subsection_match_table(enriched_result)
+        if sub_rows:
+            with st.expander(
+                "Sub-Section Mappings", expanded=False
+            ):
+                st.dataframe(sub_rows, use_container_width=True)
+
+        st.divider()
 
     # --- Extraction Results ---
     extraction_result = cached["extraction_result"]

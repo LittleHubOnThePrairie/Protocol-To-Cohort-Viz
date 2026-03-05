@@ -1,11 +1,11 @@
-"""Query-driven extraction engine (PTCV-91).
+"""Query-driven extraction engine (PTCV-91, PTCV-98).
 
 Runs Appendix B queries against protocol sections to extract
 structured answers.  Given ``ProtocolIndex`` (content),
 ``MatchResult`` (routing), and ``AppendixBQuery`` (questions),
 dispatches each query to a type-specific extractor.
 
-V1 is deterministic — no LLM calls.  Type-specific strategies:
+Deterministic type-specific strategies:
 
     text_long   → passthrough + keyword-overlap confidence
     text_short  → label-value regex / first relevant sentence
@@ -20,15 +20,23 @@ V1 is deterministic — no LLM calls.  Type-specific strategies:
 Routing uses ``get_queries_by_schema_section()`` because B.15/B.16
 queries map to ``schema_section: "B.14"``.
 
-Risk tier: LOW — read-only extraction, no external I/O.
+Optional LLM transformation (PTCV-98): when
+``enable_transformation=True`` and an Anthropic API key is
+available, high-confidence scoped matches are reframed by
+Claude Sonnet to directly address the Appendix B query intent
+while preserving factual fidelity.
+
+Risk tier: LOW — read-only extraction, optional LLM calls.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
+import os
 import re
-from typing import Sequence
+from typing import Any, Sequence
 
 from ptcv.ich_parser.query_schema import (
     AppendixBQuery,
@@ -61,7 +69,8 @@ class QueryExtraction:
         confidence: Confidence score (0.0–1.0).
         extraction_method: Strategy used (``"regex"``,
             ``"heuristic"``, ``"passthrough"``,
-            ``"table_detection"``, ``"unscoped_search"``).
+            ``"table_detection"``, ``"unscoped_search"``,
+            ``"llm_transform"``).
         source_section: Protocol section number(s) searched.
     """
 
@@ -571,12 +580,150 @@ class QueryExtractor:
     Args:
         confidence_threshold: Minimum confidence for a query to
             count as answered (default ``0.70``).
+        enable_transformation: If *True*, high-confidence scoped
+            extractions are reframed by Claude Sonnet to directly
+            address the query intent (PTCV-98).
+        transformation_threshold: Minimum confidence for LLM
+            transformation to apply (default ``0.80``).
+        anthropic_api_key: Anthropic API key.  If *None*, reads
+            ``ANTHROPIC_API_KEY`` from the environment.
     """
 
     def __init__(
-        self, confidence_threshold: float = 0.70
+        self,
+        confidence_threshold: float = 0.70,
+        enable_transformation: bool = False,
+        transformation_threshold: float = 0.80,
+        anthropic_api_key: str | None = None,
     ) -> None:
         self._threshold = confidence_threshold
+        self._transformation_threshold = transformation_threshold
+        self._llm_model = "claude-sonnet-4-6"
+        self._client: Any = None
+        self._use_llm = False
+        self._transform_calls = 0
+
+        if enable_transformation:
+            api_key = anthropic_api_key or os.environ.get(
+                "ANTHROPIC_API_KEY", ""
+            )
+            if api_key:
+                self._init_llm(api_key)
+            else:
+                logger.warning(
+                    "enable_transformation=True but no "
+                    "ANTHROPIC_API_KEY — running verbatim only"
+                )
+
+    def _init_llm(self, api_key: str) -> None:
+        """Lazy-import Anthropic SDK and create client."""
+        import anthropic
+
+        self._client = anthropic.Anthropic(api_key=api_key)
+        self._use_llm = True
+        logger.info(
+            "QueryExtractor: LLM transformation enabled "
+            "(model=%s)",
+            self._llm_model,
+        )
+
+    # ------------------------------------------------------------------
+    # LLM transformation (PTCV-98)
+    # ------------------------------------------------------------------
+
+    _TRANSFORM_PROMPT = (
+        "You are an ICH E6(R3) regulatory writing specialist.\n\n"
+        "TASK: Transform the source content below to directly "
+        "address this Appendix B query. Produce text suitable "
+        "for an ICH E6(R3) Appendix B protocol section.\n\n"
+        "QUERY: {query_text}\n\n"
+        "SOURCE CONTENT:\n<source>\n{source}\n</source>\n\n"
+        "RULES:\n"
+        "1. Reframe content to directly answer the query\n"
+        "2. Remove tangential information not relevant to "
+        "the query\n"
+        "3. Preserve ALL factual claims — numbers, dates, "
+        "drug names, doses\n"
+        "4. Do NOT introduce any new information not in the "
+        "source\n"
+        "5. Use formal regulatory tone appropriate for ICH "
+        "GCP documentation\n"
+        "6. Keep the response concise but complete\n\n"
+        'Respond with a single JSON object (no markdown fences):\n'
+        '{{"transformed": "your transformed text", '
+        '"confidence": 0.85}}\n\n'
+        "The confidence should reflect how well the source "
+        "material answers the query (0.0 = not at all, "
+        "1.0 = perfectly)."
+    )
+
+    def _transform_content(
+        self,
+        source_content: str,
+        query: AppendixBQuery,
+    ) -> tuple[str, float] | None:
+        """Call Claude Sonnet to reframe extracted content.
+
+        Returns:
+            ``(transformed_text, llm_confidence)`` on success,
+            *None* on any error (caller falls back to verbatim).
+        """
+        prompt = self._TRANSFORM_PROMPT.format(
+            query_text=query.query_text,
+            source=source_content[:6000],
+        )
+        try:
+            resp = self._client.messages.create(
+                model=self._llm_model,
+                max_tokens=2048,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+            )
+            self._transform_calls += 1
+
+            first_block = resp.content[0]
+            if not hasattr(first_block, "text"):
+                return None
+            raw = first_block.text.strip()
+
+            # Parse JSON — strip markdown fences if present
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                cleaned = re.sub(
+                    r"```(?:json)?", "", raw
+                ).strip()
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "LLM transform: failed to parse "
+                        "JSON for %s",
+                        query.query_id,
+                    )
+                    return None
+
+            transformed = parsed.get("transformed", "")
+            llm_conf = float(
+                parsed.get("confidence", 0.0)
+            )
+            if not transformed:
+                return None
+            return transformed, min(1.0, max(0.0, llm_conf))
+
+        except Exception:
+            logger.warning(
+                "LLM transform failed for %s — "
+                "falling back to verbatim",
+                query.query_id,
+                exc_info=True,
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def extract(
         self,
@@ -776,6 +923,25 @@ class QueryExtractor:
             confidence *= _REVIEW_PENALTY
 
         confidence = round(min(1.0, confidence), 4)
+
+        # LLM transformation (PTCV-98): reframe high-confidence
+        # scoped matches to directly address the query intent.
+        if (
+            self._use_llm
+            and scoped
+            and confidence >= self._transformation_threshold
+            and method != "unscoped_search"
+        ):
+            transformed = self._transform_content(
+                extracted, query
+            )
+            if transformed is not None:
+                extracted, llm_conf = transformed
+                # Blend: 60% deterministic + 40% LLM self-report
+                confidence = round(
+                    0.6 * confidence + 0.4 * llm_conf, 4
+                )
+                method = "llm_transform"
 
         return QueryExtraction(
             query_id=query.query_id,

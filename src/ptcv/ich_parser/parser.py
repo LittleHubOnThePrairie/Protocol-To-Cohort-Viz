@@ -30,6 +30,7 @@ from .classifier import RuleBasedClassifier, SectionClassifier
 from .format_detector import FormatDetector, ProtocolFormat
 from .models import IchSection, ReviewQueueEntry
 from .parquet_writer import sections_to_parquet
+from .query_schema import section_sort_key
 from .review_queue import ReviewQueue
 
 
@@ -59,7 +60,7 @@ def _compute_format_verdict(
 
     found_codes = {s.section_code for s in sections}
     avg_conf = mean(s.confidence_score for s in sections) if sections else 0.0
-    missing = sorted(_REQUIRED_SECTIONS - found_codes)
+    missing = sorted(_REQUIRED_SECTIONS - found_codes, key=section_sort_key)
 
     n_required_found = len(found_codes & _REQUIRED_SECTIONS)
     format_confidence = avg_conf * (n_required_found / len(_REQUIRED_SECTIONS))

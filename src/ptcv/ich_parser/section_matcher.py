@@ -186,6 +186,10 @@ class SectionMatch:
     boosted_score: float
     confidence: MatchConfidence
     match_method: str
+    # Optional enrichment fields (PTCV-96: sub-section matching)
+    sub_section_code: str = ""
+    summarization_score: float = -1.0
+    composite_score: float = -1.0
 
 
 @dataclasses.dataclass(frozen=True)

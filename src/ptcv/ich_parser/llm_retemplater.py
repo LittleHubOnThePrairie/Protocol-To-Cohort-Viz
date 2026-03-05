@@ -29,6 +29,8 @@ import os
 import re
 import uuid
 from collections import defaultdict
+
+from ptcv.ich_parser.query_schema import section_sort_key
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -669,7 +671,7 @@ class LlmRetemplater:
 
         # Build IchSection objects with full content_text
         sections: list[IchSection] = []
-        for code in sorted(section_blocks.keys()):
+        for code in sorted(section_blocks.keys(), key=section_sort_key):
             blocks = section_blocks[code]
             full_text = "\n".join(
                 b.get("text", "") for b in blocks
@@ -881,7 +883,7 @@ class LlmRetemplater:
                     content_text=soa_text,
                 )
             )
-            result.sort(key=lambda s: s.section_code)
+            result.sort(key=lambda s: section_sort_key(s.section_code))
 
         return result
 

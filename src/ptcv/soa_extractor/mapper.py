@@ -26,6 +26,8 @@ Regulatory references:
 
 from __future__ import annotations
 
+import logging
+import re
 import uuid
 
 from .models import (
@@ -38,6 +40,74 @@ from .models import (
     UsdmTimepoint,
 )
 from .resolver import SynonymResolver
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Boilerplate header filtering (PTCV-74)
+# ---------------------------------------------------------------------------
+
+# Page numbers: "Page 22 of 58", "Page 5"
+_PAGE_RE = re.compile(r"(?i)^page\s+\d+")
+# Protocol metadata: "Final Protocol Version 1.0", "Protocol No. 123",
+# "Amendment 2", "Version 1.0"
+_PROTOCOL_META_RE = re.compile(
+    r"(?i)^(?:final\s+)?protocol\s+\w"
+    r"|^amendment\s+\d"
+    r"|^version\s+\d"
+)
+# Document structure: "Table of Contents", "List of Tables", "Confidential"
+_DOC_STRUCTURE_RE = re.compile(
+    r"(?i)^(?:table\s+of\s+contents|list\s+of\s+|confidential|proprietary)"
+)
+# Bare dates — "01 June 2016", "January 15, 2024", "2024-01-15",
+# "15-Mar-2022". Must NOT match "Day N" (which is a valid visit).
+_BARE_DATE_RE = re.compile(
+    r"(?i)"
+    r"^\d{1,2}\s+(?:january|february|march|april|may|june|july|august"
+    r"|september|october|november|december)\s+\d{4}$"
+    r"|^(?:january|february|march|april|may|june|july|august"
+    r"|september|october|november|december)\s+\d{1,2},?\s+\d{4}$"
+    r"|^\d{4}[-/]\d{1,2}[-/]\d{1,2}$"
+    r"|^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$"
+    r"|^\d{1,2}[-/](?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct"
+    r"|nov|dec)[-/]\d{2,4}$"
+)
+# Non-visit content (eligibility criteria, regulatory text)
+_NONVISIT_RE = re.compile(
+    r"(?i)\b(?:employees?|(?:immediate\s+)?relatives?)\b"
+    r"|\b(?:the\s+)?sponsor\b"
+    r"|\b(?:inclusion|exclusion)\s+criteria\b"
+    r"|\b(?:copyright|trademark|proprietary)\b"
+    r"|\b(?:investigator.?s?\s+brochure)\b"
+    r"|\b(?:clinical\s+study\s+report)\b"
+)
+# Visit names longer than this are almost certainly boilerplate
+_MAX_VISIT_NAME_LEN = 60
+
+
+def _is_boilerplate_header(header: str) -> bool:
+    """Return True if header is boilerplate, not a real visit name.
+
+    Filters page numbers, bare dates, protocol metadata, eligibility
+    criteria text, and other non-visit content (PTCV-74).
+    """
+    text = header.strip()
+    if not text:
+        return True
+    if len(text) > _MAX_VISIT_NAME_LEN:
+        return True
+    if _PAGE_RE.search(text):
+        return True
+    if _BARE_DATE_RE.match(text):
+        return True
+    if _PROTOCOL_META_RE.search(text):
+        return True
+    if _DOC_STRUCTURE_RE.search(text):
+        return True
+    if _NONVISIT_RE.search(text):
+        return True
+    return False
 
 
 # Visit type → epoch name mapping
@@ -202,6 +272,14 @@ class UsdmMapper:
         tp_index: list[str] = []  # timepoint_id per visit column
 
         for i, header in enumerate(table.visit_headers):
+            # Skip boilerplate headers (PTCV-74)
+            if _is_boilerplate_header(header):
+                tp_index.append("")  # placeholder for column alignment
+                logger.debug(
+                    "Skipping boilerplate visit header [%d]: %r", i, header,
+                )
+                continue
+
             # Prefer day_headers for temporal info if present
             temporal_hint = (
                 table.day_headers[i]
@@ -274,6 +352,8 @@ class UsdmMapper:
                 if not is_scheduled:
                     continue
                 if col_idx >= len(tp_index):
+                    continue
+                if not tp_index[col_idx]:  # PTCV-74: boilerplate column
                     continue
                 inst = UsdmScheduledInstance(
                     run_id=run_id,

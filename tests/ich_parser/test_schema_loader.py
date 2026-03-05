@@ -238,11 +238,13 @@ class TestRetemplaterStagePrompt:
 
     def test_full_format_matches_legacy(self) -> None:
         """get_stage_prompt('retemplater') must produce the exact same
-        string as the old inline code in _build_classification_prompt."""
+        string as the old inline code in _build_classification_prompt,
+        but using natural sort order (PTCV-97)."""
+        from ptcv.ich_parser.query_schema import section_sort_key
         defs = get_section_defs()
         legacy = "\n".join(
             f"  {code}: {desc}"
-            for code, desc in sorted(defs.items())
+            for code, desc in sorted(defs.items(), key=lambda x: section_sort_key(x[0]))
         )
         prompt = get_stage_prompt("retemplater")
         assert prompt == legacy
@@ -251,11 +253,11 @@ class TestRetemplaterStagePrompt:
         prompt = get_stage_prompt("retemplater")
         assert prompt.startswith("  B.1:")
 
-    def test_full_format_ends_with_b9(self) -> None:
-        """Sorted alphabetically by code, B.9 comes last (after B.8)."""
+    def test_full_format_ends_with_b14(self) -> None:
+        """Natural sort: B.14 comes last (PTCV-97)."""
         prompt = get_stage_prompt("retemplater")
         lines = prompt.strip().split("\n")
-        assert lines[-1].strip().startswith("B.9:")
+        assert lines[-1].strip().startswith("B.14:")
 
     def test_full_format_contains_all_14(self) -> None:
         prompt = get_stage_prompt("retemplater")
