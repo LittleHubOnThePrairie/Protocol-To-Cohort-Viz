@@ -5,6 +5,25 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-05T17:26:29Z] PTCV-92: Template Assembly: Migrate Extracted Content into ICH E6(R3) Appendix B Format
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-1
+
+**Summary:**
+Template Assembly: Migrate Extracted Content into ICH E6(R3) Appendix B Format
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/template_assembler.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_template_assembler.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-05T17:07:22Z] PTCV-89: Extract Protocol TOC and Section Headers as Navigable Index
 
 **Status Change:** In Progress -> Done

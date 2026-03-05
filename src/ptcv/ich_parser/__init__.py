@@ -14,6 +14,12 @@ Public API:
     M11ProtocolParser    — ICH M11 CeSHarP machine-readable parser (PTCV-56)
     ProtocolIndex        — Navigable document index (TOC + headers) (PTCV-89)
     extract_protocol_index — Extract ProtocolIndex from PDF (PTCV-89)
+    QueryExtractor       — Query-driven extraction engine (PTCV-91)
+    QueryExtraction      — Single extracted answer (PTCV-91)
+    ExtractionGap        — Unanswered query (PTCV-91)
+    ExtractionResult     — Aggregate extraction result (PTCV-91)
+    assemble_template    — Template assembler: hits → Appendix B doc (PTCV-92)
+    AssembledProtocol    — Assembled protocol output (PTCV-92)
 """
 
 from .models import IchSection, ReviewQueueEntry
@@ -21,6 +27,12 @@ from .classifier import SectionClassifier, RuleBasedClassifier, RAGClassifier
 from .fidelity_checker import FidelityChecker
 from .format_detector import FormatDetector, FormatDetectionResult, ProtocolFormat
 from .m11_parser import M11ProtocolParser
+from .query_extractor import (
+    ExtractionGap,
+    ExtractionResult,
+    QueryExtraction,
+    QueryExtractor,
+)
 from .query_schema import AppendixBQuery, load_query_schema
 from .review_queue import ReviewQueue
 from .section_matcher import (
@@ -30,11 +42,15 @@ from .section_matcher import (
     SectionMatcher,
     SectionMapping,
 )
+from .template_assembler import AssembledProtocol, assemble_template
 from .toc_extractor import ProtocolIndex, extract_protocol_index
 from .parser import IchParser
 
 __all__ = [
     "AppendixBQuery",
+    "AssembledProtocol",
+    "ExtractionGap",
+    "ExtractionResult",
     "FidelityChecker",
     "IchParser",
     "IchSection",
@@ -50,9 +66,12 @@ __all__ = [
     "MatchResult",
     "M11ProtocolParser",
     "ProtocolIndex",
+    "QueryExtraction",
+    "QueryExtractor",
     "SectionMatch",
     "SectionMatcher",
     "SectionMapping",
+    "assemble_template",
     "extract_protocol_index",
     "load_query_schema",
 ]
