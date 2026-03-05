@@ -20,6 +20,8 @@ Public API:
     ExtractionResult     — Aggregate extraction result (PTCV-91)
     assemble_template    — Template assembler: hits → Appendix B doc (PTCV-92)
     AssembledProtocol    — Assembled protocol output (PTCV-92)
+    run_benchmark        — Benchmark entry point (PTCV-93)
+    BenchmarkReport      — Aggregate benchmark report (PTCV-93)
 """
 
 from .models import IchSection, ReviewQueueEntry
@@ -42,6 +44,7 @@ from .section_matcher import (
     SectionMatcher,
     SectionMapping,
 )
+from .benchmark import BenchmarkReport, run_benchmark
 from .template_assembler import AssembledProtocol, assemble_template
 from .toc_extractor import ProtocolIndex, extract_protocol_index
 from .parser import IchParser
@@ -49,6 +52,7 @@ from .parser import IchParser
 __all__ = [
     "AppendixBQuery",
     "AssembledProtocol",
+    "BenchmarkReport",
     "ExtractionGap",
     "ExtractionResult",
     "FidelityChecker",
@@ -74,4 +78,5 @@ __all__ = [
     "assemble_template",
     "extract_protocol_index",
     "load_query_schema",
+    "run_benchmark",
 ]
