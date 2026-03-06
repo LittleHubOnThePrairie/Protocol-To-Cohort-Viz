@@ -7,7 +7,7 @@ dispatches each query to a type-specific extractor.
 
 Deterministic type-specific strategies:
 
-    text_long   → passthrough + keyword-overlap confidence
+    text_long   → paragraph relevance scoring + excerpt
     text_short  → label-value regex / first relevant sentence
     identifier  → NCT / EudraCT / protocol number regexes
     date        → date format regexes (4 patterns)
@@ -69,8 +69,8 @@ class QueryExtraction:
         confidence: Confidence score (0.0–1.0).
         extraction_method: Strategy used (``"regex"``,
             ``"heuristic"``, ``"passthrough"``,
-            ``"table_detection"``, ``"unscoped_search"``,
-            ``"llm_transform"``).
+            ``"relevance_excerpt"``, ``"table_detection"``,
+            ``"unscoped_search"``, ``"llm_transform"``).
         source_section: Protocol section number(s) searched.
     """
 
@@ -273,36 +273,126 @@ def _extract_criteria_section(
 # -----------------------------------------------------------------------
 
 
-def _extract_text_long(
-    text: str, query: AppendixBQuery
-) -> tuple[str, float, str]:
-    """Passthrough with keyword-overlap confidence scoring."""
-    if not text.strip():
-        return "", 0.0, "passthrough"
+# Maximum characters for text_long excerpt output (PTCV-109).
+_TEXT_LONG_MAX_CHARS = 2000
 
-    # Keyword overlap: words from query_text found in content
-    query_words = set(
+# Minimum paragraph length to consider for relevance scoring.
+_MIN_PARAGRAPH_LEN = 40
+
+_STOP_WORDS = frozenset({
+    "the", "and", "for", "are", "what", "that", "this",
+    "with", "from", "have", "has", "will", "been", "should",
+    "there", "their", "which", "each",
+})
+
+
+def _query_keywords(query: AppendixBQuery) -> set[str]:
+    """Extract meaningful keywords from a query's text."""
+    words = set(
         w.lower()
         for w in re.findall(r"[a-z]{3,}", query.query_text.lower())
     )
-    # Remove common stop words
-    stop = {
-        "the", "and", "for", "are", "what", "that", "this",
-        "with", "from", "have", "has", "will", "been", "should",
-        "there", "their", "which", "each",
-    }
-    query_words -= stop
+    return words - _STOP_WORDS
 
-    if not query_words:
-        return text.strip(), 0.60, "passthrough"
 
-    text_lower = text.lower()
-    hits = sum(1 for w in query_words if w in text_lower)
-    overlap = hits / len(query_words)
+def _score_paragraph(
+    paragraph: str, keywords: set[str]
+) -> float:
+    """Score a paragraph by keyword overlap with query.
 
-    # Map overlap to confidence: [0.0, 1.0] → [0.45, 0.85]
+    Returns a value in ``[0.0, 1.0]``.
+    """
+    if not keywords:
+        return 0.5
+    para_lower = paragraph.lower()
+    hits = sum(1 for w in keywords if w in para_lower)
+    return hits / len(keywords)
+
+
+def _select_relevant_paragraphs(
+    text: str,
+    query: AppendixBQuery,
+    max_chars: int = _TEXT_LONG_MAX_CHARS,
+) -> tuple[str, float]:
+    """Select the most query-relevant paragraphs from *text*.
+
+    Splits *text* on blank lines, scores each paragraph by
+    keyword overlap with the query, and returns the top-scoring
+    paragraphs up to *max_chars*.
+
+    Returns:
+        ``(excerpt, overlap_score)`` where *overlap_score* is the
+        keyword overlap of the top-scoring paragraph.
+    """
+    keywords = _query_keywords(query)
+
+    # Split on blank lines (two or more newlines)
+    paragraphs = re.split(r"\n\s*\n", text.strip())
+    # Filter out tiny fragments (headers, page numbers, etc.)
+    paragraphs = [
+        p.strip() for p in paragraphs
+        if len(p.strip()) >= _MIN_PARAGRAPH_LEN
+    ]
+
+    if not paragraphs:
+        # Fallback: return truncated text
+        return text[:max_chars].strip(), 0.0
+
+    # Score and rank
+    scored = [
+        (_score_paragraph(p, keywords), i, p)
+        for i, p in enumerate(paragraphs)
+    ]
+    scored.sort(key=lambda t: (-t[0], t[1]))
+
+    best_overlap = scored[0][0] if scored else 0.0
+
+    # Collect top paragraphs in original document order
+    selected_indices: list[int] = []
+    char_count = 0
+    for _score, idx, para in scored:
+        if char_count + len(para) > max_chars and selected_indices:
+            break
+        selected_indices.append(idx)
+        char_count += len(para)
+
+    # Restore original order for readability
+    selected_indices.sort()
+    excerpt = "\n\n".join(paragraphs[i] for i in selected_indices)
+
+    return excerpt, best_overlap
+
+
+def _extract_text_long(
+    text: str, query: AppendixBQuery
+) -> tuple[str, float, str]:
+    """Extract query-relevant paragraphs with confidence scoring.
+
+    Instead of returning the full scoped text (passthrough), selects
+    the most relevant paragraphs based on keyword overlap with the
+    query (PTCV-109).
+    """
+    if not text.strip():
+        return "", 0.0, "passthrough"
+
+    # Short content: return as-is (no reduction needed)
+    if len(text) <= _TEXT_LONG_MAX_CHARS:
+        keywords = _query_keywords(query)
+        if not keywords:
+            return text.strip(), 0.60, "passthrough"
+        text_lower = text.lower()
+        hits = sum(1 for w in keywords if w in text_lower)
+        overlap = hits / len(keywords)
+        confidence = 0.45 + (overlap * 0.40)
+        return text.strip(), round(confidence, 4), "passthrough"
+
+    # Long content: select relevant paragraphs (PTCV-109)
+    excerpt, overlap = _select_relevant_paragraphs(text, query)
+    if not excerpt:
+        return "", 0.0, "passthrough"
+
     confidence = 0.45 + (overlap * 0.40)
-    return text.strip(), round(confidence, 4), "passthrough"
+    return excerpt, round(confidence, 4), "relevance_excerpt"
 
 
 def _extract_text_short(
@@ -617,7 +707,15 @@ class QueryExtractor:
 
     def _init_llm(self, api_key: str) -> None:
         """Lazy-import Anthropic SDK and create client."""
-        import anthropic
+        try:
+            import anthropic
+        except ImportError:
+            logger.warning(
+                "QueryExtractor: 'anthropic' package not installed "
+                "— falling back to verbatim-only extraction. "
+                "Install with: pip install anthropic"
+            )
+            return
 
         self._client = anthropic.Anthropic(api_key=api_key)
         self._use_llm = True
@@ -668,9 +766,18 @@ class QueryExtractor:
             ``(transformed_text, llm_confidence)`` on success,
             *None* on any error (caller falls back to verbatim).
         """
+        # Select query-relevant portion if source is large
+        # (PTCV-109: avoid blind prefix truncation).
+        if len(source_content) > 6000:
+            source_for_llm, _ = _select_relevant_paragraphs(
+                source_content, query, max_chars=6000
+            )
+        else:
+            source_for_llm = source_content
+
         prompt = self._TRANSFORM_PROMPT.format(
             query_text=query.query_text,
-            source=source_content[:6000],
+            source=source_for_llm,
         )
         try:
             resp = self._client.messages.create(

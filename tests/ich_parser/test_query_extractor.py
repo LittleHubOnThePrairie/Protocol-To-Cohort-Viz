@@ -11,6 +11,7 @@ from ptcv.ich_parser.query_extractor import (
     ExtractionResult,
     QueryExtraction,
     QueryExtractor,
+    _TEXT_LONG_MAX_CHARS,
     _extract_criteria_section,
     _extract_date,
     _extract_enum,
@@ -21,6 +22,9 @@ from ptcv.ich_parser.query_extractor import (
     _extract_table,
     _extract_text_long,
     _extract_text_short,
+    _query_keywords,
+    _score_paragraph,
+    _select_relevant_paragraphs,
 )
 from ptcv.ich_parser.query_schema import AppendixBQuery
 from ptcv.ich_parser.section_matcher import (
@@ -338,9 +342,10 @@ class TestListExtraction:
 
 
 class TestTextLongExtraction:
-    """Long text passthrough tests."""
+    """Long text extraction tests (PTCV-109: relevance scoring)."""
 
-    def test_passthrough_with_keywords(self) -> None:
+    def test_short_content_passthrough(self) -> None:
+        """Content under _TEXT_LONG_MAX_CHARS is returned as-is."""
         text = (
             "The primary objective of this trial is to evaluate "
             "the efficacy and safety of Drug X in patients with "
@@ -360,6 +365,107 @@ class TestTextLongExtraction:
         content, conf, method = _extract_text_long("", q)
         assert content == ""
         assert conf == 0.0
+
+    def test_long_content_excerpts_relevant_paragraphs(self) -> None:
+        """Content exceeding limit triggers relevance excerpt."""
+        relevant = (
+            "Drug X is a selective tyrosine kinase inhibitor "
+            "that targets the EGFR pathway. The investigational "
+            "product has shown promising preclinical results."
+        )
+        filler = (
+            "This section describes the administrative "
+            "procedures for site monitoring and data "
+            "collection across all participating centers."
+        )
+        # Build text that exceeds _TEXT_LONG_MAX_CHARS
+        paragraphs = [filler] * 20 + [relevant] + [filler] * 20
+        text = "\n\n".join(paragraphs)
+        assert len(text) > _TEXT_LONG_MAX_CHARS
+
+        q = _make_query(
+            query_text=(
+                "What is the investigational product description?"
+            ),
+            expected_type="text_long",
+        )
+        content, conf, method = _extract_text_long(text, q)
+        assert method == "relevance_excerpt"
+        assert len(content) <= _TEXT_LONG_MAX_CHARS + 200  # some margin
+        assert "tyrosine kinase inhibitor" in content
+
+    def test_long_content_does_not_repeat_full_text(self) -> None:
+        """Output must be shorter than input for large content."""
+        para = "Background information about the study. " * 30
+        text = "\n\n".join([para] * 10)
+        assert len(text) > _TEXT_LONG_MAX_CHARS
+
+        q = _make_query(
+            query_text="What is the background?",
+            expected_type="text_long",
+        )
+        content, conf, method = _extract_text_long(text, q)
+        assert len(content) < len(text)
+
+
+class TestParagraphRelevanceScoring:
+    """Tests for _query_keywords, _score_paragraph,
+    _select_relevant_paragraphs (PTCV-109)."""
+
+    def test_query_keywords_strips_stopwords(self) -> None:
+        q = _make_query(query_text="What are the inclusion criteria?")
+        kw = _query_keywords(q)
+        assert "inclusion" in kw
+        assert "criteria" in kw
+        assert "what" not in kw
+        assert "the" not in kw
+
+    def test_score_paragraph_full_match(self) -> None:
+        kw = {"inclusion", "criteria"}
+        score = _score_paragraph(
+            "The inclusion criteria are defined below.", kw
+        )
+        assert score == 1.0
+
+    def test_score_paragraph_partial_match(self) -> None:
+        kw = {"inclusion", "criteria", "eligibility"}
+        score = _score_paragraph(
+            "Inclusion criteria listed here.", kw
+        )
+        assert 0.5 <= score < 1.0
+
+    def test_score_paragraph_no_match(self) -> None:
+        kw = {"inclusion", "criteria"}
+        score = _score_paragraph("Unrelated content here.", kw)
+        assert score == 0.0
+
+    def test_select_relevant_preserves_order(self) -> None:
+        """Selected paragraphs maintain original document order."""
+        q = _make_query(query_text="investigational product")
+        text = (
+            "Section 1: Administrative details and logistics.\n\n"
+            "Section 2: The investigational product is Drug X.\n\n"
+            "Section 3: More administrative procedures follow.\n\n"
+            "Section 4: Product formulation and dosing details."
+        )
+        excerpt, _ = _select_relevant_paragraphs(
+            text, q, max_chars=500
+        )
+        # "investigational product" paragraph should come before
+        # "Product formulation" paragraph
+        pos_ip = excerpt.find("investigational product")
+        pos_pf = excerpt.find("Product formulation")
+        if pos_ip >= 0 and pos_pf >= 0:
+            assert pos_ip < pos_pf
+
+    def test_select_relevant_respects_max_chars(self) -> None:
+        q = _make_query(query_text="safety endpoints")
+        paras = [f"Paragraph {i} about safety endpoints." for i in range(50)]
+        text = "\n\n".join(paras)
+        excerpt, _ = _select_relevant_paragraphs(
+            text, q, max_chars=300
+        )
+        assert len(excerpt) <= 400  # some margin for joining
 
 
 # -----------------------------------------------------------------------

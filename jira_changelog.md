@@ -5,6 +5,23 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-06T17:36:52Z] PTCV-109: Query extraction produces verbatim full-protocol dump instead of section-specific content for B.2 sub-sections
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Query extraction produces verbatim full-protocol dump instead of section-specific content for B.2 sub-sections
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-05T21:06:01Z] PTCV-103: Streamlit UI: Expose LLM transformation toggle and metrics in Query Pipeline tab
 
 **Status Change:** In Progress -> Done
