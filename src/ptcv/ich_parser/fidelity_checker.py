@@ -141,8 +141,15 @@ class FidelityChecker:
     def _get_client(self) -> Any:
         """Lazy-initialize Anthropic client."""
         if self._claude is None:
-            import anthropic
-
+            try:
+                import anthropic
+            except ImportError:
+                logger.warning(
+                    "FidelityChecker: 'anthropic' package not installed "
+                    "— LLM fidelity checking unavailable. "
+                    "Install with: pip install anthropic"
+                )
+                raise
             self._claude = anthropic.Anthropic(
                 api_key=os.environ["ANTHROPIC_API_KEY"],
             )

@@ -35,14 +35,85 @@ if _SRC_DIR not in sys.path:
 import pyarrow.parquet as pq
 import streamlit as st
 
+# ---------------------------------------------------------------------------
+# Auto-load secrets from .secrets file (PTCV-104)
+# ---------------------------------------------------------------------------
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/ptcv/ui -> PTCV root
+
+
+def _load_secrets() -> list[str]:
+    """Load secrets from .secrets file if env vars are not already set.
+
+    Reads KEY=VALUE pairs from the project-root .secrets file and sets them
+    as environment variables when they are not already present.
+
+    Returns:
+        List of warning messages for missing required secrets.
+    """
+    secrets_file = _PROJECT_ROOT / ".secrets"
+    warnings: list[str] = []
+
+    if not secrets_file.exists():
+        # Check common required keys
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            warnings.append(
+                "ANTHROPIC_API_KEY is not set and no .secrets file found at "
+                f"`{secrets_file}`. Copy `.secrets.example` to `.secrets` "
+                "and add your credentials, or run `source ./load-secrets.sh`."
+            )
+        return warnings
+
+    loaded = 0
+    for line in secrets_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        # Only set if not already in environment (env takes precedence)
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded += 1
+
+    if loaded:
+        logging.getLogger(__name__).info(
+            "PTCV-104: Loaded %d secret(s) from %s", loaded, secrets_file,
+        )
+
+    # Validate required secrets
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        warnings.append(
+            "ANTHROPIC_API_KEY is not set. LLM features (retemplating, "
+            "fidelity checking) will be unavailable. Add it to `.secrets` "
+            "or set the environment variable."
+        )
+
+    return warnings
+
+
+# Run once at import time so secrets are available before any module
+# tries to read os.environ["ANTHROPIC_API_KEY"].
+_SECRET_WARNINGS = _load_secrets()
+
 from ptcv.extraction import ExtractionService, parquet_to_tables, parquet_to_text_blocks
-from ptcv.ich_parser import IchParser, RAGClassifier
+from ptcv.ich_parser import IchParser
 from ptcv.ich_parser.coverage_reviewer import CoverageReviewer
 from ptcv.ich_parser.fidelity_checker import FidelityChecker
 from ptcv.ich_parser.llm_retemplater import LlmRetemplater
 from ptcv.ich_parser.parquet_writer import parquet_to_sections
 from ptcv.sdtm import SdtmService
 from ptcv.soa_extractor import SoaExtractor
+from ptcv.soa_extractor.query_bridge import (
+    assembled_to_sections,
+    get_assembled_protocol,
+    has_query_pipeline_results,
+)
 from ptcv.soa_extractor.writer import UsdmParquetWriter
 from ptcv.storage import FilesystemAdapter
 from ptcv.ui.components.file_browser import render_file_browser
@@ -96,12 +167,6 @@ _MODEL_TIERS: dict[str, dict[str, str | float]] = {
         "method": "llm",
         "cost_per_page_low": 0.015,
         "cost_per_page_high": 0.020,
-    },
-    "Balanced (Sonnet)": {
-        "model_id": "claude-sonnet-4-6",
-        "method": "rag",
-        "cost_per_page_low": 0.0008,
-        "cost_per_page_high": 0.002,
     },
 }
 _DEFAULT_TIER = "Best Quality (Opus)"
@@ -291,29 +356,6 @@ def _run_parse(
         output_tokens = retemplate_result.output_tokens
         retemplated_artifact_key = retemplate_result.retemplated_artifact_key
         retemplating_method = "llm"
-    elif _has_anthropic_key() and tier_cfg["method"] == "rag":
-        # Sonnet tier: RAGClassifier (Cohere + Sonnet) via IchParser
-        protocol_text = "\n".join(str(d["text"]) for d in text_block_dicts)
-        classifier = RAGClassifier(claude_model=str(tier_cfg["model_id"]))
-        parser = IchParser(gateway=gateway, classifier=classifier)
-        parse_result = parser.parse(
-            text=protocol_text,
-            registry_id=registry_id,
-            source_run_id=extraction_result.run_id,
-            source_sha256=extraction_result.text_artifact_sha256,
-        )
-        format_verdict = parse_result.format_verdict
-        format_confidence = parse_result.format_confidence
-        section_count = parse_result.section_count
-        review_count = parse_result.review_count
-        missing_required = parse_result.missing_required_sections
-        artifact_key = parse_result.artifact_key
-        retemplating_run_id = parse_result.run_id
-        artifact_sha256 = parse_result.artifact_sha256
-        input_tokens = 0
-        output_tokens = 0
-        retemplated_artifact_key = ""
-        retemplating_method = "rag"
     else:
         # No API key: deterministic IchParser fallback
         protocol_text = "\n".join(str(d["text"]) for d in text_block_dicts)
@@ -436,6 +478,161 @@ def _run_soa_extraction(
         "instances": instances,
         "registry_id": cached["registry_id"],
         "format_verdict": cached["format_verdict"],
+        "soa_artifact_keys": soa_result.artifact_keys,
+        "soa_run_id": soa_result.run_id,
+        "timepoint_count": soa_result.timepoint_count,
+        "activity_count": soa_result.activity_count,
+    }
+
+
+def _run_soa_from_query_pipeline(
+    cached: dict,
+    pdf_bytes: bytes,
+    gateway: FilesystemAdapter,
+    assembled: "AssembledProtocol",
+) -> dict:
+    """Run SoA extraction using query pipeline assembled content (PTCV-112).
+
+    Converts assembled Appendix B sections to IchSection objects and
+    passes them as a supplemental input to the document-first SoA
+    pipeline. The sections from the query pipeline are used as an
+    additional fallback — pre-extracted tables and PDF discovery still
+    take priority per the document-first strategy (PTCV-60).
+
+    Args:
+        cached: Extraction result dict from _run_parse().
+        pdf_bytes: Raw PDF file bytes for table discovery.
+        gateway: Initialised FilesystemAdapter.
+        assembled: AssembledProtocol from query pipeline.
+
+    Returns:
+        Dict with keys: timepoints, activities, instances, etc.
+    """
+    sections = assembled_to_sections(
+        assembled,
+        registry_id=cached["registry_id"],
+        source_sha256=cached["text_artifact_sha256"],
+    )
+
+    extractor = SoaExtractor(gateway=gateway)
+    soa_result = extractor.extract(
+        registry_id=cached["registry_id"],
+        source_run_id=cached["extraction_run_id"],
+        source_sha256=cached["text_artifact_sha256"],
+        pdf_bytes=pdf_bytes,
+        text_blocks=cached["text_block_dicts"],
+        page_count=cached.get("page_count", 0),
+        extracted_tables=cached.get("extracted_tables"),
+        sections=sections if sections else None,
+    )
+
+    writer = UsdmParquetWriter()
+    timepoints = []
+    activities = []
+    instances = []
+
+    if "timepoints" in soa_result.artifact_keys:
+        tp_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["timepoints"],
+        )
+        timepoints = writer.parquet_to_timepoints(tp_bytes)
+    if "activities" in soa_result.artifact_keys:
+        act_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["activities"],
+        )
+        activities = writer.parquet_to_activities(act_bytes)
+    if "scheduled_instances" in soa_result.artifact_keys:
+        inst_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["scheduled_instances"],
+        )
+        instances = writer.parquet_to_instances(inst_bytes)
+
+    return {
+        "timepoints": timepoints,
+        "activities": activities,
+        "instances": instances,
+        "registry_id": cached["registry_id"],
+        "format_verdict": cached["format_verdict"],
+        "soa_artifact_keys": soa_result.artifact_keys,
+        "soa_run_id": soa_result.run_id,
+        "timepoint_count": soa_result.timepoint_count,
+        "activity_count": soa_result.activity_count,
+    }
+
+
+def _run_soa_query_pipeline_only(
+    assembled: "AssembledProtocol",
+    registry_id: str,
+    pdf_bytes: bytes,
+    gateway: FilesystemAdapter,
+) -> dict:
+    """Run SoA extraction using only query pipeline content (PTCV-112).
+
+    Used when the Process tab has NOT been run but the Query Pipeline
+    tab has results. Converts assembled sections to IchSection objects
+    and uses them as the sole input — no pre-extracted tables or PDF
+    table discovery.
+
+    Args:
+        assembled: AssembledProtocol from query pipeline.
+        registry_id: Trial identifier from filename.
+        pdf_bytes: Raw PDF bytes (for text_blocks extraction).
+        gateway: Initialised FilesystemAdapter.
+
+    Returns:
+        Dict with keys: timepoints, activities, instances, etc.
+    """
+    sections = assembled_to_sections(
+        assembled,
+        registry_id=registry_id,
+    )
+
+    if not sections:
+        return {
+            "timepoints": [],
+            "activities": [],
+            "instances": [],
+            "registry_id": registry_id,
+            "format_verdict": "query_pipeline",
+            "soa_artifact_keys": {},
+            "soa_run_id": "",
+            "timepoint_count": 0,
+            "activity_count": 0,
+        }
+
+    extractor = SoaExtractor(gateway=gateway)
+    soa_result = extractor.extract(
+        registry_id=registry_id,
+        sections=sections,
+    )
+
+    writer = UsdmParquetWriter()
+    timepoints = []
+    activities = []
+    instances = []
+
+    if "timepoints" in soa_result.artifact_keys:
+        tp_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["timepoints"],
+        )
+        timepoints = writer.parquet_to_timepoints(tp_bytes)
+    if "activities" in soa_result.artifact_keys:
+        act_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["activities"],
+        )
+        activities = writer.parquet_to_activities(act_bytes)
+    if "scheduled_instances" in soa_result.artifact_keys:
+        inst_bytes = gateway.get_artifact(
+            soa_result.artifact_keys["scheduled_instances"],
+        )
+        instances = writer.parquet_to_instances(inst_bytes)
+
+    return {
+        "timepoints": timepoints,
+        "activities": activities,
+        "instances": instances,
+        "registry_id": registry_id,
+        "format_verdict": "query_pipeline",
         "soa_artifact_keys": soa_result.artifact_keys,
         "soa_run_id": soa_result.run_id,
         "timepoint_count": soa_result.timepoint_count,
@@ -668,11 +865,6 @@ def _display_verdict(result: dict) -> None:
             f"{result['input_tokens']:,} in / "
             f"{result['output_tokens']:,} out tokens"
         )
-    elif method == "rag":
-        st.caption(
-            f"RAG retemplating [{tier}]: "
-            "Cohere embeddings + Claude Sonnet"
-        )
     elif method == "ich_parser":
         st.caption(
             "Using IchParser fallback "
@@ -828,6 +1020,10 @@ def main() -> None:
         layout="wide",
     )
     st.title("Protocol-To-Cohort-Viz")
+
+    # Show secrets warnings (PTCV-104)
+    for _warn in _SECRET_WARNINGS:
+        st.warning(_warn)
 
     # Sidebar: file browser only
     source, file_path = render_file_browser(_PROTOCOLS_DIR)
@@ -1051,11 +1247,19 @@ def main() -> None:
                         )
 
     # === SoA & SDTM tab ===
+    # PTCV-112: SoA tab is accessible when Process tab OR Query
+    # Pipeline has run. Query pipeline results provide assembled
+    # Appendix B sections as input to the SoA parser.
+    _qp_assembled = get_assembled_protocol(
+        st.session_state, file_sha,
+    )
+    _soa_available = bool(cached) or _qp_assembled is not None
+
     with tab_soa:
-        if not cached:
+        if not _soa_available:
             st.info(
-                "Process the protocol first to enable "
-                "SoA extraction and SDTM generation."
+                "Run the Process tab or Query Pipeline first "
+                "to enable SoA extraction and SDTM generation."
             )
         else:
             # SoA extraction
@@ -1073,6 +1277,27 @@ def main() -> None:
                     format_verdict=soa_cached["format_verdict"],
                 )
             else:
+                # PTCV-112: offer query pipeline integration
+                use_qp = False
+                if _qp_assembled is not None and cached:
+                    use_qp = st.checkbox(
+                        "Use Query Pipeline output",
+                        value=True,
+                        help=(
+                            "Feed assembled Appendix B content "
+                            "(B.4/B.7) from the Query Pipeline "
+                            "as additional input to SoA extraction."
+                        ),
+                        key="chk_soa_use_qp",
+                    )
+                elif _qp_assembled is not None and not cached:
+                    # Query pipeline only — always use it
+                    use_qp = True
+                    st.caption(
+                        "Using Query Pipeline assembled content "
+                        "for SoA extraction (Process tab not run)."
+                    )
+
                 if st.button(
                     "Run SoA Extraction",
                     type="primary",
@@ -1084,14 +1309,35 @@ def main() -> None:
                         expanded=True,
                     ) as status:
                         t0 = time.monotonic()
-                        st.write(
-                            "Discovering tables and "
-                            "timepoints...",
-                        )
                         try:
-                            soa_result = _run_soa_extraction(
-                                cached, pdf_bytes, gateway,
-                            )
+                            if use_qp and _qp_assembled and cached:
+                                st.write(
+                                    "Discovering tables with "
+                                    "query pipeline content...",
+                                )
+                                soa_result = _run_soa_from_query_pipeline(
+                                    cached, pdf_bytes, gateway,
+                                    _qp_assembled,
+                                )
+                            elif use_qp and _qp_assembled:
+                                st.write(
+                                    "Extracting from query "
+                                    "pipeline content...",
+                                )
+                                soa_result = _run_soa_query_pipeline_only(
+                                    _qp_assembled,
+                                    registry_id,
+                                    pdf_bytes,
+                                    gateway,
+                                )
+                            else:
+                                st.write(
+                                    "Discovering tables and "
+                                    "timepoints...",
+                                )
+                                soa_result = _run_soa_extraction(
+                                    cached, pdf_bytes, gateway,
+                                )
                             elapsed = time.monotonic() - t0
                             st.session_state["soa_cache"][
                                 file_sha
@@ -1135,7 +1381,7 @@ def main() -> None:
                     registry_id=sdtm_cached["registry_id"],
                     format_verdict=sdtm_cached["format_verdict"],
                 )
-            elif soa_cached:
+            elif soa_cached and cached:
                 if st.button(
                     "Generate SDTM",
                     type="primary",
@@ -1182,6 +1428,11 @@ def main() -> None:
                                 traceback.format_exc(),
                                 language="text",
                             )
+            elif soa_cached and not cached:
+                st.caption(
+                    "SDTM generation requires the Process tab. "
+                    "Run it first, then re-run SoA Extraction."
+                )
             else:
                 st.caption(
                     "Run SoA Extraction first to enable "

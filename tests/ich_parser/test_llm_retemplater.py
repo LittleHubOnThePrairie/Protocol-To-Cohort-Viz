@@ -701,3 +701,159 @@ class TestContentTextBackwardCompat:
         result = reviewer.review(blocks, sections)
         # Full content_text matches the block, so coverage should be high
         assert result.coverage_score > 0.9
+
+
+# ---------------------------------------------------------------------------
+# PTCV-106: TOC page detection and filtering
+# ---------------------------------------------------------------------------
+
+
+class TestTocPageDetection:
+    """Tests for _detect_toc_pages and TOC filtering in assembly."""
+
+    def test_detects_toc_page(self):
+        """Pages with TABLE OF CONTENTS header are detected."""
+        blocks = [
+            {"page_number": 1, "text": "Protocol Title Page"},
+            {
+                "page_number": 2,
+                "text": (
+                    "TABLE OF CONTENTS\n"
+                    "1. Introduction .............. 5\n"
+                    "2. Study Objectives .......... 8\n"
+                    "3. Study Design .............. 12\n"
+                ),
+            },
+            {"page_number": 3, "text": "Body content begins here."},
+        ]
+        toc = LlmRetemplater._detect_toc_pages(blocks)
+        assert 2 in toc
+        assert 1 not in toc
+        assert 3 not in toc
+
+    def test_detects_continuation_pages(self):
+        """Multi-page TOC: continuation pages without header."""
+        blocks = [
+            {
+                "page_number": 2,
+                "text": (
+                    "TABLE OF CONTENTS\n"
+                    "1. Introduction .............. 5\n"
+                    "2. Study Objectives .......... 8\n"
+                    "3. Study Design .............. 12\n"
+                ),
+            },
+            {
+                "page_number": 3,
+                "text": (
+                    "4. Population ................ 15\n"
+                    "5. Endpoints ................. 20\n"
+                    "6. Statistical Methods ....... 25\n"
+                ),
+            },
+        ]
+        toc = LlmRetemplater._detect_toc_pages(blocks)
+        assert 2 in toc
+        assert 3 in toc
+
+    def test_no_toc_returns_empty(self):
+        """Protocols without TOC produce empty set."""
+        blocks = [
+            {"page_number": 1, "text": "Body content only."},
+            {"page_number": 2, "text": "More body content."},
+        ]
+        toc = LlmRetemplater._detect_toc_pages(blocks)
+        assert len(toc) == 0
+
+    def test_chunk_by_pages_excludes_toc(self, retemplater):
+        """_chunk_by_pages skips blocks on TOC pages."""
+        blocks = [
+            {"page_number": 1, "text": "Title page"},
+            {"page_number": 2, "text": "TOC entry text"},
+            {"page_number": 3, "text": "Body section text"},
+        ]
+        chunks = retemplater._chunk_by_pages(blocks, toc_pages={2})
+        joined = " ".join(ct for ct, _ in chunks)
+        assert "Body section text" in joined
+        assert "TOC entry text" not in joined
+
+    def test_assemble_sections_excludes_toc(self):
+        """_assemble_sections skips text blocks from TOC pages."""
+        assignments = [
+            _PageAssignment(
+                section_code="B.1",
+                confidence=0.9,
+                key_concepts=["title"],
+                pages=[1, 2, 3],
+            ),
+        ]
+        blocks = [
+            {"page_number": 1, "text": "Title content"},
+            {"page_number": 2, "text": "TOC index stuff"},
+            {"page_number": 3, "text": "Body content here"},
+        ]
+        sections = LlmRetemplater._assemble_sections(
+            assignments=assignments,
+            text_blocks=blocks,
+            run_id="test-run",
+            source_run_id="src-run",
+            source_sha256="a" * 64,
+            registry_id="NCT0001",
+            toc_pages={2},
+        )
+        assert len(sections) == 1
+        assert "Title content" in sections[0].content_text
+        assert "Body content here" in sections[0].content_text
+        assert "TOC index stuff" not in sections[0].content_text
+
+    def test_end_to_end_toc_excluded(self, retemplater):
+        """Full retemplate() pipeline excludes TOC pages."""
+        toc_text = (
+            "TABLE OF CONTENTS\n"
+            "1. Introduction .............. 5\n"
+            "2. Study Objectives .......... 8\n"
+            "3. Study Design .............. 12\n"
+        )
+        blocks = [
+            {"page_number": 1, "text": toc_text},
+            {
+                "page_number": 2,
+                "text": "Drug X is a novel kinase inhibitor "
+                        "for advanced solid tumours.",
+            },
+        ]
+        response = [
+            {
+                "section_code": "B.1",
+                "confidence": 0.90,
+                "key_concepts": ["drug"],
+                "pages": [2],
+            },
+        ]
+        result = _run_with_mock(
+            retemplater,
+            response,
+            text_blocks=blocks,
+            registry_id="NCT0001",
+            source_sha256="a" * 64,
+        )
+        assert result.section_count >= 1
+        md = result.retemplated_artifact_key
+        # The TOC text should not appear in any section content
+        for sec in LlmRetemplater._assemble_sections(
+            assignments=[
+                _PageAssignment(
+                    section_code="B.1",
+                    confidence=0.9,
+                    key_concepts=["drug"],
+                    pages=[2],
+                ),
+            ],
+            text_blocks=blocks,
+            run_id="test",
+            source_run_id="src",
+            source_sha256="a" * 64,
+            registry_id="NCT0001",
+            toc_pages={1},
+        ):
+            assert "TABLE OF CONTENTS" not in sec.content_text

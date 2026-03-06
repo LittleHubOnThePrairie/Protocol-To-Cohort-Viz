@@ -365,13 +365,14 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
     """
     import streamlit as st
 
-    # --- Options (PTCV-103) ---
+    # --- Options (PTCV-103, PTCV-111) ---
+    _has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     transform_on = st.checkbox(
         "Enable LLM Transformation",
-        value=False,
+        value=_has_api_key,
         help=(
-            "Reframe high-confidence extractions using Claude "
-            "Sonnet to directly address each Appendix B query. "
+            "Reframe scoped extractions using Claude Sonnet to "
+            "directly address each Appendix B query. "
             "Requires ANTHROPIC_API_KEY."
         ),
         key="chk_enable_transform",
@@ -413,6 +414,9 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                     result = run_query_pipeline(
                         str(file_path),
                         enable_transformation=transform_on,
+                        anthropic_api_key=os.environ.get(
+                            "ANTHROPIC_API_KEY"
+                        ),
                     )
                     elapsed = time.monotonic() - t0
                     st.session_state["query_cache"][cache_key] = result

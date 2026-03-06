@@ -11,9 +11,13 @@ pdfplumber>=0.11.0
 camelot-py[base]>=0.11.0
 tabula-py>=2.9.0
 pandas>=2.0.0
+numpy>=1.24.0
 
 # XML parsing (PTCV-19 CTR-XML)
 lxml>=5.0.0
+
+# YAML schema loading (PTCV-105)
+PyYAML>=6.0
 
 # HTTP (PTCV-18 protocol download)
 requests>=2.31.0

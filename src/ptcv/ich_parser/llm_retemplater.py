@@ -46,6 +46,7 @@ from .schema_loader import (
     get_section_order,
     get_stage_prompt,
 )
+from .toc_extractor import _is_toc_page, _count_toc_lines
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +163,15 @@ class LlmRetemplater:
     def _get_client(self) -> Any:
         """Lazy-initialize Anthropic client."""
         if self._claude is None:
-            import anthropic
-
+            try:
+                import anthropic
+            except ImportError:
+                logger.warning(
+                    "LLMRetemplater: 'anthropic' package not installed "
+                    "— LLM retemplating unavailable. "
+                    "Install with: pip install anthropic"
+                )
+                raise
             self._claude = anthropic.Anthropic(
                 api_key=os.environ["ANTHROPIC_API_KEY"],
             )
@@ -211,8 +219,11 @@ class LlmRetemplater:
         run_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
 
+        # 0. Detect and exclude TOC pages (PTCV-106)
+        toc_pages = self._detect_toc_pages(text_blocks)
+
         # 1. Chunk text blocks by page ranges
-        chunks = self._chunk_by_pages(text_blocks)
+        chunks = self._chunk_by_pages(text_blocks, toc_pages=toc_pages)
 
         # 2. PASS 1: LLM page-level classification
         all_assignments: list[_PageAssignment] = []
@@ -239,6 +250,7 @@ class LlmRetemplater:
             source_run_id=source_run_id,
             source_sha256=source_sha256,
             registry_id=registry_id,
+            toc_pages=toc_pages,
         )
 
         # 4. Enrich B.4 with SoA summary if available
@@ -343,8 +355,55 @@ class LlmRetemplater:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _detect_toc_pages(text_blocks: list[dict]) -> set[int]:
+        """Detect TOC page numbers from text blocks (PTCV-106).
+
+        Aggregates text per page, then uses toc_extractor heuristics
+        to identify TOC pages.  Also checks adjacent pages for
+        multi-page TOCs (continuation pages without a header).
+
+        Returns:
+            Set of 1-based page numbers that are TOC pages.
+        """
+        page_texts: dict[int, list[str]] = defaultdict(list)
+        for block in text_blocks:
+            page = block.get("page_number", 0)
+            text = block.get("text", "")
+            if text.strip():
+                page_texts[page].append(text)
+
+        toc_pages: set[int] = set()
+        for page_num in sorted(page_texts.keys()):
+            if page_num > 15:
+                break
+            full = "\n".join(page_texts[page_num])
+            if _is_toc_page(full) and _count_toc_lines(full) >= 3:
+                toc_pages.add(page_num)
+
+        # Check continuation pages adjacent to detected TOC
+        if toc_pages:
+            last_toc = max(toc_pages)
+            for check in range(last_toc + 1, last_toc + 4):
+                if check not in page_texts:
+                    break
+                full = "\n".join(page_texts[check])
+                if _count_toc_lines(full) >= 3:
+                    toc_pages.add(check)
+                else:
+                    break
+
+        if toc_pages:
+            logger.info(
+                "PTCV-106: Detected TOC pages %s — excluding "
+                "from retemplating",
+                sorted(toc_pages),
+            )
+        return toc_pages
+
     def _chunk_by_pages(
         self, text_blocks: list[dict],
+        toc_pages: set[int] | None = None,
     ) -> list[tuple[str, tuple[int, int]]]:
         """Split text blocks into chunks fitting the context window.
 
@@ -369,11 +428,15 @@ class LlmRetemplater:
         )
         current_page = start_page
 
+        _toc = toc_pages or set()
+
         for block in sorted_blocks:
             page = block.get("page_number", 0)
             text = block.get("text", "")
             if not text.strip():
                 continue
+            if page in _toc:
+                continue  # PTCV-106: skip TOC pages
 
             if (
                 current_chars + len(text) > _MAX_CHUNK_CHARS
@@ -599,6 +662,7 @@ class LlmRetemplater:
         source_run_id: str,
         source_sha256: str,
         registry_id: str,
+        toc_pages: set[int] | None = None,
     ) -> list[IchSection]:
         """Deterministic full-text assembly from page assignments (Pass 2).
 
@@ -612,6 +676,7 @@ class LlmRetemplater:
             source_run_id: Extraction run_id.
             source_sha256: SHA-256 of extraction artifact.
             registry_id: Trial identifier.
+            toc_pages: Set of page numbers to exclude (PTCV-106).
 
         Returns:
             List of IchSection with content_text populated.
@@ -658,11 +723,15 @@ class LlmRetemplater:
         )
         section_pages: dict[str, list[int]] = defaultdict(list)
 
+        _toc = toc_pages or set()
+
         for block in sorted_blocks:
             text = block.get("text", "")
             if not text.strip():
                 continue
             page = block.get("page_number", 0)
+            if page in _toc:
+                continue  # PTCV-106: skip TOC pages
             code, conf = page_map.get(page, ("B.1", 0.30))
             section_blocks[code].append(block)
             section_confidences[code].append(conf)
