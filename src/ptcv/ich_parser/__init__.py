@@ -6,7 +6,7 @@ Public API:
     IchSection           — Data model for one classified section
     SectionClassifier    — Abstract base for classification backends
     RuleBasedClassifier  — Regex/keyword classifier (no external deps)
-    RAGClassifier        — Cohere embeddings + Claude Sonnet classifier
+    RAGClassifier        — DEPRECATED (PTCV-102), delegates to RuleBasedClassifier
     ReviewQueue          — SQLite append-only human review queue
     FormatDetector       — Pre-parser format detection gate (PTCV-31)
     ProtocolFormat       — Enum: ICH_E6R3, ICH_M11, CTD, FDA_IND, UNKNOWN

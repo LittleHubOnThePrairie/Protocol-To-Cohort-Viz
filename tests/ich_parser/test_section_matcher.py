@@ -1,13 +1,10 @@
 """Tests for the semantic section matcher (PTCV-90).
 
 Covers data models, deterministic keyword fallback, synonym boost,
-the ``match()`` entry point, one-to-many mapping, edge cases, and
-embedding mode (mocked Cohere).
+the ``match()`` entry point, one-to-many mapping, and edge cases.
 """
 
 from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -564,117 +561,3 @@ class TestEdgeCases:
         result = matcher.match(idx)
         assert len(result.mappings) == 1
         assert result.mappings[0].matches[0].ich_section_code == "B.5"
-
-
-# -------------------------------------------------------------------
-# TestEmbeddingMode (mocked Cohere)
-# -------------------------------------------------------------------
-
-
-_HAS_COHERE = True
-try:
-    import cohere  # noqa: F401
-except ImportError:
-    _HAS_COHERE = False
-
-_skip_no_cohere = pytest.mark.skipif(
-    not _HAS_COHERE, reason="cohere SDK not installed"
-)
-
-
-@_skip_no_cohere
-class TestEmbeddingMode:
-    """Embedding path tests with mocked Cohere client."""
-
-    def test_embedding_mode_calls_cohere(self) -> None:
-        """Given an API key, Cohere client is initialised."""
-        import numpy as np
-
-        fake_embeddings = np.random.default_rng(42).standard_normal(
-            (14, 64)
-        )
-
-        mock_client = MagicMock()
-        embed_resp = MagicMock()
-        embed_resp.embeddings = fake_embeddings.tolist()
-        mock_client.embed.return_value = embed_resp
-
-        with patch(
-            "cohere.Client", return_value=mock_client
-        ):
-            m = SectionMatcher(cohere_api_key="fake-key")
-
-        assert m._use_embeddings is True
-        mock_client.embed.assert_called_once()
-
-    def test_embedding_scores_shape(self) -> None:
-        """Given mocked embeddings, score matrix has correct shape."""
-        import numpy as np
-
-        rng = np.random.default_rng(42)
-        mock_client = MagicMock()
-
-        # Reference embeddings (14 sections x 64 dims)
-        ref_emb = rng.standard_normal((14, 64)).astype(
-            np.float32
-        )
-        ref_resp = MagicMock()
-        ref_resp.embeddings = ref_emb.tolist()
-
-        # Query embeddings (3 headers x 64 dims)
-        query_emb = rng.standard_normal((3, 64)).astype(
-            np.float32
-        )
-        query_resp = MagicMock()
-        query_resp.embeddings = query_emb.tolist()
-
-        mock_client.embed.side_effect = [ref_resp, query_resp]
-
-        with patch(
-            "cohere.Client", return_value=mock_client
-        ):
-            m = SectionMatcher(cohere_api_key="fake-key")
-
-        # Reset side_effect for query call
-        mock_client.embed.side_effect = None
-        mock_client.embed.return_value = query_resp
-
-        scores = m._embedding_scores(
-            ["Header 1", "Header 2", "Header 3"]
-        )
-        assert len(scores) == 3
-        assert len(scores[0]) == 14
-
-    def test_embedding_scores_in_valid_range(self) -> None:
-        """Given mocked embeddings, all scores in [-1, 1]."""
-        import numpy as np
-
-        rng = np.random.default_rng(42)
-        mock_client = MagicMock()
-
-        ref_emb = rng.standard_normal((14, 64)).astype(
-            np.float32
-        )
-        ref_resp = MagicMock()
-        ref_resp.embeddings = ref_emb.tolist()
-
-        query_emb = rng.standard_normal((2, 64)).astype(
-            np.float32
-        )
-        query_resp = MagicMock()
-        query_resp.embeddings = query_emb.tolist()
-
-        mock_client.embed.side_effect = [ref_resp, query_resp]
-
-        with patch(
-            "cohere.Client", return_value=mock_client
-        ):
-            m = SectionMatcher(cohere_api_key="fake-key")
-
-        mock_client.embed.side_effect = None
-        mock_client.embed.return_value = query_resp
-
-        scores = m._embedding_scores(["Test 1", "Test 2"])
-        for row in scores:
-            for s in row:
-                assert -1.0 <= s <= 1.0 + 1e-6

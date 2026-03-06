@@ -1,12 +1,16 @@
-"""Tests for model cost-tier selector (PTCV-78).
+"""Tests for model cost-tier selector (PTCV-78, PTCV-102).
 
 Pure-Python tests — no Streamlit dependency.
 
 Covers GHERKIN scenarios:
   - User selects Opus tier → LLM method, claude-opus-4-6
-  - User selects Sonnet tier → RAG method, claude-sonnet-4-6
   - Cost estimate updates with file size / page count
   - Default is Opus when no selection made
+
+.. note::
+
+    "Balanced (Sonnet)" tier removed in PTCV-102 (Cohere dependency
+    removed).  Only the Opus LLM tier remains.
 """
 
 from __future__ import annotations
@@ -25,30 +29,19 @@ from ptcv.ui.app import (
 class TestTierDefinitions:
     """Model tiers are well-formed and complete."""
 
-    def test_two_tiers_defined(self) -> None:
-        assert len(_MODEL_TIERS) == 2
+    def test_one_tier_defined(self) -> None:
+        assert len(_MODEL_TIERS) == 1
 
     def test_opus_tier_present(self) -> None:
         assert "Best Quality (Opus)" in _MODEL_TIERS
-
-    def test_sonnet_tier_present(self) -> None:
-        assert "Balanced (Sonnet)" in _MODEL_TIERS
 
     def test_opus_model_id(self) -> None:
         assert _MODEL_TIERS["Best Quality (Opus)"]["model_id"] == (
             "claude-opus-4-6"
         )
 
-    def test_sonnet_model_id(self) -> None:
-        assert _MODEL_TIERS["Balanced (Sonnet)"]["model_id"] == (
-            "claude-sonnet-4-6"
-        )
-
     def test_opus_method_is_llm(self) -> None:
         assert _MODEL_TIERS["Best Quality (Opus)"]["method"] == "llm"
-
-    def test_sonnet_method_is_rag(self) -> None:
-        assert _MODEL_TIERS["Balanced (Sonnet)"]["method"] == "rag"
 
 
 # ---------------------------------------------------------------------------
@@ -78,12 +71,6 @@ class TestEstimateCost:
         assert 0.80 <= low <= 1.00
         assert 1.10 <= high <= 1.30
 
-    def test_sonnet_60_pages(self) -> None:
-        """GHERKIN: 60-page protocol → Sonnet estimate ~$0.05-0.12."""
-        low, high = estimate_cost(60, "Balanced (Sonnet)")
-        assert 0.03 <= low <= 0.08
-        assert 0.08 <= high <= 0.15
-
     def test_zero_pages(self) -> None:
         low, high = estimate_cost(0, "Best Quality (Opus)")
         assert low == 0.0
@@ -93,12 +80,6 @@ class TestEstimateCost:
         low, high = estimate_cost(1, "Best Quality (Opus)")
         assert low > 0
         assert high > low
-
-    def test_opus_more_expensive_than_sonnet(self) -> None:
-        opus_low, opus_high = estimate_cost(50, "Best Quality (Opus)")
-        sonnet_low, sonnet_high = estimate_cost(50, "Balanced (Sonnet)")
-        assert opus_low > sonnet_low
-        assert opus_high > sonnet_high
 
     def test_cost_scales_linearly(self) -> None:
         low_10, high_10 = estimate_cost(10, "Best Quality (Opus)")
@@ -126,10 +107,3 @@ class TestCostSpecCompliance:
         _, high_80 = estimate_cost(80, "Best Quality (Opus)")
         assert low_60 >= 0.80
         assert high_80 <= 1.80
-
-    def test_sonnet_typical_protocol_range(self) -> None:
-        """Typical protocol (60-80 pages): ~$0.05-0.10 for Sonnet."""
-        low_60, _ = estimate_cost(60, "Balanced (Sonnet)")
-        _, high_80 = estimate_cost(80, "Balanced (Sonnet)")
-        assert low_60 >= 0.03
-        assert high_80 <= 0.20

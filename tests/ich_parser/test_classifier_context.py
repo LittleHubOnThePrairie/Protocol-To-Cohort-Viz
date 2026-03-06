@@ -1,16 +1,6 @@
-"""Tests for expanded context window in RAGClassifier (PTCV-48).
+"""Tests for classifier context handling (PTCV-48, PTCV-102).
 
-Feature: Expanded context window for RAGClassifier (fallback tier)
-
-  Scenario: Long sections fully visible to fallback classifier
-    Given a protocol section with 6,000 characters of content
-    When the RAGClassifier processes this section
-    Then the Claude prompt includes at least 6,000 characters
-
-  Scenario: Embedding captures more content
-    Given a protocol block with 7,000 characters
-    When the block is embedded via Cohere
-    Then at least 7,000 characters are sent to the embedding API
+Feature: Block merging and excerpt handling in RuleBasedClassifier
 
   Scenario: Small blocks merged
     Given a protocol with a heading followed by 200 chars then another heading
@@ -21,13 +11,18 @@ Feature: Expanded context window for RAGClassifier (fallback tier)
   Scenario: Text excerpt expanded
     Given a classified section with 2,000 chars of content
     When the classification result is produced
-    Then the text_excerpt fallback contains up to 1,000 chars
+    Then the text_excerpt fallback contains up to 2,000 chars
+
+.. note::
+
+    Tests for RAGClassifier context/embedding windows were removed in
+    PTCV-102 (Cohere dependency removed).  RAGClassifier is now a
+    deprecated stub delegating to RuleBasedClassifier.
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -35,62 +30,6 @@ from ptcv.ich_parser.classifier import (
     RuleBasedClassifier,
     _MIN_BLOCK_CHARS,
 )
-
-
-# ---------------------------------------------------------------
-# Scenario: Long sections fully visible to classifier
-# ---------------------------------------------------------------
-
-
-class TestExpandedContext:
-    """Claude prompt truncation expanded from 3K to 8K."""
-
-    def test_6k_section_visible_in_prompt(self) -> None:
-        """A 6K-char block should appear fully in the prompt."""
-        # We test by verifying the truncation constant in the source
-        # The prompt uses block[:8000], so 6K is within budget
-        block = "A" * 6000
-        truncated = block[:8000]
-        assert len(truncated) == 6000
-
-    def test_8k_truncation_limit(self) -> None:
-        """Blocks over 8K should be truncated to 8000 chars."""
-        block = "B" * 10000
-        truncated = block[:8000]
-        assert len(truncated) == 8000
-
-    def test_prompt_uses_8k_not_3k(self) -> None:
-        """Verify the prompt template references 8K truncation."""
-        import inspect
-        from ptcv.ich_parser.classifier import RAGClassifier
-
-        source = inspect.getsource(RAGClassifier._generate_with_claude)
-        assert "block[:8000]" in source
-        assert "block[:3000]" not in source
-
-
-# ---------------------------------------------------------------
-# Scenario: Embedding captures more content
-# ---------------------------------------------------------------
-
-
-class TestExpandedEmbedding:
-    """Cohere embedding truncation expanded from 4K to 8K."""
-
-    def test_7k_block_not_truncated(self) -> None:
-        """A 7K-char block fits within the 8192-char embedding limit."""
-        block = "C" * 7000
-        truncated = block[:8192]
-        assert len(truncated) == 7000
-
-    def test_embedding_limit_is_8192(self) -> None:
-        """Verify the embedding truncation uses 8192."""
-        import inspect
-        from ptcv.ich_parser.classifier import RAGClassifier
-
-        source = inspect.getsource(RAGClassifier.classify)
-        assert "b[:8192]" in source
-        assert "b[:4096]" not in source
 
 
 # ---------------------------------------------------------------
@@ -153,42 +92,6 @@ class TestBlockMerging:
 
     def test_min_block_chars_constant(self) -> None:
         assert _MIN_BLOCK_CHARS == 500
-
-
-# ---------------------------------------------------------------
-# Scenario: Text excerpt expanded
-# ---------------------------------------------------------------
-
-
-class TestExpandedExcerpt:
-    """text_excerpt fallback expanded from 500 to 1000 chars."""
-
-    def test_excerpt_fallback_uses_1000(self) -> None:
-        """Verify _generate_with_claude uses block[:1000] for fallback."""
-        import inspect
-        from ptcv.ich_parser.classifier import RAGClassifier
-
-        source = inspect.getsource(RAGClassifier._generate_with_claude)
-        assert "block[:1000]" in source
-        assert "block[:500]" not in source
-
-    def test_excerpt_instruction_says_1000(self) -> None:
-        """Verify the prompt asks for 1000-char excerpts."""
-        import inspect
-        from ptcv.ich_parser.classifier import RAGClassifier
-
-        source = inspect.getsource(RAGClassifier._generate_with_claude)
-        assert "first 1000 chars" in source
-        assert "first 500 chars" not in source
-
-    def test_max_tokens_is_1024(self) -> None:
-        """Verify max_tokens expanded from 512 to 1024."""
-        import inspect
-        from ptcv.ich_parser.classifier import RAGClassifier
-
-        source = inspect.getsource(RAGClassifier._generate_with_claude)
-        assert "max_tokens=1024" in source
-        assert "max_tokens=512" not in source
 
 
 # ---------------------------------------------------------------

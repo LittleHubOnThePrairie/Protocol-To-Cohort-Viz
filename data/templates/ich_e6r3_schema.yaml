@@ -140,10 +140,10 @@ sections:
       - "contraindication"
 
   B.6:
-    name: "Treatment of Subjects"
+    name: "Discontinuation of Trial Intervention and Participant Withdrawal"
     description: >-
-      Treatment of Subjects (discontinuation, withdrawal,
-      stopping rules)
+      Discontinuation of Trial Intervention and Participant
+      Withdrawal (discontinuation, withdrawal, stopping rules)
     requirement: mandatory
     render_order: 6
     patterns:
@@ -160,10 +160,10 @@ sections:
       - "lost to follow-up"
 
   B.7:
-    name: "Assessment of Efficacy"
+    name: "Treatment of Participants"
     description: >-
-      Assessment of Efficacy (treatment schedule, dosing,
-      IMP administration)
+      Treatment of Participants (treatment schedule, dosing,
+      IMP administration, concomitant medication)
     requirement: mandatory
     render_order: 7
     patterns:
@@ -184,10 +184,10 @@ sections:
       - "rescue medication"
 
   B.8:
-    name: "Assessment of Safety"
+    name: "Assessment of Efficacy"
     description: >-
-      Assessment of Safety (AEs, SAEs, vital signs, labs,
-      ECG, toxicity)
+      Assessment of Efficacy (efficacy endpoints, clinical
+      outcomes, response criteria, survival)
     requirement: mandatory
     render_order: 8
     patterns:
@@ -208,10 +208,10 @@ sections:
       - "response rate"
 
   B.9:
-    name: "Statistics"
+    name: "Assessment of Safety"
     description: >-
-      Statistics (statistical analysis plan, sample size,
-      power calculation)
+      Assessment of Safety (adverse events, SAEs, vital
+      signs, laboratory tests, ECG, toxicity)
     requirement: mandatory
     render_order: 9
     patterns:
@@ -236,10 +236,10 @@ sections:
       - "SUSAR"
 
   B.10:
-    name: "Direct Access to Source Data and Documents"
+    name: "Statistics"
     description: >-
-      Direct Access to Source Data (quality control, data
-      management, GCP, monitoring)
+      Statistics (statistical methods, sample size, power
+      calculation, analysis populations)
     requirement: mandatory
     render_order: 10
     patterns:
@@ -262,10 +262,10 @@ sections:
       - "interim analysis"
 
   B.11:
-    name: "Quality Control and Quality Assurance"
+    name: "Direct Access to Source Data/Documents"
     description: >-
-      Quality Control and Quality Assurance (audit,
-      inspection, source data verification)
+      Direct Access to Source Data/Documents (monitoring,
+      audit, inspection, source data verification)
     requirement: mandatory
     render_order: 11
     patterns:
@@ -289,9 +289,6 @@ sections:
       - "data management"
       - "data integrity"
       - "regulatory compliance"
-      - "ethics committee"
-      - "IRB"
-      - "informed consent"
 
   B.12:
     name: "Ethics"

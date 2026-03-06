@@ -6,10 +6,10 @@ RuleBasedClassifier — pure regex/keyword matching, no external
     dependencies. Suitable for dev/test and for protocols with standard
     ICH E6(R3) headings. Confidence is scored by keyword density.
 
-RAGClassifier — Cohere ``embed-english-v3.0`` for vector retrieval +
-    Claude Sonnet for generation. Requires COHERE_API_KEY and
-    ANTHROPIC_API_KEY environment variables. Achieves >87% F1 on the
-    23-protocol validation set (PTCV-13 benchmark).
+RAGClassifier — **DEPRECATED** (PTCV-102). Cohere dependency removed.
+    Superseded by the query-driven pipeline (PTCV-87/88/89/91/96).
+    Kept for backward compatibility; raises ``DeprecationWarning``
+    on instantiation.
 
 Risk tier: MEDIUM — data pipeline ML component (no patient data).
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -247,60 +248,37 @@ class RuleBasedClassifier(SectionClassifier):
 
 
 # ---------------------------------------------------------------------------
-# RAG classifier — Cohere embeddings + Claude Sonnet
+# RAG classifier — DEPRECATED (PTCV-102)
 # ---------------------------------------------------------------------------
 
+
 class RAGClassifier(SectionClassifier):
-    """RAG-based classifier: Cohere embed-english-v3.0 + Claude Sonnet.
+    """**DEPRECATED** — Cohere dependency removed (PTCV-102).
 
-    Encodes the ICH section definitions as reference embeddings at
-    construction time. For each candidate block, computes cosine
-    similarity against the reference embeddings to produce a ranked
-    shortlist, then calls Claude Sonnet to generate structured JSON
-    content and a final confidence score.
+    This classifier was superseded by the query-driven pipeline
+    (``SectionMatcher`` + ``QueryExtractor`` + ``SummarizationMatcher``).
 
-    Environment variables required:
-        COHERE_API_KEY — Cohere API key
-        ANTHROPIC_API_KEY — Anthropic API key
+    Instantiation raises ``DeprecationWarning`` and delegates to
+    ``RuleBasedClassifier`` as a transparent fallback.
 
-    Args:
-        cohere_model: Cohere embedding model (default embed-english-v3.0).
-        claude_model: Anthropic model ID (default claude-sonnet-4-6).
-        top_k: Number of candidate sections passed to Claude (default 3).
+    .. deprecated:: PTCV-102
+        Use the query-driven pipeline instead.
     """
-
-    _EMBED_MODEL = "embed-english-v3.0"
-    _CLAUDE_MODEL = "claude-sonnet-4-6"
 
     def __init__(
         self,
-        cohere_model: str = _EMBED_MODEL,
-        claude_model: str = _CLAUDE_MODEL,
+        cohere_model: str = "embed-english-v3.0",
+        claude_model: str = "claude-sonnet-4-6",
         top_k: int = 3,
     ) -> None:
-        import cohere as cohere_sdk
-        import anthropic as anthropic_sdk
-        import numpy as np
-
-        self._co = cohere_sdk.Client(api_key=os.environ["COHERE_API_KEY"])
-        self._claude = anthropic_sdk.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-        self._cohere_model = cohere_model
-        self._claude_model = claude_model
-        self._top_k = top_k
-        self._np = np
-
-        # Pre-compute reference embeddings for all ICH section definitions
-        ref_texts = [
-            f"{code} {defn['name']}: {' '.join(defn['keywords'])}"
-            for code, defn in _ICH_SECTIONS.items()
-        ]
-        resp = self._co.embed(
-            texts=ref_texts,
-            model=self._cohere_model,
-            input_type="search_document",
+        warnings.warn(
+            "RAGClassifier is deprecated (PTCV-102). Cohere dependency "
+            "removed. Use the query-driven pipeline (SectionMatcher + "
+            "QueryExtractor) instead. Falling back to RuleBasedClassifier.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        self._ref_codes = list(_ICH_SECTIONS.keys())
-        self._ref_embeddings = np.array(resp.embeddings, dtype=np.float32)
+        self._fallback = RuleBasedClassifier()
 
     def classify(
         self,
@@ -310,129 +288,7 @@ class RAGClassifier(SectionClassifier):
         source_run_id: str,
         source_sha256: str,
     ) -> list[IchSection]:
-        blocks = RuleBasedClassifier()._split_into_blocks(text)
-        sections: list[IchSection] = []
-
-        # Embed all blocks in one batch call
-        block_texts = [b[:8192] for b in blocks]
-        embed_resp = self._co.embed(
-            texts=block_texts,
-            model=self._cohere_model,
-            input_type="search_query",
+        """Delegate to ``RuleBasedClassifier``."""
+        return self._fallback.classify(
+            text, registry_id, run_id, source_run_id, source_sha256,
         )
-        block_embeddings = self._np.array(embed_resp.embeddings, dtype=self._np.float32)
-
-        for idx, block in enumerate(blocks):
-            block_vec = block_embeddings[idx]
-            top_codes, similarities = self._top_k_sections(block_vec)
-            result = self._generate_with_claude(
-                block, top_codes, similarities, registry_id
-            )
-            if result is None:
-                continue
-
-            section_code, content_json, confidence = result
-            section_name = _ICH_SECTIONS.get(section_code, {}).get("name", "Unknown")
-            review_required = confidence < get_review_threshold(section_code)
-            legacy = confidence < 0.40
-
-            sections.append(
-                IchSection(
-                    run_id=run_id,
-                    source_run_id=source_run_id,
-                    source_sha256=source_sha256,
-                    registry_id=registry_id,
-                    section_code=section_code,
-                    section_name=section_name,
-                    content_json=content_json,
-                    confidence_score=round(confidence, 4),
-                    review_required=review_required,
-                    legacy_format=legacy,
-                )
-            )
-
-        return RuleBasedClassifier()._deduplicate(sections)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _top_k_sections(
-        self, block_vec: Any
-    ) -> tuple[list[str], list[float]]:
-        """Return the top-k ICH section codes by cosine similarity."""
-        norms = (
-            self._np.linalg.norm(self._ref_embeddings, axis=1, keepdims=True)
-            * self._np.linalg.norm(block_vec)
-        )
-        norms = self._np.where(norms == 0, 1e-9, norms)
-        sims = (self._ref_embeddings @ block_vec) / norms.squeeze()
-        top_idx = self._np.argsort(sims)[::-1][: self._top_k]
-        codes = [self._ref_codes[i] for i in top_idx]
-        scores = [float(sims[i]) for i in top_idx]
-        return codes, scores
-
-    def _generate_with_claude(
-        self,
-        block: str,
-        top_codes: list[str],
-        similarities: list[float],
-        registry_id: str,
-    ) -> tuple[str, str, float] | None:
-        """Call Claude Sonnet to classify a block and extract content.
-
-        Returns:
-            Tuple of (section_code, content_json_str, confidence) or
-            None if Claude could not classify the block.
-        """
-        candidates = "\n".join(
-            f"  {code}: {_ICH_SECTIONS[code]['name']} (similarity {sim:.3f})"
-            for code, sim in zip(top_codes, similarities)
-        )
-        prompt = (
-            f"You are a GCP expert classifying clinical trial protocol text "
-            f"into ICH E6(R3) Appendix B sections.\n\n"
-            f"Protocol text (registry: {registry_id}):\n"
-            f"<text>\n{block[:8000]}\n</text>\n\n"
-            f"Top candidate sections by embedding similarity:\n{candidates}\n\n"
-            f"Respond with a single JSON object (no markdown) with these keys:\n"
-            f"  section_code: the best matching ICH section code (e.g. \"B.3\")\n"
-            f"  confidence: float 0.0–1.0 reflecting how well the text matches\n"
-            f"  key_concepts: list of up to 5 key concepts found in the text\n"
-            f"  text_excerpt: first 1000 chars of the classified text\n\n"
-            f"Return section_code=\"NONE\" with confidence=0.0 if the text is "
-            f"not classifiable as any ICH Appendix B section."
-        )
-
-        resp = self._claude.messages.create(
-            model=self._claude_model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        first_block = resp.content[0]
-        if not hasattr(first_block, "text"):
-            return None
-        raw = first_block.text.strip()  # type: ignore[union-attr]
-
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # Strip markdown fences if present
-            cleaned = re.sub(r"```(?:json)?", "", raw).strip()
-            try:
-                parsed = json.loads(cleaned)
-            except json.JSONDecodeError:
-                return None
-
-        section_code: str = parsed.get("section_code", "NONE")
-        confidence: float = float(parsed.get("confidence", 0.0))
-
-        if section_code == "NONE" or section_code not in _ICH_SECTIONS:
-            return None
-
-        content: dict[str, Any] = {
-            "key_concepts": parsed.get("key_concepts", []),
-            "text_excerpt": parsed.get("text_excerpt", block[:1000]),
-            "word_count": len(block.split()),
-        }
-        return section_code, json.dumps(content, ensure_ascii=False), confidence

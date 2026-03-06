@@ -1,12 +1,8 @@
 """Semantic section matcher — protocol headers to Appendix B (PTCV-90).
 
 Maps protocol section headers (from ``ProtocolIndex``) to ICH E6(R3)
-Appendix B section codes using semantic similarity.  Two strategies:
-
-1. **Embedding-based** — Cohere ``embed-english-v3.0`` cosine
-   similarity (same SDK pattern as ``RAGClassifier``).
-2. **Deterministic fallback** — keyword/pattern scoring from
-   ``IchSectionDef`` (no API key required, CI-safe).
+Appendix B section codes using deterministic keyword/pattern scoring
+from ``IchSectionDef``.  No external API keys required, CI-safe.
 
 A synonym boost table provides additive score increases for
 well-known protocol header synonyms (e.g. "Inclusion Criteria"
@@ -14,12 +10,9 @@ well-known protocol header synonyms (e.g. "Inclusion Criteria"
 
 .. note::
 
-   The ``ich_e6r3_schema.yaml`` has a name/pattern mismatch for
-   B.7–B.10: section *names* are offset from the *patterns* they
-   contain.  The synonym table follows the **patterns** (which the
-   existing classifier pipeline uses), not the names.  For example,
-   "adverse event" maps to B.9 because B.9's patterns match safety
-   content, even though B.9 is named "Statistics".
+   Cohere embedding support was removed in PTCV-102.  The keyword
+   matcher achieves equivalent results for the structured ICH E6(R3)
+   domain and runs deterministically without API rate limits.
 
 Risk tier: LOW — read-only semantic analysis.
 """
@@ -29,7 +22,6 @@ from __future__ import annotations
 import dataclasses
 import enum
 import logging
-import os
 import re
 from typing import Any, Optional
 
@@ -52,8 +44,7 @@ logger = logging.getLogger(__name__)
 # protocol header title (lowercased) contains one of these substrings,
 # the corresponding ICH section gets +synonym_boost to its score.
 #
-# Follows the *pattern* semantics in ich_e6r3_schema.yaml, NOT the
-# section names (see module docstring for the B.7-B.10 caveat).
+# Section names below match ICH E6(R3) Appendix B (PTCV-113).
 
 _SYNONYM_BOOSTS: dict[str, str] = {
     # B.1 General Information
@@ -94,12 +85,12 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "selection of participants": "B.5",
     "study population": "B.5",
     "entry criteria": "B.5",
-    # B.6 Treatment of Subjects
+    # B.6 Discontinuation and Participant Withdrawal
     "discontinuation": "B.6",
     "withdrawal": "B.6",
     "stopping rules": "B.6",
     "treatment termination": "B.6",
-    # B.7 Assessment of Efficacy (patterns = treatment/dosing/IMP)
+    # B.7 Treatment of Participants
     "investigational product": "B.7",
     "study treatment": "B.7",
     "study drug": "B.7",
@@ -107,26 +98,26 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "dose modification": "B.7",
     "concomitant medication": "B.7",
     "treatment schedule": "B.7",
-    # B.8 Assessment of Safety (patterns = efficacy assessment)
+    # B.8 Assessment of Efficacy
     "efficacy assessment": "B.8",
     "clinical outcome": "B.8",
     "response criteria": "B.8",
     "tumour response": "B.8",
     "tumor response": "B.8",
-    # B.9 Statistics (patterns = safety/AEs)
+    # B.9 Assessment of Safety
     "adverse event": "B.9",
     "safety assessment": "B.9",
     "safety monitoring": "B.9",
     "vital signs": "B.9",
     "laboratory test": "B.9",
     "safety reporting": "B.9",
-    # B.10 Direct Access (patterns = statistical analysis)
+    # B.10 Statistics
     "statistical": "B.10",
     "sample size": "B.10",
     "analysis population": "B.10",
     "statistical analysis plan": "B.10",
     "power calculation": "B.10",
-    # B.11 Quality Control and Quality Assurance
+    # B.11 Direct Access to Source Data/Documents
     "quality control": "B.11",
     "quality assurance": "B.11",
     "monitoring plan": "B.11",
@@ -244,12 +235,17 @@ _CONTENT_HINT_LEN = 200  # chars from content_spans to append
 class SectionMatcher:
     """Map protocol section headers to ICH E6(R3) Appendix B sections.
 
-    Supports embedding-based matching (Cohere embed-english-v3.0) and
-    a deterministic keyword/pattern fallback for CI environments.
+    Uses deterministic keyword/pattern scoring from ``IchSectionDef``
+    plus a synonym boost table for well-known protocol header synonyms.
+
+    .. note::
+
+        Cohere embedding support was removed in PTCV-102.  The
+        ``cohere_api_key`` parameter is accepted but ignored for
+        backward compatibility.
 
     Args:
-        cohere_api_key: Cohere API key.  If *None* or empty, falls
-            back to deterministic keyword matching.
+        cohere_api_key: **Ignored** (kept for backward compatibility).
         auto_threshold: Minimum boosted score for auto-mapping
             (default ``0.75``).
         review_threshold: Minimum boosted score for review tier
@@ -278,47 +274,9 @@ class SectionMatcher:
             self._section_defs.keys(),
             key=lambda c: self._section_defs[c].render_order,
         )
-        self._ref_texts: list[str] = [
-            (
-                f"{code} {self._section_defs[code].name}: "
-                f"{self._section_defs[code].description} "
-                f"{' '.join(self._section_defs[code].keywords)}"
-            )
-            for code in self._ref_codes
-        ]
 
-        # Embedding mode
-        api_key = cohere_api_key or os.environ.get(
-            "COHERE_API_KEY", ""
-        )
-        self._use_embeddings = bool(api_key)
-        self._np: Any = None
-        self._co: Any = None
-        self._ref_embeddings: Any = None
-
-        if self._use_embeddings:
-            self._init_embeddings(api_key)
-
-    def _init_embeddings(self, api_key: str) -> None:
-        """Lazy-import Cohere/numpy and pre-compute ref embeddings."""
-        import cohere as cohere_sdk
-        import numpy as np
-
-        self._np = np
-        self._co = cohere_sdk.Client(api_key=api_key)
-
-        resp = self._co.embed(
-            texts=self._ref_texts,
-            model="embed-english-v3.0",
-            input_type="search_document",
-        )
-        self._ref_embeddings = np.array(
-            resp.embeddings, dtype=np.float32
-        )
-        logger.info(
-            "Section matcher: embedded %d reference sections",
-            len(self._ref_codes),
-        )
+        # Keyword-only mode (PTCV-102: Cohere removed)
+        self._use_embeddings = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -358,14 +316,10 @@ class SectionMatcher:
             query_texts.append(qt)
 
         # Score matrix: [n_headers x n_ref_sections]
-        if self._use_embeddings:
-            scores = self._embedding_scores(query_texts)
-            method = "embedding"
-        else:
-            scores = self._keyword_scores(
-                headers, protocol_index
-            )
-            method = "keyword_fallback"
+        scores = self._keyword_scores(
+            headers, protocol_index
+        )
+        method = "keyword_fallback"
 
         # Apply synonym boosts and classify
         mappings: list[SectionMapping] = []
@@ -426,40 +380,7 @@ class SectionMatcher:
         ]
 
     # ------------------------------------------------------------------
-    # Scoring — embedding path
-    # ------------------------------------------------------------------
-
-    def _embedding_scores(
-        self, query_texts: list[str]
-    ) -> list[list[float]]:
-        """Batch-embed query texts and compute cosine similarity."""
-        np = self._np
-        resp = self._co.embed(
-            texts=[t[:8192] for t in query_texts],
-            model="embed-english-v3.0",
-            input_type="search_query",
-        )
-        query_vecs = np.array(
-            resp.embeddings, dtype=np.float32
-        )
-
-        # Cosine similarity: [n_queries x n_refs]
-        q_norms = np.linalg.norm(
-            query_vecs, axis=1, keepdims=True
-        )
-        r_norms = np.linalg.norm(
-            self._ref_embeddings, axis=1, keepdims=True
-        )
-        q_norms = np.where(q_norms == 0, 1e-9, q_norms)
-        r_norms = np.where(r_norms == 0, 1e-9, r_norms)
-        sim_matrix = (query_vecs / q_norms) @ (
-            self._ref_embeddings / r_norms
-        ).T
-
-        return sim_matrix.tolist()
-
-    # ------------------------------------------------------------------
-    # Scoring — deterministic fallback
+    # Scoring — keyword/pattern matching
     # ------------------------------------------------------------------
 
     def _keyword_scores(
