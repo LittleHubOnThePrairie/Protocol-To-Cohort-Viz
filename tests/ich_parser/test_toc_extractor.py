@@ -22,9 +22,12 @@ from ptcv.ich_parser.toc_extractor import (
     ProtocolIndex,
     SectionHeader,
     TOCEntry,
+    _LIST_ENTRY_RE,
+    _LIST_OF_HEADER_RE,
     _clean_title,
     _count_toc_lines,
     _detect_body_headers,
+    _is_page_boilerplate,
     _is_toc_page,
     _normalise_number,
     _parse_toc_page,
@@ -32,6 +35,7 @@ from ptcv.ich_parser.toc_extractor import (
     _resolve_toc_pages,
     _section_level,
     extract_protocol_index,
+    strip_toc_lines,
 )
 
 
@@ -256,6 +260,80 @@ class TestBodyHeaderDetection:
 # -----------------------------------------------------------------------
 # Scenario: Content spans map sections to their text
 # -----------------------------------------------------------------------
+
+class TestCharOffsetAvoidsTOC:
+    """PTCV-109: char_offset must point to body, not TOC (PTCV-109).
+
+    When the same heading text appears in both the TOC and the body,
+    the char_offset should resolve to the body occurrence so that
+    content_spans contain actual section content.
+    """
+
+    def test_offset_points_to_body_not_toc(self) -> None:
+        """Headers offset past the TOC region."""
+        toc_text = (
+            "TABLE OF CONTENTS\n"
+            "1 INTRODUCTION .............. 5\n"
+            "2 METHODS ................... 10\n"
+        )
+        body_text = (
+            "1 INTRODUCTION\n"
+            "This section introduces the study.\n\n"
+            "2 METHODS\n"
+            "The study uses a randomised design.\n"
+        )
+        full_text = toc_text + "\n" + body_text
+        page_offsets = {1: 0, 5: len(toc_text) + 1}
+
+        page_texts = [(1, toc_text), (5, body_text)]
+        headers = _detect_body_headers(
+            page_texts,
+            full_text,
+            toc_pages=[1],
+            body_start_page=2,
+            page_offsets=page_offsets,
+        )
+
+        for h in headers:
+            assert h.char_offset >= len(toc_text), (
+                f"Header {h.number} offset {h.char_offset} "
+                f"points into TOC area (< {len(toc_text)})"
+            )
+
+    def test_content_spans_nonempty_with_page_offsets(self) -> None:
+        """Content spans should have real content when offsets are correct."""
+        toc_text = (
+            "TABLE OF CONTENTS\n"
+            "1 SUMMARY .............. 3\n"
+            "2 BACKGROUND ........... 5\n"
+        )
+        body_text = (
+            "1 SUMMARY\n"
+            "This protocol evaluates drug X for condition Y.\n\n"
+            "2 BACKGROUND\n"
+            "Drug X has shown efficacy in preclinical studies.\n"
+        )
+        full_text = toc_text + "\n" + body_text
+        page_offsets = {1: 0, 3: len(toc_text) + 1}
+
+        page_texts = [(1, toc_text), (3, body_text)]
+        headers = _detect_body_headers(
+            page_texts,
+            full_text,
+            toc_pages=[1],
+            body_start_page=2,
+            page_offsets=page_offsets,
+        )
+        spans = _resolve_content_spans(headers, full_text)
+
+        assert len(spans) >= 2
+        for num, content in spans.items():
+            assert len(content) > 0, (
+                f"Section {num} has empty content span"
+            )
+        assert "drug x" in spans.get("1", "").lower()
+        assert "preclinical" in spans.get("2", "").lower()
+
 
 class TestContentSpans:
     """Given an extracted ProtocolIndex,
@@ -499,3 +577,322 @@ class TestCorpusExtraction:
             f"Only {pct:.0%} ({pass_count}/{len(pdfs)}) protocols "
             f"produced >=10 sections (need >=80%)"
         )
+
+
+# -----------------------------------------------------------------------
+# PTCV-107: Enhanced TOC detection and line stripping
+# -----------------------------------------------------------------------
+
+
+class TestEnhancedTocDetection:
+    """Tests for strengthened _is_toc_page heuristic (PTCV-107)."""
+
+    def test_detects_page_with_header(self) -> None:
+        """Classic TOC page with header is detected."""
+        text = (
+            "TABLE OF CONTENTS\n"
+            "1 Introduction .............. 5\n"
+            "2 Objectives ................ 8\n"
+        )
+        assert _is_toc_page(text) is True
+
+    def test_detects_sub_toc_without_header(self) -> None:
+        """Page with >50% TOC lines but no header is detected."""
+        text = (
+            "4 Population ................. 15\n"
+            "5 Endpoints .................. 20\n"
+            "6 Statistical Methods ........ 25\n"
+            "7 Safety ..................... 30\n"
+        )
+        assert _is_toc_page(text) is True
+
+    def test_rejects_body_content(self) -> None:
+        """Normal body content is not flagged as TOC."""
+        text = (
+            "4 STUDY POPULATION\n"
+            "Patients eligible for this study must meet all of the\n"
+            "following inclusion criteria and none of the exclusion\n"
+            "criteria. Written informed consent is required.\n"
+        )
+        assert _is_toc_page(text) is False
+
+    def test_rejects_short_page(self) -> None:
+        """Pages with fewer than 3 non-empty lines are not flagged."""
+        text = "1 Introduction .............. 5\n"
+        assert _is_toc_page(text) is False
+
+    def test_mixed_content_below_threshold(self) -> None:
+        """Page with <50% TOC lines is not flagged."""
+        text = (
+            "1 Introduction .............. 5\n"
+            "This section describes the study background.\n"
+            "The rationale for this trial is based on\n"
+            "preclinical evidence of efficacy.\n"
+        )
+        assert _is_toc_page(text) is False
+
+
+class TestStripTocLines:
+    """Tests for strip_toc_lines utility (PTCV-107)."""
+
+    def test_removes_dotted_leader_lines(self) -> None:
+        text = (
+            "7.2 Inclusion Criteria\n"
+            "7.3 Exclusion Criteria .......................... 20\n"
+            "Patients must meet all inclusion criteria.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Exclusion Criteria ........." not in result
+        assert "Patients must meet" in result
+        assert "7.2 Inclusion Criteria" in result
+
+    def test_removes_appendix_toc_lines(self) -> None:
+        text = (
+            "Protocol content here.\n"
+            "A  APPENDIX TITLE .......................... 45\n"
+            "More content follows.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "APPENDIX TITLE" not in result
+        assert "Protocol content here" in result
+        assert "More content follows" in result
+
+    def test_preserves_normal_content(self) -> None:
+        text = (
+            "4 STUDY POPULATION\n"
+            "Patients eligible for this study must meet all of\n"
+            "the following inclusion criteria.\n"
+        )
+        result = strip_toc_lines(text)
+        assert result.strip() == text.strip()
+
+    def test_preserves_blank_lines(self) -> None:
+        text = "Line one.\n\nLine three.\n"
+        result = strip_toc_lines(text)
+        assert result == text
+
+    def test_empty_input(self) -> None:
+        assert strip_toc_lines("") == ""
+
+    def test_content_spans_cleaned(self) -> None:
+        """_resolve_content_spans strips TOC lines from spans."""
+        headers = [
+            SectionHeader(
+                number="7",
+                title="ELIGIBILITY",
+                level=1,
+                page=10,
+                char_offset=0,
+            ),
+            SectionHeader(
+                number="8",
+                title="TREATMENT",
+                level=1,
+                page=15,
+                char_offset=200,
+            ),
+        ]
+        # Simulate full_text with TOC lines embedded in a section
+        full_text = (
+            "7 ELIGIBILITY\n"
+            "7.1 Inclusion Criteria .............. 12\n"
+            "7.2 Exclusion Criteria .............. 14\n"
+            "Patients must be 18 years or older.\n"
+            "Written informed consent required.\n"
+        ) + ("x" * 100) + (
+            "\n8 TREATMENT\n"
+            "Drug X administered orally.\n"
+        )
+        # Adjust offset for header 8
+        headers[1] = SectionHeader(
+            number="8",
+            title="TREATMENT",
+            level=1,
+            page=15,
+            char_offset=full_text.index("8 TREATMENT"),
+        )
+        spans = _resolve_content_spans(headers, full_text)
+        # Section 7 should NOT contain dotted-leader TOC lines
+        assert "............" not in spans["7"]
+        # But should still have body content
+        assert "Patients must be 18" in spans["7"]
+
+
+# -----------------------------------------------------------------------
+# PTCV-108: List-of-Tables/Figures and page boilerplate stripping
+# -----------------------------------------------------------------------
+
+
+class TestListEntryRegex:
+    """Tests for _LIST_ENTRY_RE pattern (PTCV-108)."""
+
+    def test_matches_table_entry(self) -> None:
+        line = "Table 10-1 Schedule of Assessments ............ 30"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_matches_figure_entry(self) -> None:
+        line = "Figure 6-1 Trial Design ....................... 19"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_matches_listing_entry(self) -> None:
+        line = "Listing 14.1.1 Demographics ................... 42"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_matches_exhibit_entry(self) -> None:
+        line = "Exhibit A-1 Informed Consent Form ............. 55"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_matches_wide_whitespace_variant(self) -> None:
+        line = "Table 10-2 eDiary Assessments              33"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_case_insensitive(self) -> None:
+        line = "TABLE 10-1 Schedule of Assessments ............ 30"
+        assert _LIST_ENTRY_RE.match(line) is not None
+
+    def test_no_match_section_number(self) -> None:
+        """Regular section number lines should NOT match."""
+        line = "10.1 Study Endpoints .............. 22"
+        assert _LIST_ENTRY_RE.match(line) is None
+
+    def test_no_match_plain_text(self) -> None:
+        line = "Table salt was used as a placebo comparator."
+        assert _LIST_ENTRY_RE.match(line) is None
+
+
+class TestListOfHeaderRegex:
+    """Tests for _LIST_OF_HEADER_RE pattern (PTCV-108)."""
+
+    def test_matches_list_of_tables(self) -> None:
+        assert _LIST_OF_HEADER_RE.match("LIST OF IN-TEXT TABLES") is not None
+
+    def test_matches_list_of_figures(self) -> None:
+        assert _LIST_OF_HEADER_RE.match("List of Figures") is not None
+
+    def test_matches_list_of_abbreviations(self) -> None:
+        assert _LIST_OF_HEADER_RE.match("List of Abbreviations") is not None
+
+    def test_no_match_normal_text(self) -> None:
+        assert _LIST_OF_HEADER_RE.match("Patients were listed by site.") is None
+
+
+class TestPageBoilerplate:
+    """Tests for _is_page_boilerplate helper (PTCV-108)."""
+
+    def test_proprietary_confidential(self) -> None:
+        line = (
+            "Proprietary and Confidential Page 11 of 59 "
+            "Dr. Reddy's Laboratories, Ltd. Protocol No. DFN-02-CD-012"
+        )
+        assert _is_page_boilerplate(line) is True
+
+    def test_confidential_standalone(self) -> None:
+        assert _is_page_boilerplate("CONFIDENTIAL") is True
+
+    def test_page_x_of_y(self) -> None:
+        assert _is_page_boilerplate("Page 3 of 120") is True
+
+    def test_page_within_line(self) -> None:
+        line = "Protocol ABC-123 — Page 42 of 100 — Final"
+        assert _is_page_boilerplate(line) is True
+
+    def test_normal_text_not_matched(self) -> None:
+        assert _is_page_boilerplate(
+            "Patients received the study drug orally."
+        ) is False
+
+    def test_word_page_in_context(self) -> None:
+        """'page' in normal prose should NOT trigger boilerplate."""
+        assert _is_page_boilerplate(
+            "Refer to page 5 for the inclusion criteria."
+        ) is False
+
+
+class TestStripTocLinesExtended:
+    """Tests for PTCV-108 additions to strip_toc_lines."""
+
+    def test_strips_table_list_entries(self) -> None:
+        text = (
+            "10 ASSESSMENTS\n"
+            "Table 10-1 Schedule of Assessments ............ 30\n"
+            "Table 10-2 eDiary Assessments ................. 33\n"
+            "The schedule of assessments is summarised below.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Table 10-1" not in result
+        assert "Table 10-2" not in result
+        assert "schedule of assessments is summarised" in result
+
+    def test_strips_figure_list_entries(self) -> None:
+        text = (
+            "6 STUDY DESIGN\n"
+            "Figure 6-1 Trial Design ....................... 19\n"
+            "The study uses a randomised double-blind design.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Figure 6-1" not in result
+        assert "randomised double-blind" in result
+
+    def test_strips_list_of_header(self) -> None:
+        text = (
+            "LIST OF IN-TEXT TABLES\n"
+            "Table 10-1 Schedule of Assessments ............ 30\n"
+            "Some actual content follows.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "LIST OF IN-TEXT TABLES" not in result
+        assert "Table 10-1" not in result
+        assert "Some actual content" in result
+
+    def test_strips_page_boilerplate(self) -> None:
+        text = (
+            "5.1 Inclusion Criteria\n"
+            "Proprietary and Confidential Page 11 of 59 "
+            "Dr. Reddy's Laboratories\n"
+            "Patients must be 18 years or older.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Proprietary and Confidential" not in result
+        assert "Patients must be 18" in result
+
+    def test_preserves_legitimate_content(self) -> None:
+        """Normal clinical content is not stripped."""
+        text = (
+            "5.1 Inclusion Criteria\n"
+            "Patients must meet the following criteria:\n"
+            "  1. Age >= 18 years\n"
+            "  2. Written informed consent\n"
+            "Table salt was used as placebo comparator.\n"
+        )
+        result = strip_toc_lines(text)
+        assert result.strip() == text.strip()
+
+    def test_content_spans_cleaned_extended(self) -> None:
+        """_resolve_content_spans strips all junk from spans."""
+        headers = [
+            SectionHeader("10", "ASSESSMENTS", 1, 20, 0),
+            SectionHeader("11", "TREATMENT", 1, 25, 300),
+        ]
+        full_text = (
+            "10 ASSESSMENTS\n"
+            "Table 10-1 Schedule of Assessments ............ 30\n"
+            "Figure 10-1 Study Flow ........................ 31\n"
+            "Proprietary and Confidential Page 20 of 59\n"
+            "The schedule of assessments is provided below.\n"
+            "All patients undergo screening visit.\n"
+        ) + ("x" * 100) + (
+            "\n11 TREATMENT\n"
+            "Drug X is administered orally.\n"
+        )
+        headers[1] = SectionHeader(
+            number="11",
+            title="TREATMENT",
+            level=1,
+            page=25,
+            char_offset=full_text.index("11 TREATMENT"),
+        )
+        spans = _resolve_content_spans(headers, full_text)
+        assert "Table 10-1" not in spans["10"]
+        assert "Figure 10-1" not in spans["10"]
+        assert "Proprietary and Confidential" not in spans["10"]
+        assert "schedule of assessments is provided" in spans["10"]

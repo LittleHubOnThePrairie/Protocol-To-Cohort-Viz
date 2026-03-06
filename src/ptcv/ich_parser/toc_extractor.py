@@ -62,6 +62,33 @@ _APPENDIX_RE = re.compile(
     r"(\d+)\s*$"                  # page number
 )
 
+# "List of Tables/Figures" entries: Table/Figure/Listing + ref + title + page
+# Examples:
+#   "Table 10-1 Schedule of Assessments ............ 30"
+#   "Figure 6-1 Trial Design ....................... 19"
+#   "Listing 14.1.1 Demographics ................... 42"
+_LIST_ENTRY_RE = re.compile(
+    r"^(?:Table|Figure|Listing|Exhibit)\s+"  # prefix
+    r"[\w.-]+"                               # reference (10-1, 6.1, etc.)
+    r"\s+.+?"                                # title (non-greedy)
+    r"(?:\s*\.{2,}\s*|\s{3,})"              # dot-leaders or wide whitespace
+    r"\d+\s*$",                              # page number
+    re.IGNORECASE,
+)
+
+# "List of ..." header lines (e.g. "LIST OF IN-TEXT TABLES")
+_LIST_OF_HEADER_RE = re.compile(
+    r"^LIST\s+OF\s+", re.IGNORECASE,
+)
+
+# Page header/footer boilerplate — patterns that reliably identify
+# running headers/footers injected by PDF extraction.
+_PAGE_BOILERPLATE_RES: list[re.Pattern[str]] = [
+    re.compile(r"Proprietary\s+and\s+Confidential", re.IGNORECASE),
+    re.compile(r"^CONFIDENTIAL\s*$", re.IGNORECASE),
+    re.compile(r"Page\s+\d+\s+of\s+\d+", re.IGNORECASE),
+]
+
 # Body heading: numbered section at start of a line
 _BODY_HEADING_RE = re.compile(
     r"^(\d+(?:\.\d+)*)\.?\s+([A-Z].*)",
@@ -220,10 +247,27 @@ def _clean_title(raw: str) -> str:
 
 
 def _is_toc_page(text: str) -> bool:
-    """Return True if *text* appears to be a TOC page."""
+    """Return True if *text* appears to be a TOC page.
+
+    Detects pages with an explicit "TABLE OF CONTENTS" header,
+    AND pages where a high proportion of non-empty lines match
+    the TOC-entry format (dotted leaders + page numbers), even
+    without a header (PTCV-107: sub-TOC / continuation pages).
+    """
     if _TOC_HEADER_RE.search(text):
         return True
-    return False
+    # PTCV-107: detect pages that are predominantly TOC lines
+    non_empty = [
+        ln for ln in text.split("\n") if ln.strip()
+    ]
+    if len(non_empty) < 3:
+        return False
+    toc_count = sum(
+        1 for ln in non_empty
+        if _TOC_LINE_RE.match(ln.strip())
+    )
+    # If >50% of non-empty lines are TOC-format, it's a TOC page
+    return toc_count / len(non_empty) > 0.5
 
 
 def _count_toc_lines(text: str) -> int:
@@ -234,6 +278,51 @@ def _count_toc_lines(text: str) -> int:
         if _TOC_LINE_RE.match(line) or _TOC_LINE_SIMPLE_RE.match(line):
             count += 1
     return count
+
+
+def _is_page_boilerplate(line: str) -> bool:
+    """Return True if *line* looks like a page header/footer (PTCV-108).
+
+    Matches common running-header patterns injected by PDF extraction,
+    e.g. ``"Proprietary and Confidential Page 11 of 59 ..."``
+    """
+    return any(pat.search(line) for pat in _PAGE_BOILERPLATE_RES)
+
+
+def strip_toc_lines(text: str) -> str:
+    """Remove TOC-entry, list-of, and page-boilerplate lines (PTCV-107/108).
+
+    Strips:
+      - Section-number TOC lines  (``"7.3 Exclusion ... 20"``)
+      - Appendix TOC lines        (``"A  APPENDIX ... 45"``)
+      - Table/Figure list entries  (``"Table 10-1 Schedule ... 30"``)
+      - "List of ..." headers      (``"LIST OF IN-TEXT TABLES"``)
+      - Page header/footer lines   (``"Proprietary and Confidential ..."``)
+
+    Returns:
+        Text with junk lines removed.
+    """
+    cleaned: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append(line)
+            continue
+        if _TOC_LINE_RE.match(stripped):
+            continue  # Skip TOC line
+        if _APPENDIX_RE.match(stripped):
+            continue  # Skip appendix TOC line
+        # PTCV-108: skip Table/Figure/Listing list entries
+        if _LIST_ENTRY_RE.match(stripped):
+            continue
+        # PTCV-108: skip "List of ..." headers
+        if _LIST_OF_HEADER_RE.match(stripped):
+            continue
+        # PTCV-108: skip page header/footer boilerplate
+        if _is_page_boilerplate(stripped):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
 
 
 def _parse_toc_page(text: str) -> list[TOCEntry]:
@@ -312,6 +401,7 @@ def _detect_body_headers(
     toc_pages: list[int] | None = None,
     toc_numbers: set[str] | None = None,
     body_start_page: int = 1,
+    page_offsets: dict[int, int] | None = None,
 ) -> list[SectionHeader]:
     """Detect section headers in the document body.
 
@@ -324,6 +414,11 @@ def _detect_body_headers(
             TOC are accepted (reduces false positives).
         body_start_page: First page to scan for body headers.
             Pages before this are skipped (front matter).
+        page_offsets: Mapping from 1-based page number to the
+            character offset where that page starts in *full_text*.
+            When provided, char_offset searches start from the
+            page's offset to avoid matching TOC occurrences
+            (PTCV-109).
 
     Returns:
         Sorted list of :class:`SectionHeader` by character offset.
@@ -379,11 +474,24 @@ def _detect_body_headers(
                 continue
             seen.add(key)
 
-            # Find character offset in full_text
-            # Build a search pattern for this specific heading
-            search_pat = re.escape(raw_num) + r"\.?\s+" + re.escape(title[:40])
-            offset_match = re.search(search_pat, full_text)
-            char_offset = offset_match.start() if offset_match else -1
+            # Find character offset in full_text.
+            # Search from this page's offset to avoid matching TOC
+            # entries that appear earlier in the document (PTCV-109).
+            search_start = 0
+            if page_offsets is not None:
+                search_start = page_offsets.get(page_num, 0)
+            search_pat = (
+                re.escape(raw_num) + r"\.?\s+"
+                + re.escape(title[:40])
+            )
+            offset_match = re.search(
+                search_pat, full_text[search_start:]
+            )
+            char_offset = (
+                (search_start + offset_match.start())
+                if offset_match
+                else -1
+            )
 
             headers.append(SectionHeader(
                 number=num,
@@ -441,6 +549,8 @@ def _resolve_content_spans(
             end = len(full_text)
 
         content = full_text[start:end].strip()
+        # PTCV-107: strip residual TOC-format lines from span
+        content = strip_toc_lines(content)
         spans[header.number] = content
 
     return spans
@@ -553,8 +663,13 @@ def extract_protocol_index(
             pdf_path.name,
         )
 
-    # Build full text (page separator for offset tracking)
+    # Build full text and page offset map (PTCV-109)
     page_separator = "\n"
+    page_offset_map: dict[int, int] = {}
+    offset = 0
+    for page_num, text in page_texts:
+        page_offset_map[page_num] = offset
+        offset += len(text) + len(page_separator)
     full_text = page_separator.join(text for _, text in page_texts)
 
     # Detect body headers — skip front matter, TOC pages, and filter noise
@@ -566,6 +681,7 @@ def extract_protocol_index(
         toc_pages=toc_page_nums if toc_found else None,
         toc_numbers=toc_numbers,
         body_start_page=body_start,
+        page_offsets=page_offset_map,
     )
 
     # Resolve TOC entry pages from body headers
