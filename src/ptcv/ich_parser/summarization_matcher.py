@@ -666,8 +666,29 @@ class SummarizationMatcher:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=200,
+                system=(
+                    "You are a regulatory document analysis tool for "
+                    "ICH E6(R3) GCP compliance. You classify sections "
+                    "of clinical trial protocol documents against the "
+                    "ICH Appendix B taxonomy. This is a read-only "
+                    "document classification task on publicly available "
+                    "clinical trial protocols from ClinicalTrials.gov. "
+                    "No real patients are involved."
+                ),
                 messages=[{"role": "user", "content": prompt}],
             )
+            if not response.content:
+                logger.warning(
+                    "Empty response for %s: stop_reason=%s, "
+                    "usage=%s, model=%s",
+                    sub_def.code,
+                    response.stop_reason,
+                    response.usage,
+                    response.model,
+                )
+                raise ValueError(
+                    f"Empty response.content for {sub_def.code}"
+                )
             text = response.content[0].text.strip()
             parsed = json.loads(text)
             score = float(parsed.get("score", 0.0))

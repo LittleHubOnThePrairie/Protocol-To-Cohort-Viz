@@ -145,6 +145,11 @@ from ptcv.ui.components.review_queue_viewer import (
 from ptcv.ui.components.benchmark_viewer import render_benchmark
 from ptcv.ui.components.query_pipeline import render_query_pipeline
 from ptcv.ui.components.refinement_panel import render_refinement_panel
+from ptcv.ui.components.mock_data_panel import (
+    MockPipelineResult,
+    render_mock_data_panel,
+    render_mock_data_sidebar,
+)
 from ptcv.ui.components.sdtm_viewer import render_sdtm_viewer
 from ptcv.ui.components.section_align import align_sections, build_comparison_html
 from ptcv.ui.pipeline_stages import STAGE_BY_KEY
@@ -1064,10 +1069,12 @@ def main() -> None:
 
     (
         tab_process, tab_results, tab_quality, tab_soa,
-        tab_query, tab_benchmark, tab_refinement, tab_review,
+        tab_mock, tab_query, tab_benchmark, tab_refinement,
+        tab_review,
     ) = st.tabs([
         "Process", "Results", "Quality", "SoA & SDTM",
-        "Query Pipeline", "Benchmark", "Refinement", review_label,
+        "Mock Data", "Query Pipeline", "Benchmark",
+        "Refinement", review_label,
     ])
 
     # === Process tab ===
@@ -1438,6 +1445,134 @@ def main() -> None:
                     "Run SoA Extraction first to enable "
                     "SDTM generation."
                 )
+
+    # === Mock Data tab (PTCV-122) ===
+    with tab_mock:
+        _mock_available = bool(soa_cached)
+        if not _mock_available:
+            st.info(
+                "Run SoA Extraction first to enable "
+                "mock SDTM data generation."
+            )
+        else:
+            # Sidebar configuration controls.
+            mock_cfg = render_mock_data_sidebar()
+
+            mock_cache_key = (
+                f"mock_{file_sha}_"
+                f"{mock_cfg['num_subjects']}_"
+                f"{mock_cfg['synthesizer_type']}"
+            )
+
+            if "mock_data_cache" not in st.session_state:
+                st.session_state["mock_data_cache"] = {}
+
+            mock_cached = st.session_state[
+                "mock_data_cache"
+            ].get(mock_cache_key)
+
+            if mock_cached is not None:
+                render_mock_data_panel(mock_cached)
+            else:
+                if st.button(
+                    "Generate Mock Data",
+                    type="primary",
+                    key="btn_mock_gen",
+                ):
+                    with st.status(
+                        "Generating mock SDTM data...",
+                        expanded=True,
+                    ) as status:
+                        t0 = time.monotonic()
+                        try:
+                            from ptcv.mock_data.sdtm_metadata import (
+                                get_all_domain_specs,
+                            )
+                            from ptcv.mock_data.sdv_synthesizer import (
+                                SdvConfig,
+                                SdvSynthesizerService,
+                            )
+
+                            st.write("Building domain metadata...")
+                            specs = get_all_domain_specs()
+
+                            st.write(
+                                f"Generating "
+                                f"{mock_cfg['num_subjects']} "
+                                f"subjects across "
+                                f"{len(specs)} domains..."
+                            )
+
+                            cfg = SdvConfig(
+                                synthesizer_type=mock_cfg[
+                                    "synthesizer_type"
+                                ],
+                                num_subjects=mock_cfg[
+                                    "num_subjects"
+                                ],
+                            )
+                            svc = SdvSynthesizerService(cfg)
+                            gen_result = svc.generate_all(
+                                specs,
+                                num_subjects=mock_cfg[
+                                    "num_subjects"
+                                ],
+                            )
+
+                            pipeline_result = MockPipelineResult(
+                                domain_dataframes=(
+                                    gen_result.domain_dataframes
+                                ),
+                                validation_results={},
+                                run_id=gen_result.run_id,
+                                num_subjects=mock_cfg[
+                                    "num_subjects"
+                                ],
+                                synthesizer_type=mock_cfg[
+                                    "synthesizer_type"
+                                ],
+                            )
+
+                            st.session_state[
+                                "mock_data_cache"
+                            ][mock_cache_key] = pipeline_result
+
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    "Mock Data: Complete "
+                                    f"({elapsed:.1f}s)"
+                                ),
+                                state="complete",
+                            )
+                            st.rerun()
+                        except ImportError:
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    "Mock Data: Missing "
+                                    f"dependency ({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.error(
+                                "SDV is required for mock data "
+                                "generation. Install with: "
+                                "`pip install sdv`"
+                            )
+                        except Exception:
+                            elapsed = time.monotonic() - t0
+                            status.update(
+                                label=(
+                                    "Mock Data: Error "
+                                    f"({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.code(
+                                traceback.format_exc(),
+                                language="text",
+                            )
 
     # === Query Pipeline tab (PTCV-95) ===
     with tab_query:

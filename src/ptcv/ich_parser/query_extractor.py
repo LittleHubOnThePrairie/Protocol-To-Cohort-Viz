@@ -20,11 +20,12 @@ Deterministic type-specific strategies:
 Routing uses ``get_queries_by_schema_section()`` because B.15/B.16
 queries map to ``schema_section: "B.14"``.
 
-Optional LLM transformation (PTCV-98): when
+Optional LLM transformation (PTCV-98, PTCV-111): when
 ``enable_transformation=True`` and an Anthropic API key is
-available, high-confidence scoped matches are reframed by
-Claude Sonnet to directly address the Appendix B query intent
-while preserving factual fidelity.
+available, all scoped matches are reframed by Claude Sonnet to
+directly address the Appendix B query intent while preserving
+factual fidelity.  Queries are processed concurrently (up to 8
+threads) to minimize wall-clock time from API calls.
 
 Risk tier: LOW — read-only extraction, optional LLM calls.
 """
@@ -36,6 +37,8 @@ import json
 import logging
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Sequence
 
 from ptcv.ich_parser.query_schema import (
@@ -693,6 +696,7 @@ class QueryExtractor:
         self._client: Any = None
         self._use_llm = False
         self._transform_calls = 0
+        self._transform_lock = threading.Lock()
 
         if enable_transformation:
             api_key = anthropic_api_key or os.environ.get(
@@ -788,7 +792,8 @@ class QueryExtractor:
                     {"role": "user", "content": prompt}
                 ],
             )
-            self._transform_calls += 1
+            with self._transform_lock:
+                self._transform_calls += 1
 
             first_block = resp.content[0]
             if not hasattr(first_block, "text"):
@@ -869,20 +874,51 @@ class QueryExtractor:
         extractions: list[QueryExtraction] = []
         gaps: list[ExtractionGap] = []
 
-        for query in queries:
-            extraction = self._process_query(
-                query, routes, protocol_index, match_result
-            )
-            if extraction is not None:
-                extractions.append(extraction)
-            else:
-                gaps.append(
-                    ExtractionGap(
-                        query_id=query.query_id,
-                        section_id=query.section_id,
-                        reason="no_match",
-                    )
+        if self._use_llm:
+            # Concurrent extraction — LLM calls are I/O-bound
+            # so threading gives near-linear speedup.
+            max_workers = min(8, len(queries))
+            with ThreadPoolExecutor(
+                max_workers=max_workers
+            ) as pool:
+                future_to_query = {
+                    pool.submit(
+                        self._process_query,
+                        q,
+                        routes,
+                        protocol_index,
+                        match_result,
+                    ): q
+                    for q in queries
+                }
+                for future in as_completed(future_to_query):
+                    q = future_to_query[future]
+                    extraction = future.result()
+                    if extraction is not None:
+                        extractions.append(extraction)
+                    else:
+                        gaps.append(
+                            ExtractionGap(
+                                query_id=q.query_id,
+                                section_id=q.section_id,
+                                reason="no_match",
+                            )
+                        )
+        else:
+            for query in queries:
+                extraction = self._process_query(
+                    query, routes, protocol_index, match_result
                 )
+                if extraction is not None:
+                    extractions.append(extraction)
+                else:
+                    gaps.append(
+                        ExtractionGap(
+                            query_id=query.query_id,
+                            section_id=query.section_id,
+                            reason="no_match",
+                        )
+                    )
 
         answered = sum(
             1
