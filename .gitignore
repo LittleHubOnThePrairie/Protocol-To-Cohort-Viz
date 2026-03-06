@@ -16,3 +16,4 @@ data/templates/*
 !data/templates/ich_e6r3_schema.yaml
 *.jsonl
 .secrets
+jira_changelog.md
