@@ -48,6 +48,11 @@ from ptcv.ich_parser.section_matcher import (
     MatchResult,
     SectionMapping,
 )
+from ptcv.ich_parser.summarization_matcher import (
+    SubSectionDef,
+    build_subsection_registry,
+    get_subsections_for_parent,
+)
 from ptcv.ich_parser.toc_extractor import ProtocolIndex
 
 logger = logging.getLogger(__name__)
@@ -670,11 +675,9 @@ class QueryExtractor:
     Args:
         confidence_threshold: Minimum confidence for a query to
             count as answered (default ``0.70``).
-        enable_transformation: If *True*, high-confidence scoped
-            extractions are reframed by Claude Sonnet to directly
-            address the query intent (PTCV-98).
-        transformation_threshold: Minimum confidence for LLM
-            transformation to apply (default ``0.80``).
+        enable_transformation: If *True*, all scoped extractions
+            are reframed by Claude Sonnet to directly address the
+            query intent (PTCV-98, PTCV-111).
         anthropic_api_key: Anthropic API key.  If *None*, reads
             ``ANTHROPIC_API_KEY`` from the environment.
     """
@@ -683,11 +686,9 @@ class QueryExtractor:
         self,
         confidence_threshold: float = 0.70,
         enable_transformation: bool = False,
-        transformation_threshold: float = 0.80,
         anthropic_api_key: str | None = None,
     ) -> None:
         self._threshold = confidence_threshold
-        self._transformation_threshold = transformation_threshold
         self._llm_model = "claude-sonnet-4-6"
         self._client: Any = None
         self._use_llm = False
@@ -854,9 +855,15 @@ class QueryExtractor:
         if queries is None:
             queries = load_query_schema()
 
+        # Build sub-section registry for content splitting
+        # (PTCV-110).
+        registry = build_subsection_registry(queries)
+
         # Build route map: ich_section_code → concatenated content
         routes = self._build_routes(
-            protocol_index, match_result
+            protocol_index,
+            match_result,
+            subsection_registry=registry,
         )
 
         extractions: list[QueryExtraction] = []
@@ -898,11 +905,104 @@ class QueryExtractor:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _split_content_by_subsection(
+        parent_content: str,
+        parent_code: str,
+        registry: dict[str, SubSectionDef],
+    ) -> dict[str, str]:
+        """Split parent section content into sub-section buckets.
+
+        Scores each paragraph against sub-section descriptions
+        using keyword overlap, assigning each to its best match.
+
+        Args:
+            parent_content: Concatenated text for a parent section.
+            parent_code: Parent section code (e.g. ``"B.2"``).
+            registry: Sub-section registry from
+                :func:`build_subsection_registry`.
+
+        Returns:
+            Dict mapping sub-section code to paragraph content.
+            Includes *parent_code* key for unassigned paragraphs.
+        """
+        sub_defs = get_subsections_for_parent(
+            parent_code, registry
+        )
+        if not sub_defs:
+            return {parent_code: parent_content}
+
+        paragraphs = re.split(r"\n\s*\n", parent_content.strip())
+        if not paragraphs:
+            return {parent_code: parent_content}
+
+        # Build keyword sets from sub-section descriptions.
+        _stop = frozenset({
+            "the", "and", "for", "are", "what", "that",
+            "this", "with", "from", "have", "has", "will",
+            "been", "should", "there", "their", "which",
+            "each", "any", "all", "how", "does", "used",
+            "into", "may", "can", "also", "name",
+        })
+        sub_kws: dict[str, set[str]] = {}
+        for sd in sub_defs:
+            words = set(
+                w
+                for w in re.findall(
+                    r"[a-z]{3,}", sd.description.lower()
+                )
+                if w not in _stop
+            )
+            sub_kws[sd.code] = words
+
+        # Score and assign each paragraph.
+        buckets: dict[str, list[str]] = {
+            sd.code: [] for sd in sub_defs
+        }
+        buckets[parent_code] = []
+
+        for para in paragraphs:
+            if len(para.strip()) < 30:
+                buckets[parent_code].append(para)
+                continue
+
+            para_lower = para.lower()
+            best_code = parent_code
+            best_score = 0.0
+
+            for sd in sub_defs:
+                kws = sub_kws[sd.code]
+                if not kws:
+                    continue
+                hits = sum(1 for w in kws if w in para_lower)
+                score = hits / len(kws)
+                if score > best_score:
+                    best_score = score
+                    best_code = sd.code
+
+            if best_score < 0.08:
+                best_code = parent_code
+
+            buckets[best_code].append(para)
+
+        return {
+            code: "\n\n".join(paras)
+            for code, paras in buckets.items()
+            if paras
+        }
+
+    @staticmethod
     def _build_routes(
         protocol_index: ProtocolIndex,
         match_result: MatchResult,
+        subsection_registry: (
+            dict[str, SubSectionDef] | None
+        ) = None,
     ) -> dict[str, tuple[str, str, MatchConfidence]]:
         """Map ICH section codes to concatenated content.
+
+        When *subsection_registry* is provided, also creates
+        sub-section-level routes (B.x.y) by splitting parent
+        content using keyword scoring (PTCV-110).
 
         Returns:
             Dict mapping ICH code to
@@ -962,6 +1062,33 @@ class QueryExtractor:
                     confidence,
                 )
 
+        # PTCV-110: Split parent content into sub-section routes.
+        if subsection_registry:
+            sub_routes: dict[
+                str, tuple[str, str, MatchConfidence]
+            ] = {}
+            for ich_code, (
+                content,
+                source,
+                confidence,
+            ) in routes.items():
+                splits = (
+                    QueryExtractor._split_content_by_subsection(
+                        content, ich_code, subsection_registry
+                    )
+                )
+                for sub_code, sub_content in splits.items():
+                    if (
+                        sub_code != ich_code
+                        and sub_content.strip()
+                    ):
+                        sub_routes[sub_code] = (
+                            sub_content,
+                            source,
+                            confidence,
+                        )
+            routes.update(sub_routes)
+
         return routes
 
     # ------------------------------------------------------------------
@@ -976,9 +1103,22 @@ class QueryExtractor:
         match_result: MatchResult,
     ) -> QueryExtraction | None:
         """Process a single query against routed content."""
-        schema_code = query.schema_section
+        # PTCV-110: Try sub-section route first (B.x.y).
+        section_id = query.section_id
+        if section_id in routes:
+            content, source, route_confidence = routes[
+                section_id
+            ]
+            return self._extract_from_content(
+                query,
+                content,
+                source,
+                route_confidence,
+                scoped=True,
+            )
 
-        # Try scoped route first
+        # Fall back to parent route (B.x).
+        schema_code = query.schema_section
         if schema_code in routes:
             content, source, route_confidence = routes[
                 schema_code
@@ -1022,23 +1162,17 @@ class QueryExtractor:
         if not extracted:
             return None
 
-        # Apply confidence penalties
-        if not scoped:
-            confidence *= _UNSCOPED_PENALTY
-            method = "unscoped_search"
-        elif route_confidence == MatchConfidence.REVIEW:
-            confidence *= _REVIEW_PENALTY
-
-        confidence = round(min(1.0, confidence), 4)
-
-        # LLM transformation (PTCV-98): reframe high-confidence
-        # scoped matches to directly address the query intent.
-        if (
-            self._use_llm
-            and scoped
-            and confidence >= self._transformation_threshold
-            and method != "unscoped_search"
-        ):
+        # LLM transformation (PTCV-98, PTCV-111): reframe scoped
+        # matches to directly address the query intent.
+        # Runs BEFORE confidence penalties so that the LLM's
+        # self-reported confidence participates in the final score.
+        if self._use_llm and scoped:
+            logger.debug(
+                "LLM transform: attempting query=%s "
+                "source_len=%d",
+                query.query_id,
+                len(extracted),
+            )
             transformed = self._transform_content(
                 extracted, query
             )
@@ -1049,6 +1183,41 @@ class QueryExtractor:
                     0.6 * confidence + 0.4 * llm_conf, 4
                 )
                 method = "llm_transform"
+                logger.debug(
+                    "LLM transform: success query=%s "
+                    "llm_conf=%.4f blended=%.4f",
+                    query.query_id,
+                    llm_conf,
+                    confidence,
+                )
+            else:
+                logger.debug(
+                    "LLM transform: failed query=%s "
+                    "— falling back to verbatim",
+                    query.query_id,
+                )
+        elif self._use_llm and not scoped:
+            logger.debug(
+                "LLM transform: skipped query=%s "
+                "reason=unscoped",
+                query.query_id,
+            )
+        elif not self._use_llm:
+            logger.debug(
+                "LLM transform: skipped query=%s "
+                "reason=llm_disabled",
+                query.query_id,
+            )
+
+        # Apply confidence penalties AFTER transformation
+        # (PTCV-111: penalties are post-transformation).
+        if not scoped:
+            confidence *= _UNSCOPED_PENALTY
+            method = "unscoped_search"
+        elif route_confidence == MatchConfidence.REVIEW:
+            confidence *= _REVIEW_PENALTY
+
+        confidence = round(min(1.0, confidence), 4)
 
         return QueryExtraction(
             query_id=query.query_id,

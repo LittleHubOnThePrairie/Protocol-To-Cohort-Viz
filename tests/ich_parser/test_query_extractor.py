@@ -882,16 +882,14 @@ class TestLLMTransformation:
             if env_key:
                 os.environ["ANTHROPIC_API_KEY"] = env_key
 
-    def test_transform_only_high_confidence(self) -> None:
-        """Below threshold → verbatim; above → LLM called."""
+    def test_transform_all_scoped(self) -> None:
+        """All scoped extractions are transformed (PTCV-111)."""
         mock_client = MagicMock()
         mock_client.messages.create.return_value = (
             _mock_anthropic_response("Transformed text", 0.90)
         )
 
-        qe = QueryExtractor(
-            transformation_threshold=0.80,
-        )
+        qe = QueryExtractor()
         qe._client = mock_client
         qe._use_llm = True
 
@@ -918,8 +916,6 @@ class TestLLMTransformation:
         )
         assert len(result.extractions) == 1
         ext = result.extractions[0]
-        # text_short with "Protocol Title:" gets 0.92 confidence
-        # 0.92 >= 0.80 threshold → LLM called
         assert ext.extraction_method == "llm_transform"
         assert ext.content == "Transformed text"
 
@@ -957,9 +953,16 @@ class TestLLMTransformation:
         # LLM should NOT have been called
         mock_client.messages.create.assert_not_called()
 
-    def test_transform_not_on_review_tier(self) -> None:
-        """REVIEW confidence after penalty < 0.80 → no transform."""
+    def test_transform_fires_on_review_tier(self) -> None:
+        """REVIEW-tier scoped matches are transformed (PTCV-111).
+
+        Confidence penalty is applied AFTER transformation, so
+        REVIEW matches still get sent to the LLM.
+        """
         mock_client = MagicMock()
+        mock_client.messages.create.return_value = (
+            _mock_anthropic_response("Reviewed text", 0.85)
+        )
 
         qe = QueryExtractor()
         qe._client = mock_client
@@ -985,13 +988,14 @@ class TestLLMTransformation:
         result = qe.extract(
             protocol, match_result, queries=queries
         )
-        # REVIEW penalty (0.85x) on 0.92 → 0.782 < 0.80 threshold
-        if result.extractions:
-            assert (
-                result.extractions[0].extraction_method
-                != "llm_transform"
-            )
-        mock_client.messages.create.assert_not_called()
+        assert len(result.extractions) == 1
+        ext = result.extractions[0]
+        # PTCV-111: transformation fires first, then REVIEW penalty
+        assert ext.extraction_method == "llm_transform"
+        assert ext.content == "Reviewed text"
+        # Confidence: 0.6*(0.92) + 0.4*(0.85) = 0.892 → *0.85 = 0.7582
+        assert ext.confidence < 0.80  # penalty pushes it down
+        mock_client.messages.create.assert_called_once()
 
     def test_transform_method_name(self) -> None:
         """Successful transform sets method to llm_transform."""
@@ -1092,3 +1096,272 @@ class TestLLMTransformation:
         # Blended: 0.6 * 0.92 + 0.4 * 0.90 = 0.552 + 0.36 = 0.912
         expected = round(0.6 * 0.92 + 0.4 * 0.90, 4)
         assert ext.confidence == expected
+
+    def test_review_penalty_applied_post_blend(self) -> None:
+        """REVIEW penalty applied AFTER LLM blend (PTCV-111).
+
+        Flow: det_conf=0.92 → blend(0.6*0.92 + 0.4*0.85)=0.892
+              → REVIEW penalty 0.85 → 0.892*0.85 = 0.7582
+        """
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = (
+            _mock_anthropic_response("Reviewed text", 0.85)
+        )
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+        protocol = _make_protocol_index(
+            content_spans={
+                "5": "Protocol Title: Test Study"
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping(
+                "5", "Selection", "B.1",
+                confidence=MatchConfidence.REVIEW,
+            ),
+        ])
+        queries = [
+            _make_query(
+                expected_type="text_short",
+                schema_section="B.1",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        ext = result.extractions[0]
+        # Blend first: 0.6*0.92 + 0.4*0.85 = 0.892
+        # Then REVIEW penalty: 0.892 * 0.85 = 0.7582
+        blended = round(0.6 * 0.92 + 0.4 * 0.85, 4)
+        expected = round(blended * 0.85, 4)
+        assert ext.confidence == expected
+        assert ext.extraction_method == "llm_transform"
+
+    def test_unscoped_penalty_no_transform(self) -> None:
+        """Unscoped extractions skip transform and get penalty
+        (PTCV-111)."""
+        mock_client = MagicMock()
+
+        qe = QueryExtractor()
+        qe._client = mock_client
+        qe._use_llm = True
+
+        # B.5 query has no route → full_text fallback (unscoped)
+        protocol = _make_protocol_index(
+            content_spans={"1": "General info"},
+            full_text=(
+                "Protocol Title: NCT12345678 Drug Study.\n"
+                "General info. NCT12345678"
+            ),
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        queries = [
+            _make_query(
+                query_id="B.5.1.q1",
+                schema_section="B.5",
+                expected_type="identifier",
+            ),
+        ]
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        if result.extractions:
+            ext = result.extractions[0]
+            assert ext.extraction_method != "llm_transform"
+        mock_client.messages.create.assert_not_called()
+
+
+# -----------------------------------------------------------------------
+# TestSubSectionRouting (PTCV-110)
+# -----------------------------------------------------------------------
+
+
+class TestSubSectionRouting:
+    """Sub-section level routing tests (PTCV-110)."""
+
+    def test_b2x_queries_get_different_content(self) -> None:
+        """B.2.1 and B.2.2 queries receive differentiated content."""
+        protocol = _make_protocol_index(
+            content_spans={
+                "2": (
+                    "The investigational product is Drug X, a "
+                    "selective inhibitor targeting the EGFR "
+                    "pathway. The formulation is a 100mg oral "
+                    "capsule administered once daily.\n\n"
+                    "Summary of nonclinical studies showed no "
+                    "significant toxicity in animal models at "
+                    "therapeutic doses. Preclinical findings "
+                    "indicate favorable safety margins.\n\n"
+                    "Known risks and benefits: nausea, fatigue, "
+                    "and rash are the primary adverse events. "
+                    "The benefit-risk balance is favorable."
+                ),
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("2", "Background", "B.2"),
+        ])
+        queries = [
+            _make_query(
+                query_id="B.2.1.q1",
+                section_id="B.2.1",
+                parent_section="B.2",
+                schema_section="B.2",
+                query_text=(
+                    "What is the name and description of the "
+                    "investigational product(s)?"
+                ),
+                expected_type="text_long",
+            ),
+            _make_query(
+                query_id="B.2.2.q1",
+                section_id="B.2.2",
+                parent_section="B.2",
+                schema_section="B.2",
+                query_text=(
+                    "What is the summary of findings from "
+                    "nonclinical studies that potentially have "
+                    "clinical significance?"
+                ),
+                expected_type="text_long",
+            ),
+        ]
+        qe = QueryExtractor()
+        result = qe.extract(
+            protocol, match_result, queries=queries
+        )
+        assert len(result.extractions) == 2
+        # The two extractions should have DIFFERENT content
+        # because they route to different sub-section buckets.
+        c0 = result.extractions[0].content
+        c1 = result.extractions[1].content
+        assert c0 != c1, (
+            "B.2.1 and B.2.2 should get different content"
+        )
+
+    def test_subsection_route_preferred_over_parent(
+        self,
+    ) -> None:
+        """section_id lookup happens before schema_section."""
+        protocol = _make_protocol_index(
+            content_spans={
+                "5": (
+                    "Inclusion criteria: adult patients aged "
+                    "18 or older with confirmed diagnosis.\n\n"
+                    "Exclusion criteria: pregnant women, "
+                    "patients with severe hepatic impairment."
+                ),
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("5", "Eligibility", "B.5"),
+        ])
+        q_inclusion = _make_query(
+            query_id="B.5.1.q1",
+            section_id="B.5.1",
+            parent_section="B.5",
+            schema_section="B.5",
+            query_text=(
+                "What are the inclusion criteria for trial "
+                "participants?"
+            ),
+            expected_type="list",
+        )
+        q_exclusion = _make_query(
+            query_id="B.5.2.q1",
+            section_id="B.5.2",
+            parent_section="B.5",
+            schema_section="B.5",
+            query_text=(
+                "What are the exclusion criteria for trial "
+                "participants?"
+            ),
+            expected_type="list",
+        )
+        qe = QueryExtractor()
+        result = qe.extract(
+            protocol, match_result,
+            queries=[q_inclusion, q_exclusion],
+        )
+        assert len(result.extractions) == 2
+        inc = result.extractions[0].content
+        exc = result.extractions[1].content
+        assert "inclusion" in inc.lower()
+        assert "exclusion" in exc.lower()
+
+    def test_fallback_to_parent_when_no_subsections(
+        self,
+    ) -> None:
+        """Sections without sub-sections still route correctly."""
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: Study of Drug X",
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General", "B.1"),
+        ])
+        # B.1 has only one sub-section query, should still work
+        q = _make_query(
+            query_id="B.1.1.q1",
+            section_id="B.1.1",
+            parent_section="B.1",
+            schema_section="B.1",
+            query_text="What is the protocol title?",
+            expected_type="text_short",
+        )
+        qe = QueryExtractor()
+        result = qe.extract(
+            protocol, match_result, queries=[q]
+        )
+        assert len(result.extractions) == 1
+        assert "Drug X" in result.extractions[0].content
+
+    def test_split_content_by_subsection(self) -> None:
+        """Unit test for _split_content_by_subsection."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.2.1": SubSectionDef(
+                code="B.2.1",
+                parent_code="B.2",
+                name="Investigational Product",
+                description=(
+                    "What is the name and description of the "
+                    "investigational product formulation dose?"
+                ),
+                query_ids=("B.2.1.q1",),
+            ),
+            "B.2.2": SubSectionDef(
+                code="B.2.2",
+                parent_code="B.2",
+                name="Nonclinical Findings",
+                description=(
+                    "What is the summary of findings from "
+                    "nonclinical preclinical studies toxicity "
+                    "clinical significance?"
+                ),
+                query_ids=("B.2.2.q1",),
+            ),
+        }
+        content = (
+            "Drug X is a selective EGFR inhibitor. The "
+            "formulation is a 100mg oral capsule for daily "
+            "investigational product administration.\n\n"
+            "Nonclinical studies in rodent models showed no "
+            "significant toxicity. Preclinical findings "
+            "demonstrate favorable safety margins."
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.2", registry
+        )
+        assert "B.2.1" in result
+        assert "B.2.2" in result
+        assert "investigational" in result["B.2.1"].lower()
+        assert "nonclinical" in result["B.2.2"].lower()
