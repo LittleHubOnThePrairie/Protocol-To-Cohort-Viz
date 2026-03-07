@@ -5,6 +5,371 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-07T14:26:06Z] PTCV-123: Add stage-level progress bars to query workflow UI
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add stage-level progress bars to query workflow UI
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:44Z] PTCV-122: Streamlit mock data panel
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit mock data panel
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:44Z] PTCV-121: Mock data orchestrator
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Mock data orchestrator
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:44Z] PTCV-120: GX checkpoint runner
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+GX checkpoint runner
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:43Z] PTCV-119: SDV synthesizer service
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SDV synthesizer service
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:43Z] PTCV-118: SDV metadata adapter
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SDV metadata adapter
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:43Z] PTCV-117: GX expectation suite builder
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+GX expectation suite builder
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:43Z] PTCV-116: SDTM domain metadata registry
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SDTM domain metadata registry
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T23:00:43Z] PTCV-115: Bug: B.12-B.14 section pattern swaps
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Bug: B.12-B.14 section pattern swaps
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/expectations/__init__.py
+- C:/Dev/PTCV/src/ptcv/expectations/checkpoint_runner.py
+- C:/Dev/PTCV/src/ptcv/expectations/suite_builder.py
+- C:/Dev/PTCV/src/ptcv/mock_data/__init__.py
+- C:/Dev/PTCV/src/ptcv/mock_data/mock_service.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdtm_metadata.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_adapter.py
+- C:/Dev/PTCV/src/ptcv/mock_data/sdv_synthesizer.py
+- C:/Dev/PTCV/src/ptcv/ui/components/mock_data_panel.py
+- C:/Dev/PTCV/tests/expectations/__init__.py
+- C:/Dev/PTCV/tests/expectations/conftest.py
+- C:/Dev/PTCV/tests/expectations/test_checkpoint_runner.py
+- C:/Dev/PTCV/tests/expectations/test_suite_builder.py
+- C:/Dev/PTCV/tests/mock_data/__init__.py
+- C:/Dev/PTCV/tests/mock_data/conftest.py
+- C:/Dev/PTCV/tests/mock_data/test_mock_service.py
+- C:/Dev/PTCV/tests/mock_data/test_sdtm_metadata.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_adapter.py
+- C:/Dev/PTCV/tests/mock_data/test_sdv_synthesizer.py
+- C:/Dev/PTCV/tests/ui/test_mock_data_panel.py
+
+**Test Coverage:**
+10 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-06T22:16:46Z] PTCV-113: Fix off-by-one pattern mismatch in ich_e6r3_schema.yaml for B.7-B.10
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Fix off-by-one pattern mismatch in ich_e6r3_schema.yaml for B.7-B.10
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/template_assembler.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_classifier_context.py
+- C:/Dev/PTCV/tests/ui/test_model_tiers.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 7d81daa, ff14059, c6d6204
+
+---
+## [2026-03-06T22:16:02Z] PTCV-110: Sub-section queries (B.2.x, B.4.x) produce identical output because routing collapses to parent schema_section
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Sub-section queries (B.2.x, B.4.x) produce identical output because routing collapses to parent schema_section
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_schema.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_schema.py
+- C:/Dev/PTCV/tests/ich_parser/test_summarization_matcher.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 7d81daa, ff14059, c6d6204
+
+---
 ## [2026-03-06T17:36:52Z] PTCV-109: Query extraction produces verbatim full-protocol dump instead of section-specific content for B.2 sub-sections
 
 **Status Change:** In Progress -> Done

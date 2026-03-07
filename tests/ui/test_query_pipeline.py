@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ptcv.ui.components.query_pipeline import (
+    PIPELINE_STAGES,
     _CONTENT_PREVIEW_LEN,
     count_extraction_methods,
     format_coverage_metrics,
@@ -19,6 +20,7 @@ from ptcv.ui.components.query_pipeline import (
     format_match_table,
     format_subsection_match_table,
     format_toc_tree,
+    run_query_pipeline,
 )
 
 
@@ -557,3 +559,144 @@ class TestRunQueryPipeline:
         assert "assembled" in result
         assert "assembled_markdown" in result
         assert "coverage" in result
+
+
+# ---------------------------------------------------------------------------
+# TestPipelineStages (PTCV-123)
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineStages:
+    """Tests for PIPELINE_STAGES constant."""
+
+    def test_stage_count(self) -> None:
+        assert len(PIPELINE_STAGES) == 4
+
+    def test_stage_names(self) -> None:
+        assert PIPELINE_STAGES == [
+            "Document Assembly",
+            "Section Classification",
+            "Query Extraction",
+            "Result Aggregation",
+        ]
+
+    def test_stages_are_strings(self) -> None:
+        for stage in PIPELINE_STAGES:
+            assert isinstance(stage, str)
+
+
+# ---------------------------------------------------------------------------
+# TestProgressCallback (PTCV-123)
+# ---------------------------------------------------------------------------
+
+
+class TestProgressCallback:
+    """Tests for progress_callback in run_query_pipeline()."""
+
+    def _mock_run(
+        self,
+        callback: object | None = None,
+        enable_summarization: bool = False,
+    ) -> dict:
+        """Run pipeline with mocked backends and an optional callback."""
+        mock_index = SimpleNamespace(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=[],
+            content_spans={},
+            full_text="test protocol text",
+            toc_found=False,
+            toc_pages=[],
+        )
+        mock_match = _match_result(auto_mapped_count=0)
+        mock_ext = _extraction_result(
+            extractions=[], gaps=[], coverage=0.0,
+        )
+        mock_assembled = SimpleNamespace(
+            sections=[],
+            coverage=_coverage(
+                total_sections=0, populated_count=0,
+                gap_count=0, avg_confidence=0.0,
+                high_confidence_count=0,
+                review_confidence_count=0,
+                low_confidence_count=0,
+            ),
+            to_markdown=lambda: "",
+            to_dict=lambda: {},
+        )
+
+        with (
+            patch(
+                "ptcv.ich_parser.toc_extractor.extract_protocol_index",
+                return_value=mock_index,
+            ),
+            patch(
+                "ptcv.ich_parser.section_matcher.SectionMatcher.match",
+                return_value=mock_match,
+            ),
+            patch(
+                "ptcv.ich_parser.query_extractor.QueryExtractor.extract",
+                return_value=mock_ext,
+            ),
+            patch(
+                "ptcv.ich_parser.template_assembler.assemble_template",
+                return_value=mock_assembled,
+            ),
+        ):
+            return run_query_pipeline(
+                "test.pdf",
+                enable_summarization=enable_summarization,
+                progress_callback=callback,
+            )
+
+    def test_callback_called_for_all_stages(self) -> None:
+        calls: list[tuple[str, float]] = []
+        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+
+        stage_names = {c[0] for c in calls}
+        for stage in PIPELINE_STAGES:
+            assert stage in stage_names, f"{stage} missing"
+
+    def test_each_stage_starts_at_zero(self) -> None:
+        calls: list[tuple[str, float]] = []
+        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+
+        for stage in PIPELINE_STAGES:
+            stage_calls = [c for c in calls if c[0] == stage]
+            assert stage_calls[0][1] == 0.0
+
+    def test_each_stage_ends_at_one(self) -> None:
+        calls: list[tuple[str, float]] = []
+        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+
+        for stage in PIPELINE_STAGES:
+            stage_calls = [c for c in calls if c[0] == stage]
+            assert stage_calls[-1][1] == 1.0
+
+    def test_callback_order(self) -> None:
+        calls: list[tuple[str, float]] = []
+        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+
+        # Extract stage order from start events (progress=0.0).
+        start_order = [
+            c[0] for c in calls if c[1] == 0.0
+        ]
+        assert start_order == PIPELINE_STAGES
+
+    def test_none_callback_no_error(self) -> None:
+        result = self._mock_run(callback=None)
+        assert "protocol_index" in result
+
+    def test_callback_receives_eight_events(self) -> None:
+        """4 stages x 2 events (start + end) = 8 calls."""
+        calls: list[tuple[str, float]] = []
+        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        assert len(calls) == 8
+
+    def test_pipeline_result_unchanged_with_callback(self) -> None:
+        result_with = self._mock_run(
+            callback=lambda s, p: None,
+        )
+        result_without = self._mock_run(callback=None)
+        assert result_with.keys() == result_without.keys()

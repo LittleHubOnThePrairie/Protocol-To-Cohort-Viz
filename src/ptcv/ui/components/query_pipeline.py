@@ -14,7 +14,7 @@ import os
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ptcv.ui.components.confidence_badge import (
     confidence_color,
@@ -36,11 +36,23 @@ _PIPELINE_CACHE_VERSION = 3  # v3: enable_transformation toggle (PTCV-103)
 # ---------------------------------------------------------------------------
 
 
+PIPELINE_STAGES = [
+    "Document Assembly",
+    "Section Classification",
+    "Query Extraction",
+    "Result Aggregation",
+]
+"""Ordered stage names for the query pipeline (PTCV-123)."""
+
+
 def run_query_pipeline(
     pdf_path: str | Path,
     anthropic_api_key: str | None = None,
     enable_summarization: bool = True,
     enable_transformation: bool = False,
+    progress_callback: Optional[
+        Callable[[str, float], None]
+    ] = None,
 ) -> dict[str, Any]:
     """Orchestrate the full query-driven pipeline.
 
@@ -53,6 +65,10 @@ def run_query_pipeline(
         enable_transformation: Whether to apply LLM-driven content
             transformation for high-confidence extractions
             (PTCV-103). Defaults to *False*.
+        progress_callback: Optional ``(stage_name, progress)`` callback
+            invoked between pipeline stages. *progress* is ``0.0``
+            when a stage starts and ``1.0`` when it completes
+            (PTCV-123).
 
     Returns:
         Dict with keys: ``protocol_index``, ``match_result``,
@@ -72,10 +88,17 @@ def run_query_pipeline(
         assemble_template,
     )
 
+    def _notify(stage: str, progress: float) -> None:
+        if progress_callback is not None:
+            progress_callback(stage, progress)
+
     # Stage 1: Extract protocol index
+    _notify("Document Assembly", 0.0)
     protocol_index = extract_protocol_index(pdf_path)
+    _notify("Document Assembly", 1.0)
 
     # Stage 2: Section matching (keyword-only, PTCV-102)
+    _notify("Section Classification", 0.0)
     matcher = SectionMatcher()
     match_result = matcher.match(protocol_index)
 
@@ -85,16 +108,20 @@ def run_query_pipeline(
         api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         summarizer = SummarizationMatcher(anthropic_api_key=api_key)
         enriched_result = summarizer.refine(match_result, protocol_index)
+    _notify("Section Classification", 1.0)
 
     # Stage 3: Query extraction (PTCV-103: optional LLM transform)
+    _notify("Query Extraction", 0.0)
     api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     extractor = QueryExtractor(
         enable_transformation=enable_transformation,
         anthropic_api_key=api_key,
     )
     extraction_result = extractor.extract(protocol_index, match_result)
+    _notify("Query Extraction", 1.0)
 
     # Stage 4: Template assembly
+    _notify("Result Aggregation", 0.0)
     hits = []
     for ext in extraction_result.extractions:
         parent = ext.section_id.rsplit(".", 1)[0] if "." in ext.section_id else ext.section_id
@@ -111,6 +138,7 @@ def run_query_pipeline(
         ))
 
     assembled = assemble_template(hits)
+    _notify("Result Aggregation", 1.0)
 
     return {
         "protocol_index": protocol_index,
@@ -404,41 +432,53 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
             type="primary",
             key="btn_query_pipeline",
         ):
-            with st.status(
-                "Running query-driven pipeline...",
-                expanded=True,
-            ) as status:
-                t0 = time.monotonic()
-                try:
-                    st.write("Extracting protocol index...")
-                    result = run_query_pipeline(
-                        str(file_path),
-                        enable_transformation=transform_on,
-                        anthropic_api_key=os.environ.get(
-                            "ANTHROPIC_API_KEY"
-                        ),
-                    )
-                    elapsed = time.monotonic() - t0
-                    st.session_state["query_cache"][cache_key] = result
-                    cached = result
-                    status.update(
-                        label=(
-                            "Query Pipeline: "
-                            f"Complete ({elapsed:.1f}s)"
-                        ),
-                        state="complete",
-                    )
-                except Exception:
-                    elapsed = time.monotonic() - t0
-                    status.update(
-                        label=(
-                            "Query Pipeline: "
-                            f"Error ({elapsed:.1f}s)"
-                        ),
-                        state="error",
-                    )
-                    st.code(traceback.format_exc(), language="text")
+            # --- Stage progress bars (PTCV-123) ---
+            bars: dict[str, Any] = {}
+            for stage_name in PIPELINE_STAGES:
+                bars[stage_name] = st.progress(
+                    0, text=stage_name,
+                )
+
+            def _on_stage(
+                stage: str, progress: float,
+            ) -> None:
+                if stage not in bars:
                     return
+                pct = int(progress * 100)
+                if progress >= 1.0:
+                    bars[stage].progress(
+                        100,
+                        text=f":white_check_mark: {stage}",
+                    )
+                else:
+                    bars[stage].progress(
+                        max(pct, 3),
+                        text=f":hourglass_flowing_sand: {stage}...",
+                    )
+
+            t0 = time.monotonic()
+            try:
+                result = run_query_pipeline(
+                    str(file_path),
+                    enable_transformation=transform_on,
+                    anthropic_api_key=os.environ.get(
+                        "ANTHROPIC_API_KEY"
+                    ),
+                    progress_callback=_on_stage,
+                )
+                elapsed = time.monotonic() - t0
+                st.session_state["query_cache"][cache_key] = result
+                cached = result
+                st.success(
+                    f"Query Pipeline: Complete ({elapsed:.1f}s)"
+                )
+            except Exception:
+                elapsed = time.monotonic() - t0
+                st.error(
+                    f"Query Pipeline: Error ({elapsed:.1f}s)"
+                )
+                st.code(traceback.format_exc(), language="text")
+                return
 
     if not cached:
         st.info(
