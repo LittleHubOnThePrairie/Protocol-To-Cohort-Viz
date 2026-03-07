@@ -63,3 +63,13 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 **Type:** Story | **Priority:** Medium | **PRD:** PRD-1
 **Actor:** Claude Code
 **Action:** Transitioned To Do → In Progress via `/jira-sync`
+
+## 2026-03-07T20:15:00Z
+- **PTCV-137**: Migrate Results tab from Process tab IchSection output to query pipeline AssembledProtocol
+  - Status: To Do → In Progress
+  - Actor: Claude Code
+
+## 2026-03-07T20:30:00Z
+- **PTCV-142**: Deprecate Process tab extraction pipeline with feature flag and migration warnings
+  - Status: To Do → In Progress
+  - Actor: Claude Code

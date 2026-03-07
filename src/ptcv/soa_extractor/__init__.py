@@ -24,6 +24,10 @@ Typical usage::
 
 from .extractor import SoaExtractor
 from .mapper import UsdmMapper
+from .matrix_builder import (
+    build_assessment_matrix,
+    build_assessment_matrix_from_usdm,
+)
 from .models import (
     ExtractResult,
     RawSoaTable,
@@ -45,6 +49,8 @@ __all__ = [
     "SynonymResolver",
     "TableDiscovery",
     "UsdmParquetWriter",
+    "build_assessment_matrix",
+    "build_assessment_matrix_from_usdm",
     "ExtractResult",
     "RawSoaTable",
     "SynonymMapping",
