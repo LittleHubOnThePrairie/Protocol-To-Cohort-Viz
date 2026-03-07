@@ -27,6 +27,7 @@ from ptcv.ich_parser.toc_extractor import (
     _clean_title,
     _count_toc_lines,
     _detect_body_headers,
+    _detect_repeating_lines,
     _is_page_boilerplate,
     _is_toc_page,
     _normalise_number,
@@ -34,6 +35,7 @@ from ptcv.ich_parser.toc_extractor import (
     _resolve_content_spans,
     _resolve_toc_pages,
     _section_level,
+    _strip_page_headers_footers,
     extract_protocol_index,
     strip_toc_lines,
 )
@@ -896,3 +898,375 @@ class TestStripTocLinesExtended:
         assert "Figure 10-1" not in spans["10"]
         assert "Proprietary and Confidential" not in spans["10"]
         assert "schedule of assessments is provided" in spans["10"]
+
+
+# -----------------------------------------------------------------------
+# PTCV-127: Expanded boilerplate patterns
+# -----------------------------------------------------------------------
+
+
+class TestExpandedBoilerplatePatterns:
+    """Tests for expanded _PAGE_BOILERPLATE_RES patterns (PTCV-127)."""
+
+    def test_proprietary_confidential_without_and(self) -> None:
+        """'Proprietary confidential information' detected."""
+        line = (
+            "Proprietary confidential information "
+            "\u00a9 2023Boehringer Ingelheim International GmbH"
+        )
+        assert _is_page_boilerplate(line) is True
+
+    def test_copyright_symbol(self) -> None:
+        assert _is_page_boilerplate(
+            "\u00a9 2023 Pfizer Inc. All rights reserved."
+        ) is True
+
+    def test_copyright_c_in_parens(self) -> None:
+        assert _is_page_boilerplate(
+            "(c) 2021 Novartis AG"
+        ) is True
+
+    def test_clinical_trial_protocol(self) -> None:
+        line = (
+            "Boehringer Ingelheim 16Mar2023 BI Trial No.: "
+            "1451-0001 c34591878-06 Clinical Trial Protocol "
+            "Page 20 of 97"
+        )
+        assert _is_page_boilerplate(line) is True
+
+    def test_clinical_trial_protocol_alone(self) -> None:
+        assert _is_page_boilerplate(
+            "Clinical Trial Protocol Version 4.0"
+        ) is True
+
+    def test_body_text_not_matched(self) -> None:
+        """Ensure body content is not false-positived."""
+        assert _is_page_boilerplate(
+            "The study drug was administered orally."
+        ) is False
+
+
+# -----------------------------------------------------------------------
+# PTCV-127: Per-page repeating header/footer detection
+# -----------------------------------------------------------------------
+
+
+# Alphabetic tags used to make per-page body text unique so that
+# frequency-based header/footer detection does not false-positive.
+_ALPHA_TAGS = [
+    "alpha", "bravo", "charlie", "delta", "echo",
+    "foxtrot", "golf", "hotel", "india", "juliet",
+    "kilo", "lima", "mike", "november", "oscar",
+    "papa", "quebec", "romeo", "sierra", "tango",
+]
+
+
+def _make_page_texts(
+    body_lines: list[str],
+    *,
+    header: str = "Sponsor Inc. Protocol ABC-123 Page {n} of 20",
+    footer: str = "DOC-REF-001/Saved:10Jul2019",
+    num_pages: int = 10,
+) -> list[tuple[int, str]]:
+    """Build synthetic page_texts with repeating headers/footers.
+
+    Body lines are made unique per page using alphabetic tags so they
+    are NOT detected as repeating patterns by digit-normalised
+    frequency analysis.
+    """
+    pages: list[tuple[int, str]] = []
+    for i in range(num_pages):
+        page_num = i + 1
+        tag = _ALPHA_TAGS[i % len(_ALPHA_TAGS)]
+        h = header.format(n=page_num)
+        # Make body unique per page using non-numeric tag
+        unique_body = [f"{ln} [{tag}]" for ln in body_lines]
+        # Pad body to at least 10 lines so headers/footers are clearly
+        # separated from body content in the top-5/bottom-3 windows.
+        while len(unique_body) < 10:
+            unique_body.append(f"Filler text for section {tag}.")
+        lines = [h] + unique_body + [footer]
+        pages.append((page_num, "\n".join(lines)))
+    return pages
+
+
+class TestDetectRepeatingLines:
+    """Tests for _detect_repeating_lines (PTCV-127)."""
+
+    def test_detects_header_and_footer(self) -> None:
+        pages = _make_page_texts(
+            ["Body content for this page."],
+            num_pages=10,
+        )
+        header_pats, footer_pats = _detect_repeating_lines(pages)
+        # Header pattern normalised: digits replaced with #
+        assert any("Sponsor" in p for p in header_pats)
+        assert any("DOC-REF" in p for p in footer_pats)
+
+    def test_too_few_pages_returns_empty(self) -> None:
+        pages = _make_page_texts(
+            ["Short document."],
+            num_pages=3,
+        )
+        header_pats, footer_pats = _detect_repeating_lines(pages)
+        assert header_pats == set()
+        assert footer_pats == set()
+
+    def test_no_repeating_lines(self) -> None:
+        # Each page has genuinely different first lines (no digit pattern)
+        words = [
+            "Alpha", "Bravo", "Charlie", "Delta", "Echo",
+            "Foxtrot", "Golf", "Hotel", "India", "Juliet",
+        ]
+        pages = [
+            (i + 1, f"{words[i]} section content here.")
+            for i in range(10)
+        ]
+        header_pats, footer_pats = _detect_repeating_lines(pages)
+        assert header_pats == set()
+        assert footer_pats == set()
+
+    def test_boehringer_style_header(self) -> None:
+        """Real-world Boehringer Ingelheim header pattern."""
+        pages: list[tuple[int, str]] = []
+        for i in range(10):
+            pn = i + 1
+            header = (
+                f"Boehringer Ingelheim 16Mar2023 BI Trial No.: "
+                f"1451-0001 c34591878-06 Clinical Trial Protocol "
+                f"Page {pn} of 97"
+            )
+            conf = (
+                "Proprietary confidential information "
+                "\u00a9 2023Boehringer Ingelheim International GmbH "
+                "or one or more of its affiliated companies"
+            )
+            body = "Safety Pharmacology data was reviewed."
+            pages.append(
+                (pn, f"{header}\n{conf}\n{body}")
+            )
+        header_pats, footer_pats = _detect_repeating_lines(pages)
+        # Both header lines should be detected
+        assert len(header_pats) >= 2
+
+
+class TestStripPageHeadersFooters:
+    """Tests for _strip_page_headers_footers (PTCV-127)."""
+
+    def test_strips_repeating_headers_and_footers(self) -> None:
+        pages = _make_page_texts(
+            ["Body content here.", "More body text."],
+            num_pages=10,
+        )
+        cleaned = _strip_page_headers_footers(pages)
+        for _, text in cleaned:
+            assert "Sponsor Inc." not in text
+            assert "DOC-REF" not in text
+            assert "Body content here." in text
+
+    def test_preserves_body_content(self) -> None:
+        pages = _make_page_texts(
+            [
+                "Patients were randomised in ratio.",
+                "The primary endpoint was met.",
+            ],
+            num_pages=10,
+        )
+        cleaned = _strip_page_headers_footers(pages)
+        for _, text in cleaned:
+            assert "Patients were randomised" in text
+            assert "primary endpoint" in text
+
+    def test_skips_short_documents(self) -> None:
+        # Build pages manually (not via helper) to keep exact equality
+        pages: list[tuple[int, str]] = []
+        for i in range(3):
+            pn = i + 1
+            pages.append((pn, f"Header Page {pn} of 3\nBody.\nFooter ref"))
+        cleaned = _strip_page_headers_footers(pages)
+        # Should be unchanged (too few pages)
+        assert cleaned == pages
+
+    def test_strips_boehringer_header(self) -> None:
+        """Full Boehringer Ingelheim header/footer removal."""
+        # Each page needs enough unique body lines so body content
+        # falls outside the top-5 / bottom-3 detection windows.
+        body_paragraphs = [
+            "The core safety pharmacology function",
+            "was evaluated as part of the study protocol.",
+            "Cardiovascular and respiratory systems were assessed.",
+            "No effects on neurological function were observed.",
+            "Data from clinical studies show acceptable safety.",
+            "Seven subjects have been treated in part A.",
+            "Overall the drug was well tolerated.",
+            "No dose limiting events were reported.",
+            "The safety profile supports continued development.",
+            "Refer to the investigator brochure for details.",
+        ]
+        pages: list[tuple[int, str]] = []
+        for i in range(10):
+            pn = i + 1
+            tag = _ALPHA_TAGS[i]
+            header = (
+                f"Boehringer Ingelheim 16Mar2023 BI Trial No.: "
+                f"1451-0001 c34591878-06 Clinical Trial Protocol "
+                f"Page {pn} of 97"
+            )
+            conf = (
+                "Proprietary confidential information "
+                "\u00a9 2023Boehringer Ingelheim International GmbH"
+            )
+            footer = "001-MCS-40-106_RD-03(18.0)/Savedon:10Jul2019"
+            # Unique body per page
+            body = [f"{ln} [{tag}]" for ln in body_paragraphs]
+            lines = [header, conf] + body + [footer]
+            pages.append((pn, "\n".join(lines)))
+        cleaned = _strip_page_headers_footers(pages)
+        for _, text in cleaned:
+            assert "Clinical Trial Protocol" not in text
+            assert "Proprietary confidential" not in text
+            assert "Savedon" not in text
+            assert "safety pharmacology" in text.lower()
+
+    def test_strip_toc_lines_catches_remaining(self) -> None:
+        """strip_toc_lines removes patterns missed by frequency detection."""
+        text = (
+            "8.2 NONCLINICAL PHARMACOLOGY\n"
+            "Proprietary confidential information\n"
+            "Safety data was reviewed thoroughly.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Proprietary confidential" not in result
+        assert "Safety data was reviewed" in result
+
+
+# -----------------------------------------------------------------------
+# PTCV-129: full_text TOC stripping
+# -----------------------------------------------------------------------
+
+
+class TestFullTextTocStripping:
+    """Tests that full_text is cleaned of TOC entries (PTCV-129)."""
+
+    def test_strip_toc_lines_removes_numbered_toc(self) -> None:
+        """Numbered TOC entries like '7. INTRODUCTION...23' are stripped."""
+        text = (
+            "Patients were assessed at baseline.\n"
+            "7. INTRODUCTION.........................................23\n"
+            "8. TRIAL OBJECTIVES AND ENDPOINTS.......................33\n"
+            "9. DESCRIPTION OF DESIGN AND TRIAL POPULATION..........35\n"
+            "10. TREATMENTS..........................................43\n"
+            "11. ASSESSMENTS.........................................55\n"
+            "12. INVESTIGATIONAL PLAN................................70\n"
+            "The primary endpoint was UACR change.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "INTRODUCTION" not in result
+        assert "TRIAL OBJECTIVES" not in result
+        assert "TREATMENTS" not in result
+        assert "ASSESSMENTS" not in result
+        assert "INVESTIGATIONAL PLAN" not in result
+        assert "Patients were assessed" in result
+        assert "primary endpoint was UACR" in result
+
+    def test_strip_toc_preserves_numbered_lists(self) -> None:
+        """Legitimate numbered list items are NOT stripped."""
+        text = (
+            "1. MMRM will be used for the analysis\n"
+            "2. Descriptive statistics will be provided\n"
+            "3. Telemedicine contact to provide support\n"
+        )
+        result = strip_toc_lines(text)
+        assert "MMRM will be used" in result
+        assert "Descriptive statistics" in result
+        assert "Telemedicine contact" in result
+
+    def test_strip_toc_handles_dotted_section_numbers(self) -> None:
+        """Standard section-number TOC entries are stripped."""
+        text = (
+            "Body content here.\n"
+            "7.3 Exclusion Criteria .......................... 20\n"
+            "7.4 Withdrawal Criteria ......................... 21\n"
+            "More body content.\n"
+        )
+        result = strip_toc_lines(text)
+        assert "Exclusion Criteria" not in result
+        assert "Withdrawal Criteria" not in result
+        assert "Body content here" in result
+        assert "More body content" in result
+
+    def test_full_text_cleaned_in_protocol_index(self) -> None:
+        """ProtocolIndex.full_text does not contain TOC entries.
+
+        Uses a mock PDF to verify the end-to-end path from
+        extract_protocol_index through to the stored full_text.
+        """
+        from unittest.mock import MagicMock, patch
+
+        # Create mock pages: 3 TOC pages + 7 body pages
+        mock_pages = []
+
+        # TOC pages (pages 3-5)
+        toc_text = (
+            "TABLE OF CONTENTS\n"
+            "7 INTRODUCTION ................................ 23\n"
+            "8 TRIAL OBJECTIVES ........................... 33\n"
+            "9 DESCRIPTION OF DESIGN ...................... 35\n"
+            "10 TREATMENTS ................................ 43\n"
+        )
+        body_text_template = (
+            "{num} {title}\n"
+            "This section describes the {topic} in detail.\n"
+            "Additional information is provided below.\n"
+            "The study was conducted per ICH guidelines.\n"
+            "All subjects provided informed consent.\n"
+            "Data were analyzed using standard methods.\n"
+        )
+
+        # Front matter (pages 1-2)
+        for _ in range(2):
+            p = MagicMock()
+            p.extract_text.return_value = "Title page content."
+            mock_pages.append(p)
+
+        # TOC pages (pages 3-5)
+        for _ in range(3):
+            p = MagicMock()
+            p.extract_text.return_value = toc_text
+            mock_pages.append(p)
+
+        # Body pages (pages 6-10)
+        sections = [
+            ("7", "INTRODUCTION", "study introduction"),
+            ("8", "TRIAL OBJECTIVES", "trial objectives"),
+            ("9", "DESCRIPTION OF DESIGN", "study design"),
+            ("10", "TREATMENTS", "treatment regimen"),
+            ("11", "ASSESSMENTS", "clinical assessments"),
+        ]
+        for num, title, topic in sections:
+            p = MagicMock()
+            p.extract_text.return_value = body_text_template.format(
+                num=num, title=title, topic=topic,
+            )
+            mock_pages.append(p)
+
+        mock_pdf = MagicMock()
+        mock_pdf.pages = mock_pages
+        mock_pdf.__enter__ = lambda s: s
+        mock_pdf.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("pdfplumber.open", return_value=mock_pdf),
+            patch("pathlib.Path.exists", return_value=True),
+        ):
+            idx = extract_protocol_index("/fake/test.pdf")
+
+        # full_text should NOT contain TOC entries
+        for line in idx.full_text.split("\n"):
+            s = line.strip()
+            assert not (
+                "INTRODUCTION" in s and "23" in s and "..." in s
+            ), f"TOC entry in full_text: {s}"
+            assert not (
+                "TREATMENTS" in s and "43" in s and "..." in s
+            ), f"TOC entry in full_text: {s}"

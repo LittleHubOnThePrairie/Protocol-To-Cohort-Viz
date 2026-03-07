@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -85,9 +86,17 @@ _LIST_OF_HEADER_RE = re.compile(
 # running headers/footers injected by PDF extraction.
 _PAGE_BOILERPLATE_RES: list[re.Pattern[str]] = [
     re.compile(r"Proprietary\s+and\s+Confidential", re.IGNORECASE),
+    re.compile(r"Proprietary\s+confidential", re.IGNORECASE),
     re.compile(r"^CONFIDENTIAL\s*$", re.IGNORECASE),
     re.compile(r"Page\s+\d+\s+of\s+\d+", re.IGNORECASE),
+    # Copyright/legal notices (PTCV-127)
+    re.compile(r"\u00a9\s*\d{4}", re.IGNORECASE),  # © 2023
+    re.compile(r"\(c\)\s*\d{4}", re.IGNORECASE),  # (c) 2023
+    re.compile(r"Clinical\s+Trial\s+Protocol\b", re.IGNORECASE),
 ]
+
+# Regex to normalise digits in a line for header/footer frequency analysis.
+_DIGIT_NORM_RE = re.compile(r"\d+")
 
 # Body heading: numbered section at start of a line
 _BODY_HEADING_RE = re.compile(
@@ -323,6 +332,148 @@ def strip_toc_lines(text: str) -> str:
             continue
         cleaned.append(line)
     return "\n".join(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Per-page repeating header/footer detection (PTCV-127)
+# ---------------------------------------------------------------------------
+
+
+def _detect_repeating_lines(
+    page_texts: list[tuple[int, str]],
+    *,
+    max_header_lines: int = 5,
+    max_footer_lines: int = 3,
+    min_frequency: float = 0.3,
+    min_pages: int = 5,
+) -> tuple[set[str], set[str]]:
+    """Detect repeating page headers and footers by frequency analysis.
+
+    Examines the first/last *N* non-empty lines on each page.  Lines
+    whose normalised form (digits replaced with ``#``) appears on
+    >=*min_frequency* of all pages are classified as running headers
+    or footers.
+
+    Pharmaceutical protocol headers commonly span 4-5 lines (sponsor
+    name, trial number, protocol title, confidentiality, copyright)
+    so the default ``max_header_lines=5`` captures these.
+
+    Args:
+        page_texts: ``(page_number, text)`` pairs.
+        max_header_lines: Number of top lines to examine per page.
+        max_footer_lines: Number of bottom lines to examine per page.
+        min_frequency: Fraction of pages a line must appear on.
+        min_pages: Minimum page count to enable detection.
+
+    Returns:
+        ``(header_patterns, footer_patterns)`` — sets of normalised
+        line strings identified as repeating.
+    """
+    if len(page_texts) < min_pages:
+        return set(), set()
+
+    threshold = len(page_texts) * min_frequency
+    top_counter: Counter[str] = Counter()
+    bottom_counter: Counter[str] = Counter()
+
+    for _, text in page_texts:
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        if not lines:
+            continue
+        # Deduplicate per-page to avoid inflating counts
+        top_seen: set[str] = set()
+        for ln in lines[:max_header_lines]:
+            norm = _DIGIT_NORM_RE.sub("#", ln)
+            if norm not in top_seen:
+                top_seen.add(norm)
+                top_counter[norm] += 1
+        bot_seen: set[str] = set()
+        for ln in lines[-max_footer_lines:]:
+            norm = _DIGIT_NORM_RE.sub("#", ln)
+            if norm not in bot_seen:
+                bot_seen.add(norm)
+                bottom_counter[norm] += 1
+
+    header_pats = {
+        pat for pat, count in top_counter.items() if count >= threshold
+    }
+    footer_pats = {
+        pat for pat, count in bottom_counter.items() if count >= threshold
+    }
+    return header_pats, footer_pats
+
+
+def _strip_page_headers_footers(
+    page_texts: list[tuple[int, str]],
+    *,
+    max_header_lines: int = 5,
+    max_footer_lines: int = 3,
+    min_frequency: float = 0.3,
+    min_pages: int = 5,
+) -> list[tuple[int, str]]:
+    """Remove repeating header/footer lines from each page (PTCV-127).
+
+    Performs frequency analysis across all pages to detect running
+    headers and footers, then strips matching lines from the top
+    and bottom of each page.
+
+    Returns:
+        Cleaned ``(page_number, text)`` list.
+    """
+    header_pats, footer_pats = _detect_repeating_lines(
+        page_texts,
+        max_header_lines=max_header_lines,
+        max_footer_lines=max_footer_lines,
+        min_frequency=min_frequency,
+        min_pages=min_pages,
+    )
+
+    if not header_pats and not footer_pats:
+        return page_texts
+
+    total_stripped = 0
+    cleaned: list[tuple[int, str]] = []
+    for page_num, text in page_texts:
+        lines = text.split("\n")
+        non_empty_indices = [
+            i for i, ln in enumerate(lines) if ln.strip()
+        ]
+        if not non_empty_indices:
+            cleaned.append((page_num, text))
+            continue
+
+        strip_indices: set[int] = set()
+
+        # Check top lines
+        for idx in non_empty_indices[:max_header_lines]:
+            norm = _DIGIT_NORM_RE.sub("#", lines[idx].strip())
+            if norm in header_pats:
+                strip_indices.add(idx)
+
+        # Check bottom lines
+        for idx in non_empty_indices[-max_footer_lines:]:
+            norm = _DIGIT_NORM_RE.sub("#", lines[idx].strip())
+            if norm in footer_pats:
+                strip_indices.add(idx)
+
+        if strip_indices:
+            total_stripped += len(strip_indices)
+            out = [
+                ln for i, ln in enumerate(lines)
+                if i not in strip_indices
+            ]
+            cleaned.append((page_num, "\n".join(out)))
+        else:
+            cleaned.append((page_num, text))
+
+    if total_stripped > 0:
+        logger.info(
+            "Stripped %d repeating header/footer lines across %d pages",
+            total_stripped,
+            len(page_texts),
+        )
+
+    return cleaned
 
 
 def _parse_toc_page(text: str) -> list[TOCEntry]:
@@ -663,6 +814,11 @@ def extract_protocol_index(
             pdf_path.name,
         )
 
+    # PTCV-127: Strip repeating page headers/footers before assembly.
+    # This removes sponsor headers, confidentiality notices, copyright
+    # lines, and document reference footers that repeat across pages.
+    page_texts = _strip_page_headers_footers(page_texts)
+
     # Build full text and page offset map (PTCV-109)
     page_separator = "\n"
     page_offset_map: dict[int, int] = {}
@@ -720,6 +876,12 @@ def extract_protocol_index(
         len(headers),
         toc_found,
     )
+
+    # PTCV-129: Clean full_text of TOC residue so the query extractor's
+    # full-text fallback path doesn't pick up TOC entries.  This runs
+    # AFTER header detection and content span resolution (which rely
+    # on unmodified char offsets) so it's safe to mutate.
+    full_text = strip_toc_lines(full_text)
 
     return ProtocolIndex(
         source_path=str(pdf_path),
