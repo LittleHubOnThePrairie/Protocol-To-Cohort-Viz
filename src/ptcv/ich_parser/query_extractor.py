@@ -328,6 +328,12 @@ _LLM_TRANSFORM_MAX_CHARS = 10000
 # Minimum paragraph length to consider for relevance scoring.
 _MIN_PARAGRAPH_LEN = 40
 
+# Maximum characters for unscoped (full-doc) fallback (PTCV-157).
+# Prevents full-document dumps (up to 500K chars) when section matching
+# fails.  Content is pre-filtered via _select_relevant_paragraphs to
+# keep only the most query-relevant chunks.
+_UNSCOPED_MAX_CHARS = 10000
+
 _STOP_WORDS = frozenset({
     "the", "and", "for", "are", "what", "that", "this",
     "with", "from", "have", "has", "will", "been", "should",
@@ -1346,11 +1352,20 @@ class QueryExtractor:
                 scoped=True,
             )
 
-        # Fallback: unscoped full-text search
+        # Fallback: unscoped full-text search (PTCV-157: capped)
         if protocol_index.full_text:
+            # Pre-filter to the most query-relevant paragraphs
+            # instead of dumping the entire document (up to 500K chars).
+            capped_text, _ = _select_relevant_paragraphs(
+                protocol_index.full_text,
+                query,
+                max_chars=_UNSCOPED_MAX_CHARS,
+            )
+            if not capped_text:
+                return None
             return self._extract_from_content(
                 query,
-                protocol_index.full_text,
+                capped_text,
                 "full_text",
                 MatchConfidence.LOW,
                 scoped=False,

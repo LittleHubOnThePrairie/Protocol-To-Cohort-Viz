@@ -125,6 +125,16 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "response criteria": "B.8",
     "tumour response": "B.8",
     "tumor response": "B.8",
+    "assessment of response": "B.8",
+    "clinical outcome assessment": "B.8",
+    "outcome measures": "B.8",
+    "study endpoints": "B.8",
+    "efficacy analyses": "B.8",
+    "efficacy endpoints": "B.8",
+    "treatment response": "B.8",
+    "endpoints and assessment": "B.8",
+    "efficacy evaluation": "B.8",
+    "efficacy measures": "B.8",
     # B.9 Assessment of Safety
     "adverse event": "B.9",
     "safety assessment": "B.9",
@@ -203,6 +213,59 @@ _B1_EXCLUSION_TERMS: frozenset[str] = frozenset({
     # B.12 Quality Control / GCP
     "good clinical practice",
 })
+
+# -----------------------------------------------------------------------
+# Garbage header detection (PTCV-157, Tier 2)
+# -----------------------------------------------------------------------
+# Headers that are clearly not protocol section titles should be
+# excluded from matching entirely.  Indicators:
+# - Literature citations (author lists with "et al")
+# - OCR-damaged text (broken word spacing)
+# - Overly long "headers" (>100 chars — likely body text)
+
+# Maximum header length before it's treated as body text.
+_MAX_HEADER_LEN = 100
+
+# Regex: author-list citation pattern (e.g. "Smith JA, Jones B, ...")
+_CITATION_RE = re.compile(
+    r"(?:[A-Z][a-z]+\s+[A-Z]{1,2},?\s*){2,}.*\bet\s*al\b",
+    re.IGNORECASE,
+)
+
+# Common short English words that are NOT OCR artefacts.
+_COMMON_SHORT_WORDS = frozenset({
+    "a", "i", "an", "as", "at", "be", "by", "do", "go",
+    "he", "if", "in", "is", "it", "me", "my", "no", "of",
+    "on", "or", "so", "to", "up", "us", "we",
+})
+
+
+def _is_garbage_header(title: str) -> bool:
+    """Return ``True`` if *title* looks like a garbage header.
+
+    Garbage indicators (PTCV-157):
+    - Length > ``_MAX_HEADER_LEN`` chars (likely body text).
+    - Contains citation-style author list with "et al".
+    - Contains OCR word-splitting damage: >= 2 artefact words
+      (single-char orphans not in common words, or hyphen-prefixed
+      fragments like "-resistance").
+    """
+    if len(title) > _MAX_HEADER_LEN:
+        return True
+    if _CITATION_RE.search(title):
+        return True
+    # OCR damage: count artefact words.
+    words = title.split()
+    artefact_count = 0
+    for w in words:
+        w_lower = w.lower()
+        if len(w) <= 2 and w_lower not in _COMMON_SHORT_WORDS:
+            artefact_count += 1
+        elif w.startswith("-") and len(w) > 1:
+            artefact_count += 1
+    if artefact_count >= 2:
+        return True
+    return False
 
 
 # -----------------------------------------------------------------------
@@ -401,6 +464,12 @@ class SectionMatcher:
 
         for idx, (number, title) in enumerate(headers):
             raw_scores = scores[idx]
+
+            # PTCV-157 Tier 2: Zero all scores for garbage headers
+            # (citations, OCR damage, body text posing as headers).
+            if _is_garbage_header(title):
+                raw_scores = [0.0] * len(raw_scores)
+
             boosted = self._apply_synonym_boost(
                 title, raw_scores
             )

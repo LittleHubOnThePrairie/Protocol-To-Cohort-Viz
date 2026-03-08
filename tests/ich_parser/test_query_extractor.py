@@ -14,6 +14,7 @@ from ptcv.ich_parser.query_extractor import (
     _LLM_TRANSFORM_MAX_CHARS,
     _NUMBERED_HEADING_RE,
     _TEXT_LONG_MAX_CHARS,
+    _UNSCOPED_MAX_CHARS,
     _extract_criteria_section,
     _extract_date,
     _extract_enum,
@@ -2017,3 +2018,60 @@ class TestFrontMatterExtraction:
         assert "B.1" in routes
         content, _, _ = routes["B.1"]
         assert len(content) <= 5000
+
+
+# ===================================================================
+# TestUnscopedLengthCap (PTCV-157, Tier 3)
+# ===================================================================
+
+
+class TestUnscopedLengthCap:
+    """Verify unscoped_search fallback is capped at _UNSCOPED_MAX_CHARS."""
+
+    def test_constant_value(self) -> None:
+        assert _UNSCOPED_MAX_CHARS == 10000
+
+    def test_unscoped_paragraphs_capped(self) -> None:
+        """_select_relevant_paragraphs with UNSCOPED cap limits output."""
+        large_text = (
+            "Unrelated content paragraph here.\n\n" * 1000
+        )  # ~35K chars
+        query = AppendixBQuery(
+            query_id="B.8.1.q1",
+            section_id="B.8.1",
+            parent_section="B.8",
+            schema_section="B.8",
+            query_text="What are the efficacy parameters?",
+            expected_type="text_long",
+            required=True,
+        )
+        excerpt, _ = _select_relevant_paragraphs(
+            large_text, query, max_chars=_UNSCOPED_MAX_CHARS,
+        )
+        assert len(excerpt) <= _UNSCOPED_MAX_CHARS + 500
+
+    def test_unscoped_selects_relevant_content(self) -> None:
+        """Unscoped fallback should prefer query-relevant paragraphs."""
+        irrelevant = "Lorem ipsum dolor sit amet. " * 200
+        relevant = (
+            "The primary efficacy endpoint is PASI 75 at Week 12. "
+            "Secondary efficacy endpoints include sPGA scores and "
+            "PsA joint counts."
+        )
+        full_text = irrelevant + "\n\n" + relevant + "\n\n" + irrelevant
+
+        query = AppendixBQuery(
+            query_id="B.8.1.q1",
+            section_id="B.8.1",
+            parent_section="B.8",
+            schema_section="B.8",
+            query_text="What are the efficacy parameters?",
+            expected_type="text_long",
+            required=True,
+        )
+
+        excerpt, _ = _select_relevant_paragraphs(
+            full_text, query, max_chars=_UNSCOPED_MAX_CHARS,
+        )
+        # The relevant paragraph should appear in the output
+        assert "PASI 75" in excerpt

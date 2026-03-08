@@ -14,6 +14,7 @@ from ptcv.ich_parser.section_matcher import (
     SectionMatch,
     SectionMatcher,
     SectionMapping,
+    _is_garbage_header,
 )
 from ptcv.ich_parser.toc_extractor import (
     ProtocolIndex,
@@ -1121,3 +1122,117 @@ class TestB1ExclusionTerms:
         )
         b1_idx = matcher._ref_codes.index("B.1")
         assert boosted[b1_idx] == 0.0
+
+
+# ===================================================================
+# TestB8SynonymBoosts (PTCV-157, Tier 1)
+# ===================================================================
+
+
+class TestB8SynonymBoosts:
+    """B.8 synonym boost expansion for efficacy headers."""
+
+    @pytest.fixture()
+    def matcher(self) -> SectionMatcher:
+        return SectionMatcher()
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "Response Criteria",
+            "Assessment of Response",
+            "Clinical Outcome Assessments (COAs)",
+            "Outcome Measures",
+            "Study Endpoints",
+            "Efficacy Analyses",
+            "Efficacy Endpoints",
+            "Treatment Response",
+            "Endpoints and Assessment Methods",
+            "Efficacy Evaluation",
+            "Efficacy Measures",
+        ],
+    )
+    def test_b8_synonym_boosts_score(
+        self, matcher: SectionMatcher, header: str
+    ) -> None:
+        """Headers from the PTCV-157 synonym list should boost B.8."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(header, raw)
+        b8_idx = matcher._ref_codes.index("B.8")
+        assert boosted[b8_idx] > 0.0, (
+            f"'{header}' should boost B.8 but got {boosted[b8_idx]}"
+        )
+
+    def test_b8_boost_value(self, matcher: SectionMatcher) -> None:
+        """Boosted score should equal the synonym_boost value."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Efficacy Assessment", raw
+        )
+        b8_idx = matcher._ref_codes.index("B.8")
+        assert boosted[b8_idx] == pytest.approx(0.15)
+
+
+# ===================================================================
+# TestGarbageHeaderFiltering (PTCV-157, Tier 2)
+# ===================================================================
+
+
+class TestGarbageHeaderFiltering:
+    """Garbage header detection for citations, OCR damage, long text."""
+
+    def test_normal_header_is_not_garbage(self) -> None:
+        assert _is_garbage_header("Efficacy Assessment") is False
+
+    def test_long_header_is_garbage(self) -> None:
+        long_title = "A" * 101
+        assert _is_garbage_header(long_title) is True
+
+    def test_exactly_100_chars_is_ok(self) -> None:
+        assert _is_garbage_header("A" * 100) is False
+
+    def test_citation_pattern_is_garbage(self) -> None:
+        header = (
+            "Blankenberg FG, Kinsman SL, Cohen BH, "
+            "et al. Brain Disorder in Neonates"
+        )
+        assert _is_garbage_header(header) is True
+
+    def test_ocr_damage_is_garbage(self) -> None:
+        header = "Bone marro w microenviron ment and drug -resistance"
+        assert _is_garbage_header(header) is True
+
+    def test_single_artefact_is_not_garbage(self) -> None:
+        """A single OCR artefact should not trigger garbage detection."""
+        header = "marro w something"
+        assert _is_garbage_header(header) is False
+
+    def test_garbage_header_zeroed_in_match(self) -> None:
+        """Garbage headers should get all-zero scores in match()."""
+        matcher = SectionMatcher()
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="1",
+                    title="A" * 120,  # garbage: too long
+                    page_ref=1,
+                    page_start=1,
+                    page_end=2,
+                    char_offset_start=0,
+                    char_offset_end=100,
+                ),
+            ],
+            section_headers=[],
+            content_spans={"1": "Some content here"},
+            full_text="Some content here",
+            toc_found=True,
+            toc_pages=[1],
+        )
+        result = matcher.match(protocol)
+        assert result.mappings[0].auto_mapped is False
+        # All matches should be LOW confidence (zeroed scores)
+        for m in result.mappings[0].matches:
+            assert m.confidence == MatchConfidence.LOW
