@@ -17,8 +17,8 @@ Deterministic type-specific strategies:
     enum        → phase / design keyword matching
     statement   → regulatory keyword density scoring
 
-Routing uses ``get_queries_by_schema_section()`` because B.15/B.16
-queries map to ``schema_section: "B.14"``.
+Routing uses ``get_queries_by_schema_section()`` to map classifier
+section codes (B.1-B.16) to their corresponding queries.
 
 Optional LLM transformation (PTCV-98, PTCV-111): when
 ``enable_transformation=True`` and an Anthropic API key is
@@ -73,13 +73,16 @@ class QueryExtraction:
     Attributes:
         query_id: Unique query identifier (e.g. ``"B.1.1.q1"``).
         section_id: Appendix B sub-section (e.g. ``"B.1.1"``).
-        content: Extracted answer text.
+        content: Extracted answer text (may be LLM-transformed).
         confidence: Confidence score (0.0–1.0).
         extraction_method: Strategy used (``"regex"``,
             ``"heuristic"``, ``"passthrough"``,
             ``"relevance_excerpt"``, ``"table_detection"``,
             ``"unscoped_search"``, ``"llm_transform"``).
         source_section: Protocol section number(s) searched.
+        verbatim_content: Pre-transformation extraction text.
+            Populated only when ``extraction_method`` is
+            ``"llm_transform"``; empty string otherwise.
     """
 
     query_id: str
@@ -88,6 +91,7 @@ class QueryExtraction:
     confidence: float
     extraction_method: str
     source_section: str
+    verbatim_content: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -247,6 +251,40 @@ _EXCLUSION_HEADINGS = re.compile(
     re.IGNORECASE,
 )
 
+# Numbered section heading pattern for heading-based subsection
+# splitting (PTCV-144). Matches "11.1 Inclusion Criteria",
+# "5.2.1 Exclusion Criteria", "3. Study Objectives", etc.
+_NUMBERED_HEADING_RE = re.compile(
+    r"(?:^|\n)\s*(\d+(?:\.\d+)*\.?)\s+([A-Z][^\n]{3,})",
+    re.MULTILINE,
+)
+
+
+def _match_heading_to_subsection(
+    heading_title: str,
+    sub_defs: list[SubSectionDef],
+) -> str | None:
+    """Match a heading title to a sub-section by keyword overlap.
+
+    Returns the sub-section code if the best overlap score is ≥ 0.30,
+    otherwise *None*.
+    """
+    title_lower = heading_title.lower()
+    best_code: str | None = None
+    best_score = 0.0
+    for sd in sub_defs:
+        words = set(re.findall(r"[a-z]{3,}", sd.name.lower()))
+        if not words:
+            continue
+        hits = sum(1 for w in words if w in title_lower)
+        score = hits / len(words)
+        if score > best_score:
+            best_score = score
+            best_code = sd.code
+    if best_score >= 0.30:
+        return best_code
+    return None
+
 
 def _extract_criteria_section(
     text: str, criteria_type: str
@@ -281,8 +319,11 @@ def _extract_criteria_section(
 # -----------------------------------------------------------------------
 
 
-# Maximum characters for text_long excerpt output (PTCV-109).
-_TEXT_LONG_MAX_CHARS = 2000
+# Maximum characters for text_long excerpt output (PTCV-109, PTCV-144).
+_TEXT_LONG_MAX_CHARS = 4000
+
+# Maximum characters sent to LLM for transformation (PTCV-144).
+_LLM_TRANSFORM_MAX_CHARS = 10000
 
 # Minimum paragraph length to consider for relevance scoring.
 _MIN_PARAGRAPH_LEN = 40
@@ -772,10 +813,12 @@ class QueryExtractor:
             *None* on any error (caller falls back to verbatim).
         """
         # Select query-relevant portion if source is large
-        # (PTCV-109: avoid blind prefix truncation).
-        if len(source_content) > 6000:
+        # (PTCV-109: avoid blind prefix truncation,
+        #  PTCV-144: raised from 6000 to _LLM_TRANSFORM_MAX_CHARS).
+        if len(source_content) > _LLM_TRANSFORM_MAX_CHARS:
             source_for_llm, _ = _select_relevant_paragraphs(
-                source_content, query, max_chars=6000
+                source_content, query,
+                max_chars=_LLM_TRANSFORM_MAX_CHARS,
             )
         else:
             source_for_llm = source_content
@@ -843,6 +886,7 @@ class QueryExtractor:
         protocol_index: ProtocolIndex,
         match_result: MatchResult,
         queries: Sequence[AppendixBQuery] | None = None,
+        progress_callback: Any = None,
     ) -> ExtractionResult:
         """Run all queries against the protocol.
 
@@ -852,6 +896,8 @@ class QueryExtractor:
                 :class:`SectionMatcher`.
             queries: Pre-loaded queries; loads from YAML if
                 *None*.
+            progress_callback: Optional ``(done, total)`` callback
+                invoked after each query completes (PTCV-124).
 
         Returns:
             :class:`ExtractionResult` with extractions, gaps,
@@ -870,6 +916,10 @@ class QueryExtractor:
             match_result,
             subsection_registry=registry,
         )
+
+        # PTCV-155 Tier 3: Inject front-matter as B.1 fallback
+        # when no HIGH/REVIEW content was matched for B.1.
+        self._inject_front_matter_route(routes, protocol_index)
 
         extractions: list[QueryExtraction] = []
         gaps: list[ExtractionGap] = []
@@ -891,6 +941,8 @@ class QueryExtractor:
                     ): q
                     for q in queries
                 }
+                done_count = 0
+                total_queries = len(queries)
                 for future in as_completed(future_to_query):
                     q = future_to_query[future]
                     extraction = future.result()
@@ -904,8 +956,12 @@ class QueryExtractor:
                                 reason="no_match",
                             )
                         )
+                    done_count += 1
+                    if progress_callback is not None:
+                        progress_callback(done_count, total_queries)
         else:
-            for query in queries:
+            total_queries = len(queries)
+            for i, query in enumerate(queries, 1):
                 extraction = self._process_query(
                     query, routes, protocol_index, match_result
                 )
@@ -919,6 +975,8 @@ class QueryExtractor:
                             reason="no_match",
                         )
                     )
+                if progress_callback is not None:
+                    progress_callback(i, total_queries)
 
         answered = sum(
             1
@@ -948,8 +1006,9 @@ class QueryExtractor:
     ) -> dict[str, str]:
         """Split parent section content into sub-section buckets.
 
-        Scores each paragraph against sub-section descriptions
-        using keyword overlap, assigning each to its best match.
+        First attempts heading-based boundary detection using
+        numbered section headings (PTCV-144).  Falls back to
+        keyword-overlap scoring when fewer than 2 headings match.
 
         Args:
             parent_content: Concatenated text for a parent section.
@@ -971,7 +1030,58 @@ class QueryExtractor:
         if not paragraphs:
             return {parent_code: parent_content}
 
-        # Build keyword sets from sub-section descriptions.
+        # Initialize buckets for all sub-sections + parent.
+        buckets: dict[str, list[str]] = {
+            sd.code: [] for sd in sub_defs
+        }
+        buckets[parent_code] = []
+
+        # PTCV-144: Try heading-based splitting first.
+        # Numbered headings like "11.1 Inclusion Criteria" are
+        # far more reliable than keyword scoring.
+        headings = list(
+            _NUMBERED_HEADING_RE.finditer(parent_content)
+        )
+        heading_assignments: list[tuple[int, str]] = []
+        for m in headings:
+            title = m.group(2).strip()
+            matched_code = _match_heading_to_subsection(
+                title, sub_defs
+            )
+            if matched_code:
+                heading_assignments.append(
+                    (m.start(), matched_code)
+                )
+
+        if len(heading_assignments) >= 2:
+            # Heading-based splitting is authoritative.
+            heading_assignments.sort(key=lambda t: t[0])
+            for i, (offset, code) in enumerate(
+                heading_assignments
+            ):
+                end = (
+                    heading_assignments[i + 1][0]
+                    if i + 1 < len(heading_assignments)
+                    else len(parent_content)
+                )
+                region = parent_content[offset:end].strip()
+                if region:
+                    buckets[code].append(region)
+            # Preamble before first heading → parent bucket.
+            first_offset = heading_assignments[0][0]
+            if first_offset > 0:
+                preamble = parent_content[
+                    :first_offset
+                ].strip()
+                if preamble:
+                    buckets[parent_code].append(preamble)
+            return {
+                code: "\n\n".join(paras)
+                for code, paras in buckets.items()
+                if paras
+            }
+
+        # Fallback: keyword-overlap scoring (original logic).
         _stop = frozenset({
             "the", "and", "for", "are", "what", "that",
             "this", "with", "from", "have", "has", "will",
@@ -989,12 +1099,6 @@ class QueryExtractor:
                 if w not in _stop
             )
             sub_kws[sd.code] = words
-
-        # Score and assign each paragraph.
-        buckets: dict[str, list[str]] = {
-            sd.code: [] for sd in sub_defs
-        }
-        buckets[parent_code] = []
 
         for para in paragraphs:
             if len(para.strip()) < 30:
@@ -1128,6 +1232,81 @@ class QueryExtractor:
         return routes
 
     # ------------------------------------------------------------------
+    # Front-matter extraction (PTCV-155, Tier 3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _inject_front_matter_route(
+        routes: dict[str, tuple[str, str, MatchConfidence]],
+        protocol_index: ProtocolIndex,
+    ) -> None:
+        """Add front-matter as B.1 route when no quality match exists.
+
+        In 35/40 protocols, front-matter (title, sponsor, PI) appears
+        on unnumbered cover pages before section 1 and is absent from
+        the ToC.  This captures that pre-section content as a B.1
+        route fallback so B.1 queries can find protocol titles and
+        sponsor information.
+
+        Skips injection if B.1 already has HIGH or REVIEW content.
+        """
+        # Skip if B.1 already has good content
+        if "B.1" in routes:
+            _, _, conf = routes["B.1"]
+            if conf in (
+                MatchConfidence.HIGH,
+                MatchConfidence.REVIEW,
+            ):
+                return
+
+        # Find the earliest section header's char offset
+        resolved = [
+            h
+            for h in protocol_index.section_headers
+            if h.char_offset >= 0
+        ]
+        if not resolved:
+            return
+
+        first_offset = min(h.char_offset for h in resolved)
+        if first_offset <= 100:
+            # Too little front matter to be useful
+            return
+
+        # Extract text before the first numbered section
+        front_matter = protocol_index.full_text[
+            :first_offset
+        ].strip()
+        if len(front_matter) < 50:
+            return
+
+        # Cap at 5000 chars to avoid dumping entire ToC remnants
+        front_matter = front_matter[:5000]
+
+        logger.info(
+            "PTCV-155: Injecting %d chars of front-matter "
+            "as B.1 route",
+            len(front_matter),
+        )
+
+        if "B.1" in routes:
+            # Prepend front matter to existing LOW-confidence B.1
+            existing_content, existing_src, _ = routes["B.1"]
+            routes["B.1"] = (
+                f"{front_matter}\n\n"
+                f"--- [{existing_src}] Matched Sections ---\n"
+                f"{existing_content}",
+                f"front_matter, {existing_src}",
+                MatchConfidence.REVIEW,
+            )
+        else:
+            routes["B.1"] = (
+                front_matter,
+                "front_matter",
+                MatchConfidence.REVIEW,
+            )
+
+    # ------------------------------------------------------------------
     # Per-query processing
     # ------------------------------------------------------------------
 
@@ -1202,6 +1381,7 @@ class QueryExtractor:
         # matches to directly address the query intent.
         # Runs BEFORE confidence penalties so that the LLM's
         # self-reported confidence participates in the final score.
+        verbatim = ""  # pre-transformation text; set only on success
         if self._use_llm and scoped:
             logger.debug(
                 "LLM transform: attempting query=%s "
@@ -1213,6 +1393,7 @@ class QueryExtractor:
                 extracted, query
             )
             if transformed is not None:
+                verbatim = extracted  # preserve pre-transformation
                 extracted, llm_conf = transformed
                 # Blend: 60% deterministic + 40% LLM self-report
                 confidence = round(
@@ -1262,4 +1443,5 @@ class QueryExtractor:
             confidence=confidence,
             extraction_method=method,
             source_section=source_section,
+            verbatim_content=verbatim,
         )

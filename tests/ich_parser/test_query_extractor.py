@@ -11,6 +11,8 @@ from ptcv.ich_parser.query_extractor import (
     ExtractionResult,
     QueryExtraction,
     QueryExtractor,
+    _LLM_TRANSFORM_MAX_CHARS,
+    _NUMBERED_HEADING_RE,
     _TEXT_LONG_MAX_CHARS,
     _extract_criteria_section,
     _extract_date,
@@ -22,6 +24,7 @@ from ptcv.ich_parser.query_extractor import (
     _extract_table,
     _extract_text_long,
     _extract_text_short,
+    _match_heading_to_subsection,
     _query_keywords,
     _score_paragraph,
     _select_relevant_paragraphs,
@@ -1365,3 +1368,652 @@ class TestSubSectionRouting:
         assert "B.2.2" in result
         assert "investigational" in result["B.2.1"].lower()
         assert "nonclinical" in result["B.2.2"].lower()
+
+
+# -----------------------------------------------------------------------
+# TestExtractProgressCallback (PTCV-124)
+# -----------------------------------------------------------------------
+
+
+class TestExtractProgressCallback:
+    """Tests for progress_callback in QueryExtractor.extract()."""
+
+    def test_callback_called_for_each_query(self) -> None:
+        """Callback fires once per query with (done, total)."""
+        protocol = _make_protocol_index(
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study",
+            },
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "General Information", "B.1"),
+        ])
+        queries = [
+            _make_query(query_id=f"B.1.1.q{i}")
+            for i in range(5)
+        ]
+        calls: list[tuple[int, int]] = []
+        extractor = QueryExtractor()
+        extractor.extract(
+            protocol, match_result, queries=queries,
+            progress_callback=lambda d, t: calls.append((d, t)),
+        )
+        assert len(calls) == 5
+        assert calls[-1] == (5, 5)
+
+    def test_callback_done_monotonically_increases(self) -> None:
+        """The done count increases with each callback."""
+        protocol = _make_protocol_index(
+            content_spans={"1": "Some content"},
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "Info", "B.1"),
+        ])
+        queries = [
+            _make_query(query_id=f"B.1.1.q{i}")
+            for i in range(3)
+        ]
+        calls: list[tuple[int, int]] = []
+        extractor = QueryExtractor()
+        extractor.extract(
+            protocol, match_result, queries=queries,
+            progress_callback=lambda d, t: calls.append((d, t)),
+        )
+        done_values = [c[0] for c in calls]
+        assert done_values == sorted(done_values)
+        assert all(c[1] == 3 for c in calls)
+
+    def test_no_callback_no_error(self) -> None:
+        """None callback does not raise."""
+        protocol = _make_protocol_index(
+            content_spans={"1": "Content"},
+        )
+        match_result = _make_match_result([
+            _make_mapping("1", "Info", "B.1"),
+        ])
+        queries = [_make_query()]
+        extractor = QueryExtractor()
+        result = extractor.extract(
+            protocol, match_result, queries=queries,
+            progress_callback=None,
+        )
+        assert isinstance(result, ExtractionResult)
+
+
+# -----------------------------------------------------------------------
+# PTCV-144: Content extraction bug fixes
+# -----------------------------------------------------------------------
+
+
+class TestHeadingBasedSplitting:
+    """Heading-based subsection splitting tests (PTCV-144)."""
+
+    def test_heading_based_split_inclusion_exclusion(
+        self,
+    ) -> None:
+        """Explicit headings correctly split B.5.1/B.5.2."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.5.1": SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description=(
+                    "What are the participant inclusion "
+                    "criteria for trial eligibility?"
+                ),
+                query_ids=("B.5.1.q1",),
+            ),
+            "B.5.2": SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description=(
+                    "What are the participant exclusion "
+                    "criteria?"
+                ),
+                query_ids=("B.5.2.q1",),
+            ),
+        }
+        content = (
+            "Preamble text about eligibility.\n\n"
+            "11.1 Inclusion Criteria\n"
+            "1. Age >= 18 years\n"
+            "2. Written informed consent\n"
+            "3. Confirmed diagnosis of Type 2 diabetes\n\n"
+            "11.2 Exclusion Criteria\n"
+            "1. Pregnant or breastfeeding\n"
+            "2. Active malignancy\n"
+            "3. Severe hepatic impairment\n"
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.5", registry
+        )
+        assert "B.5.1" in result
+        assert "B.5.2" in result
+        assert "Age >= 18" in result["B.5.1"]
+        assert "Pregnant" not in result["B.5.1"]
+        assert "Pregnant" in result["B.5.2"]
+        assert "Age >= 18" not in result["B.5.2"]
+
+    def test_heading_split_fallback_to_keyword_scoring(
+        self,
+    ) -> None:
+        """No headings → keyword scoring fallback (PTCV-144)."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.2.1": SubSectionDef(
+                code="B.2.1",
+                parent_code="B.2",
+                name="Investigational Product",
+                description=(
+                    "What is the name and description of "
+                    "the investigational product formulation "
+                    "dose?"
+                ),
+                query_ids=("B.2.1.q1",),
+            ),
+            "B.2.2": SubSectionDef(
+                code="B.2.2",
+                parent_code="B.2",
+                name="Nonclinical Findings",
+                description=(
+                    "What is the summary of findings from "
+                    "nonclinical preclinical studies "
+                    "toxicity?"
+                ),
+                query_ids=("B.2.2.q1",),
+            ),
+        }
+        # No numbered headings — just paragraphs.
+        content = (
+            "Drug X is a selective EGFR inhibitor. The "
+            "formulation is a 100mg oral capsule for daily "
+            "investigational product administration.\n\n"
+            "Nonclinical studies in rodent models showed no "
+            "significant toxicity. Preclinical findings "
+            "demonstrate favorable safety margins."
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.2", registry
+        )
+        assert "B.2.1" in result
+        assert "B.2.2" in result
+
+    def test_heading_split_single_heading_falls_back(
+        self,
+    ) -> None:
+        """Single heading match falls back to keywords."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.5.1": SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description="inclusion criteria eligibility",
+                query_ids=("B.5.1.q1",),
+            ),
+            "B.5.2": SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description="exclusion criteria",
+                query_ids=("B.5.2.q1",),
+            ),
+        }
+        # Only one heading matches — should fall back.
+        content = (
+            "11.1 Inclusion Criteria\n"
+            "1. Age >= 18\n\n"
+            "Patients who are pregnant are excluded.\n"
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.5", registry
+        )
+        assert isinstance(result, dict)
+
+    def test_heading_regex_matches_various_formats(
+        self,
+    ) -> None:
+        """Heading regex handles diverse numbering formats."""
+        cases = [
+            ("11.1 Inclusion Criteria", True),
+            ("5.2.1 Exclusion Criteria", True),
+            ("3. Study Objectives", True),
+            ("1. age >= 18", False),  # lowercase = not a heading
+            ("A short line", False),  # no number prefix
+        ]
+        for text, should_match in cases:
+            matches = list(_NUMBERED_HEADING_RE.finditer(text))
+            if should_match:
+                assert len(matches) >= 1, (
+                    f"Expected match for: {text}"
+                )
+            else:
+                assert len(matches) == 0, (
+                    f"Unexpected match for: {text}"
+                )
+
+    def test_match_heading_to_subsection(self) -> None:
+        """Helper matches headings to subsections by name."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        sub_defs = [
+            SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description="inclusion criteria",
+                query_ids=("B.5.1.q1",),
+            ),
+            SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description="exclusion criteria",
+                query_ids=("B.5.2.q1",),
+            ),
+        ]
+        assert _match_heading_to_subsection(
+            "Inclusion Criteria", sub_defs
+        ) == "B.5.1"
+        assert _match_heading_to_subsection(
+            "Exclusion Criteria", sub_defs
+        ) == "B.5.2"
+        assert _match_heading_to_subsection(
+            "Unrelated Topic", sub_defs
+        ) is None
+
+    def test_preamble_assigned_to_parent(self) -> None:
+        """Text before first heading goes to parent bucket."""
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.5.1": SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description="inclusion criteria",
+                query_ids=("B.5.1.q1",),
+            ),
+            "B.5.2": SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description="exclusion criteria",
+                query_ids=("B.5.2.q1",),
+            ),
+        }
+        content = (
+            "This section describes eligibility.\n\n"
+            "11.1 Inclusion Criteria\n"
+            "1. Age >= 18\n\n"
+            "11.2 Exclusion Criteria\n"
+            "1. Pregnant\n"
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.5", registry
+        )
+        assert "B.5" in result
+        assert "eligibility" in result["B.5"].lower()
+
+
+class TestTextLongLimitIncrease:
+    """Tests for increased _TEXT_LONG_MAX_CHARS (PTCV-144)."""
+
+    def test_limit_value_is_4000(self) -> None:
+        """_TEXT_LONG_MAX_CHARS raised to 4000."""
+        assert _TEXT_LONG_MAX_CHARS == 4000
+
+    def test_medium_content_passthrough(self) -> None:
+        """Content 2000-4000 chars passes through intact."""
+        para = (
+            "The adverse event follow-up procedure requires "
+            "investigators to document all events within "
+            "24 hours of occurrence. Visit schedules must "
+            "be maintained on a weekly basis for the first "
+            "month following the event. Outcome "
+            "classifications include resolved, ongoing, "
+            "and fatal. All serious adverse events require "
+            "expedited reporting to the sponsor."
+        )
+        text = "\n\n".join([para] * 8)
+        assert 2000 < len(text) < 4000
+
+        q = _make_query(
+            query_text=(
+                "What are the adverse event follow-up "
+                "procedures?"
+            ),
+            expected_type="text_long",
+        )
+        content, conf, method = _extract_text_long(text, q)
+        assert method == "passthrough"
+        assert content == text.strip()
+
+
+class TestLLMTransformLimitIncrease:
+    """Tests for increased _LLM_TRANSFORM_MAX_CHARS (PTCV-144)."""
+
+    def test_limit_value_is_10000(self) -> None:
+        """_LLM_TRANSFORM_MAX_CHARS raised to 10000."""
+        assert _LLM_TRANSFORM_MAX_CHARS == 10000
+
+
+class TestEndToEndPTCV144:
+    """Integration tests for PTCV-144 fixes."""
+
+    def test_criteria_with_explicit_headings(self) -> None:
+        """Full pipeline: explicit headings → correct criteria."""
+        content = (
+            "This section describes patient eligibility.\n\n"
+            "11.1 Inclusion Criteria\n"
+            "1. Age 18 or older\n"
+            "2. Confirmed diagnosis\n"
+            "3. Written informed consent obtained\n\n"
+            "11.2 Exclusion Criteria\n"
+            "1. Pregnant or nursing\n"
+            "2. Known hypersensitivity to study drug\n"
+            "3. Active malignancy within 5 years\n"
+        )
+        protocol = _make_protocol_index(
+            content_spans={"5": content},
+        )
+        match_result = _make_match_result([
+            _make_mapping("5", "Eligibility", "B.5"),
+        ])
+        q_inc = _make_query(
+            query_id="B.5.1.q1",
+            section_id="B.5.1",
+            parent_section="B.5",
+            schema_section="B.5",
+            query_text="What are the inclusion criteria?",
+            expected_type="list",
+        )
+        q_exc = _make_query(
+            query_id="B.5.2.q1",
+            section_id="B.5.2",
+            parent_section="B.5",
+            schema_section="B.5",
+            query_text="What are the exclusion criteria?",
+            expected_type="list",
+        )
+        qe = QueryExtractor()
+        result = qe.extract(
+            protocol, match_result,
+            queries=[q_inc, q_exc],
+        )
+        assert len(result.extractions) == 2
+        inc = result.extractions[0].content
+        exc = result.extractions[1].content
+        # Inclusion must contain inclusion items.
+        assert (
+            "Age 18" in inc or "informed consent" in inc
+        )
+        # Exclusion must contain exclusion items.
+        assert "Pregnant" in exc or "malignancy" in exc
+        # Critically: inclusion must NOT contain exclusion.
+        assert "Pregnant" not in inc
+        assert "hypersensitivity" not in inc
+
+    def test_long_ae_content_not_truncated(self) -> None:
+        """AE follow-up procedures fully preserved."""
+        # Build AE content ~3000 chars (above old 2000 limit,
+        # below new 4000 limit).
+        ae_text = (
+            "13.2.8 Adverse Event Follow-up Procedures\n"
+            "AEs (whether serious or non-serious) and "
+            "clinically significant abnormal laboratory "
+            "test values will be evaluated by the PI or "
+            "designee and treated and/or followed up until "
+            "the symptoms or values return to normal or "
+            "acceptable levels.\n\n"
+            "Treatment of SAEs will be performed by a "
+            "licensed medical provider, either at the CRU "
+            "or at a nearby hospital emergency room. Where "
+            "appropriate, medical tests and examinations "
+            "will be performed to document resolution of "
+            "events. The outcome may be classified as "
+            "resolved, improved, unchanged, worse, fatal, "
+            "or unknown (lost to follow up).\n\n"
+            "Follow-up visit schedule:\n"
+            "- Day 7: Clinical assessment and vital signs\n"
+            "- Day 14: Laboratory tests and ECG\n"
+            "- Day 30: Final follow-up phone call\n"
+            "- Day 90: Long-term safety assessment\n\n"
+            "All SAEs must be reported to the sponsor "
+            "within 24 hours of the investigator becoming "
+            "aware of the event. The initial report should "
+            "include all available information about the "
+            "event, including the date of onset, severity, "
+            "and any actions taken."
+        )
+        protocol = _make_protocol_index(
+            content_spans={"13": ae_text},
+        )
+        match_result = _make_match_result([
+            _make_mapping(
+                "13", "Safety Assessment", "B.9"
+            ),
+        ])
+        q = _make_query(
+            query_id="B.9.4.q1",
+            section_id="B.9.4",
+            parent_section="B.9",
+            schema_section="B.9",
+            query_text=(
+                "What is the type and duration of "
+                "follow-up of participants after adverse "
+                "events?"
+            ),
+            expected_type="text_long",
+        )
+        qe = QueryExtractor()
+        result = qe.extract(
+            protocol, match_result, queries=[q]
+        )
+        assert len(result.extractions) >= 1
+        extracted = result.extractions[0].content
+        # Day 30 follow-up must be preserved (was truncated
+        # with the old 2000-char limit).
+        assert "Day 30" in extracted or "Day 7" in extracted
+
+
+# -------------------------------------------------------------------
+# TestFrontMatterExtraction (PTCV-155, Tier 3)
+# -------------------------------------------------------------------
+
+
+class TestFrontMatterExtraction:
+    """PTCV-155 Tier 3: Front-matter injection for B.1 routes."""
+
+    def _make_protocol_with_front_matter(
+        self,
+        front_matter: str = "",
+        body_content: str = "",
+        b1_route_confidence: MatchConfidence | None = None,
+    ) -> tuple[ProtocolIndex, MatchResult]:
+        """Build a ProtocolIndex with front matter before section 1."""
+        # Front matter + section boundary
+        full_text = front_matter + "\n" + body_content
+        first_header_offset = len(front_matter) + 1
+
+        headers = [
+            SectionHeader(
+                number="1",
+                title="Background",
+                level=1,
+                page=4,
+                char_offset=first_header_offset,
+            ),
+        ]
+        idx = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=50,
+            toc_entries=[
+                TOCEntry(level=1, number="1", title="Background"),
+            ],
+            section_headers=headers,
+            content_spans={"1": body_content},
+            full_text=full_text,
+            toc_found=True,
+            toc_pages=[2, 3],
+        )
+
+        mappings = [
+            _make_mapping(
+                "1", "Background", "B.2", MatchConfidence.HIGH
+            ),
+        ]
+        if b1_route_confidence is not None:
+            mappings.append(
+                _make_mapping(
+                    "0",
+                    "General Information",
+                    "B.1",
+                    b1_route_confidence,
+                ),
+            )
+        match_result = _make_match_result(mappings)
+        return idx, match_result
+
+    def test_front_matter_injected_when_no_b1_route(
+        self,
+    ) -> None:
+        """Given no B.1 route, front matter creates one."""
+        cover = (
+            "Protocol Title: A Phase 3 Study of Drug X\n"
+            "Sponsor: Acme Pharma Inc.\n"
+            "Protocol Number: ACME-001-2024\n"
+            "Date: 15 March 2025\n"
+        ) * 3  # Repeat to exceed 100 chars
+
+        idx, match_result = (
+            self._make_protocol_with_front_matter(
+                front_matter=cover,
+                body_content="1 Background\nDisease background...",
+            )
+        )
+
+        routes: dict[
+            str, tuple[str, str, MatchConfidence]
+        ] = {}
+        # Simulate route building with no B.1 match
+        QueryExtractor._inject_front_matter_route(
+            routes, idx
+        )
+
+        assert "B.1" in routes
+        content, source, conf = routes["B.1"]
+        assert "Acme Pharma" in content
+        assert "ACME-001-2024" in content
+        assert source == "front_matter"
+        assert conf == MatchConfidence.REVIEW
+
+    def test_front_matter_skipped_when_b1_has_high_route(
+        self,
+    ) -> None:
+        """Given B.1 already has HIGH route, front matter not injected."""
+        idx, _ = self._make_protocol_with_front_matter(
+            front_matter="Cover page content " * 20,
+            body_content="1 Background\nContent...",
+        )
+
+        routes: dict[
+            str, tuple[str, str, MatchConfidence]
+        ] = {
+            "B.1": (
+                "General Information content",
+                "1",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._inject_front_matter_route(
+            routes, idx
+        )
+
+        # Route unchanged
+        content, source, conf = routes["B.1"]
+        assert content == "General Information content"
+        assert conf == MatchConfidence.HIGH
+
+    def test_front_matter_prepended_to_low_b1_route(
+        self,
+    ) -> None:
+        """Given B.1 has LOW route, front matter prepended."""
+        cover = "Protocol: Drug X Study\nSponsor: BigPharma\n" * 5
+        idx, _ = self._make_protocol_with_front_matter(
+            front_matter=cover,
+            body_content="1 Background\nContent...",
+        )
+
+        routes: dict[
+            str, tuple[str, str, MatchConfidence]
+        ] = {
+            "B.1": (
+                "Some noisy content about definitions",
+                "99",
+                MatchConfidence.LOW,
+            ),
+        }
+        QueryExtractor._inject_front_matter_route(
+            routes, idx
+        )
+
+        content, source, conf = routes["B.1"]
+        assert "BigPharma" in content
+        assert "front_matter" in source
+        assert conf == MatchConfidence.REVIEW
+
+    def test_front_matter_skipped_when_too_short(
+        self,
+    ) -> None:
+        """Given <50 chars of front matter, no injection."""
+        idx, _ = self._make_protocol_with_front_matter(
+            front_matter="Short",
+            body_content="1 Background\nContent...",
+        )
+
+        routes: dict[
+            str, tuple[str, str, MatchConfidence]
+        ] = {}
+        QueryExtractor._inject_front_matter_route(
+            routes, idx
+        )
+
+        assert "B.1" not in routes
+
+    def test_front_matter_capped_at_5000_chars(
+        self,
+    ) -> None:
+        """Front matter content capped at 5000 characters."""
+        # 10000 chars of cover content
+        cover = "A" * 10000
+        idx, _ = self._make_protocol_with_front_matter(
+            front_matter=cover,
+            body_content="1 Background\nContent...",
+        )
+
+        routes: dict[
+            str, tuple[str, str, MatchConfidence]
+        ] = {}
+        QueryExtractor._inject_front_matter_route(
+            routes, idx
+        )
+
+        assert "B.1" in routes
+        content, _, _ = routes["B.1"]
+        assert len(content) <= 5000

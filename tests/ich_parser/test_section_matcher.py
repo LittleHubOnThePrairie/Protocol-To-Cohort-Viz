@@ -119,13 +119,13 @@ class TestSectionMatcherInit:
         """Given no API key, embeddings are disabled."""
         assert matcher._use_embeddings is False
 
-    def test_init_loads_14_reference_sections(
+    def test_init_loads_16_reference_sections(
         self, matcher: SectionMatcher
     ) -> None:
-        """Given default schema, 14 reference sections loaded."""
-        assert len(matcher._ref_codes) == 14
+        """Given default schema, 16 reference sections loaded."""
+        assert len(matcher._ref_codes) == 16
         assert matcher._ref_codes[0] == "B.1"
-        assert matcher._ref_codes[-1] == "B.14"
+        assert matcher._ref_codes[-1] == "B.16"
 
     def test_init_custom_thresholds(self) -> None:
         """Given custom thresholds, they are stored."""
@@ -318,6 +318,204 @@ class TestDeterministicFallback:
 
 
 # -------------------------------------------------------------------
+# TestB3ObjectivesMatching (PTCV-134)
+# -------------------------------------------------------------------
+
+
+class TestB3ObjectivesMatching:
+    """B.3 section matching regression tests (PTCV-134).
+
+    Ensures common protocol headings for "Trial Objectives and Purpose"
+    correctly map to B.3 with appropriate confidence tiers.
+    """
+
+    def test_objectives_and_purpose_maps_to_b3(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Objectives and Purpose', best match is B.3."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Objectives and Purpose",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+
+    def test_study_objectives_maps_to_b3(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Study Objectives', best match is B.3."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Study Objectives",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+
+    def test_objectives_with_content_reaches_high(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Objectives' with typical content, confidence is HIGH."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Study Objectives and Endpoints",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "3": (
+                    "Primary Objective: To evaluate the efficacy "
+                    "of Drug X. Secondary Objectives: PFS, OS. "
+                    "Primary endpoint: ORR by RECIST v1.1. "
+                    "Hypothesis: Drug X will demonstrate "
+                    "non-inferiority."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+        assert top.confidence == MatchConfidence.HIGH
+
+    def test_trial_objectives_maps_to_b3(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Trial Objectives', best match is B.3."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Trial Objectives",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+
+    def test_study_aims_maps_to_b3(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Study Aims', best match is B.3 (EU protocol style)."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Study Aims",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+
+    def test_objectives_endpoints_estimands_maps_to_b3(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Objectives, Endpoints and Estimands', maps to B.3."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Objectives, Endpoints and Estimands",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+
+    def test_bare_objectives_with_content_not_low(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given bare 'Objectives' with content, confidence is not LOW."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Objectives",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "3": (
+                    "The primary objective and hypothesis of "
+                    "this study is to evaluate the efficacy "
+                    "and safety endpoint of Drug X in patients "
+                    "with advanced tumours."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+        assert top.confidence != MatchConfidence.LOW
+
+
+# -------------------------------------------------------------------
 # TestSynonymBoost
 # -------------------------------------------------------------------
 
@@ -351,9 +549,11 @@ class TestSynonymBoost:
     def test_no_boost_for_unrecognised_header(
         self, matcher: SectionMatcher
     ) -> None:
-        """Given 'Appendix A', no synonym boost applied."""
+        """Given 'Unrelated Topic', no synonym boost applied."""
         raw = [0.1] * len(matcher._ref_codes)
-        boosted = matcher._apply_synonym_boost("Appendix A", raw)
+        boosted = matcher._apply_synonym_boost(
+            "Unrelated Topic", raw
+        )
         assert boosted == raw
 
     def test_boost_is_additive(
@@ -513,6 +713,54 @@ class TestEdgeCases:
         assert result.mappings == []
         assert result.auto_map_rate == 0.0
 
+    def test_financing_maps_to_b15(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Financing and Insurance', best match is B.15 (PTCV-154)."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="15",
+                    title="Financing and Insurance",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.15"
+
+    def test_publication_policy_maps_to_b16(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Publication Policy', best match is B.16 (PTCV-154)."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="16",
+                    title="Publication Policy",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.16"
+
     def test_no_content_spans_still_works(
         self, matcher: SectionMatcher
     ) -> None:
@@ -561,3 +809,315 @@ class TestEdgeCases:
         result = matcher.match(idx)
         assert len(result.mappings) == 1
         assert result.mappings[0].matches[0].ich_section_code == "B.5"
+
+
+# -------------------------------------------------------------------
+# TestPTCV135ScoringImprovements
+# -------------------------------------------------------------------
+
+
+class TestPTCV135ScoringImprovements:
+    """PTCV-135: Denominator cap and word-boundary matching tests."""
+
+    def test_word_boundary_prevents_overdose_matching_dose(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'overdose' should NOT match the short keyword 'dose' in B.7."""
+        from ptcv.ich_parser.schema_loader import load_ich_schema
+
+        schema = load_ich_schema()
+        b7_def = schema.sections["B.7"]
+        # 'dose' is a keyword in B.7 (<=5 chars → word-boundary)
+        assert "dose" in b7_def.keywords
+        score = SectionMatcher._keyword_score(
+            "Overdose Management", "", b7_def
+        )
+        # With word-boundary, 'dose' in 'overdose' should not match
+        # Only 'management' could match (it doesn't), so score is low
+        assert score < 0.15
+
+    def test_word_boundary_allows_exact_dose(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Dose Escalation' should match the keyword 'dose' in B.7."""
+        from ptcv.ich_parser.schema_loader import load_ich_schema
+
+        schema = load_ich_schema()
+        b7_def = schema.sections["B.7"]
+        score = SectionMatcher._keyword_score(
+            "Dose Escalation", "", b7_def
+        )
+        assert score > 0.0
+
+    def test_denominator_cap_normalises_dense_section(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Dense sections have their denominator capped at 20.
+
+        B.4 (dense, raw_max > 20) gets capped so a single keyword
+        hit isn't diluted to near-zero. B.1 (raw_max <= 20)
+        stays uncapped.
+        """
+        from ptcv.ich_parser.schema_loader import load_ich_schema
+
+        schema = load_ich_schema()
+        b4_def = schema.sections["B.4"]
+        b1_def = schema.sections["B.1"]
+
+        # B.4 raw max is well above 20 (capped)
+        raw_b4 = len(b4_def.patterns) * 2 + len(b4_def.keywords)
+        assert raw_b4 > 20, "B.4 should exceed the cap"
+
+        # B.1 raw max is at or below the cap
+        raw_b1 = len(b1_def.patterns) * 2 + len(b1_def.keywords)
+        assert raw_b1 <= 20, "B.1 should be at or under the cap"
+
+    def test_b12_synonym_boost_applied(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Quality Control' should trigger B.12 synonym boost (PTCV-154)."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Quality Control", raw
+        )
+        b12_idx = matcher._ref_codes.index("B.12")
+        assert boosted[b12_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_b15_synonym_boost_applied(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Financing' should trigger B.15 synonym boost (PTCV-154)."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Financing Provisions", raw
+        )
+        b15_idx = matcher._ref_codes.index("B.15")
+        assert boosted[b15_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_b16_synonym_boost_applied(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Publication' should trigger B.16 synonym boost (PTCV-154)."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Publication Agreement", raw
+        )
+        b16_idx = matcher._ref_codes.index("B.16")
+        assert boosted[b16_idx] == pytest.approx(0.15, abs=0.01)
+
+
+# -------------------------------------------------------------------
+# TestB1SynonymBoosts (PTCV-155, Tier 1)
+# -------------------------------------------------------------------
+
+
+class TestB1SynonymBoosts:
+    """PTCV-155 Tier 1: Expanded B.1 synonym boost tests."""
+
+    def test_synopsis_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Synopsis' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost("Synopsis", raw)
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_protocol_synopsis_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Protocol Synopsis' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Protocol Synopsis", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] > 0.0
+
+    def test_sponsor_information_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Sponsor Information' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Sponsor Information", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_cover_page_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Cover Page' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Cover Page", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_title_page_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Title Page' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Title Page", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_study_identification_boosted_to_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Study Identification' should trigger B.1 synonym boost."""
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Study Identification", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == pytest.approx(0.15, abs=0.01)
+
+    def test_synopsis_maps_to_b1_via_match(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Synopsis' header, best match is B.1."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="1",
+                    title="Synopsis",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.1"
+
+
+# -------------------------------------------------------------------
+# TestB1ExclusionTerms (PTCV-155, Tier 2)
+# -------------------------------------------------------------------
+
+
+class TestB1ExclusionTerms:
+    """PTCV-155 Tier 2: B.1 noise reduction exclusion tests."""
+
+    def test_definitions_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Definitions' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Definitions", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_good_clinical_practice_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Good Clinical Practice' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Good Clinical Practice", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_interim_analysis_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Interim Analysis' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Interim Analysis", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_references_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'References' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "References", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_pregnancy_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'Pregnancy' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Pregnancy", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_abbreviations_excluded_from_b1(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'List of Abbreviations' should have B.1 score zeroed."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "List of Abbreviations", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0
+
+    def test_exclusion_does_not_affect_other_sections(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """B.1 exclusion should not affect other section scores."""
+        raw = [0.5] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Definitions", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        # B.1 zeroed
+        assert boosted[b1_idx] == 0.0
+        # All other scores unchanged (no synonym boost applied)
+        for i, score in enumerate(boosted):
+            if i != b1_idx:
+                assert score == 0.5
+
+    def test_general_information_not_excluded(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """'General Information' should NOT be excluded from B.1."""
+        raw = [0.1] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "General Information", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        # Should have the original score PLUS the synonym boost
+        assert boosted[b1_idx] >= 0.1
+
+    def test_definitions_b1_score_is_zero(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """Given 'Definitions', B.1 boosted score should be 0.0.
+
+        The header may still map to B.1 at LOW confidence when all
+        sections score 0.0 (tie-breaking favours the first code),
+        but the exclusion ensures B.1 cannot accumulate this header
+        into its route with any positive score.
+        """
+        raw = [0.0] * len(matcher._ref_codes)
+        boosted = matcher._apply_synonym_boost(
+            "Definitions", raw
+        )
+        b1_idx = matcher._ref_codes.index("B.1")
+        assert boosted[b1_idx] == 0.0

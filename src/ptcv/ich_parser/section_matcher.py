@@ -53,6 +53,18 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "administrative information": "B.1",
     "protocol title": "B.1",
     "protocol number": "B.1",
+    "synopsis": "B.1",
+    "protocol synopsis": "B.1",
+    "study information": "B.1",
+    "sponsor information": "B.1",
+    "sponsor responsibilities": "B.1",
+    "sponsor obligations": "B.1",
+    "study sponsor": "B.1",
+    "protocol identification": "B.1",
+    "study identification": "B.1",
+    "cover page": "B.1",
+    "title page": "B.1",
+    "administrative requirements": "B.1",
     # B.2 Background Information
     "background": "B.2",
     "rationale": "B.2",
@@ -67,6 +79,12 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "hypothesis": "B.3",
     "primary endpoint": "B.3",
     "secondary endpoint": "B.3",
+    "aims": "B.3",
+    "study objectives": "B.3",
+    "trial objectives": "B.3",
+    "study purpose": "B.3",
+    "trial purpose": "B.3",
+    "estimand": "B.3",
     # B.4 Trial Design
     "study design": "B.4",
     "trial design": "B.4",
@@ -90,6 +108,9 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "withdrawal": "B.6",
     "stopping rules": "B.6",
     "treatment termination": "B.6",
+    "early termination": "B.6",
+    "participant discontinuation": "B.6",
+    "drop out": "B.6",
     # B.7 Treatment of Participants
     "investigational product": "B.7",
     "study treatment": "B.7",
@@ -118,31 +139,70 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "statistical analysis plan": "B.10",
     "power calculation": "B.10",
     # B.11 Direct Access to Source Data/Documents
-    "quality control": "B.11",
-    "quality assurance": "B.11",
-    "monitoring plan": "B.11",
     "source data verification": "B.11",
-    "data management": "B.11",
-    # B.12 Ethics
-    "ethics": "B.12",
-    "informed consent": "B.12",
-    "irb": "B.12",
-    "ethics committee": "B.12",
-    "ethical approval": "B.12",
-    # B.13 Data Handling and Record Keeping
-    "data handling": "B.13",
-    "record keeping": "B.13",
-    "case report form": "B.13",
-    "crf": "B.13",
-    "archiving": "B.13",
-    "data retention": "B.13",
-    # B.14 Financing, Insurance, and Publication Policy
-    "financing": "B.14",
-    "insurance": "B.14",
-    "publication": "B.14",
-    "compensation": "B.14",
-    "indemnity": "B.14",
+    "direct access": "B.11",
+    "source document": "B.11",
+    # B.12 Quality Control and Quality Assurance
+    "quality control": "B.12",
+    "quality assurance": "B.12",
+    "monitoring plan": "B.12",
+    "data management": "B.12",
+    "risk-based monitoring": "B.12",
+    "site monitoring": "B.12",
+    # B.13 Ethics
+    "ethics": "B.13",
+    "informed consent": "B.13",
+    "irb": "B.13",
+    "ethics committee": "B.13",
+    "ethical approval": "B.13",
+    # B.14 Data Handling and Record Keeping
+    "data handling": "B.14",
+    "record keeping": "B.14",
+    "case report form": "B.14",
+    "crf": "B.14",
+    "archiving": "B.14",
+    "data retention": "B.14",
+    "essential documents": "B.14",
+    "data storage": "B.14",
+    "data collection": "B.14",
+    # B.15 Financing and Insurance
+    "financing": "B.15",
+    "insurance": "B.15",
+    "compensation": "B.15",
+    "indemnity": "B.15",
+    # B.16 Publication Policy
+    "publication": "B.16",
+    "publication policy": "B.16",
 }
+
+# -----------------------------------------------------------------------
+# B.1 exclusion terms (PTCV-155, Tier 2)
+# -----------------------------------------------------------------------
+# Headers containing these terms should never fall through to B.1.
+# They either belong to other ICH sections (with dedicated synonym
+# boosts) or are meta-content that doesn't map to any ICH section.
+# Without this, the matcher assigns 30-89 unclassifiable headers to
+# B.1 at LOW confidence, burying the actual front-matter signal.
+
+_B1_EXCLUSION_TERMS: frozenset[str] = frozenset({
+    # Meta-content (no ICH section)
+    "definitions",
+    "abbreviations",
+    "glossary",
+    "list of abbreviations",
+    "list of tables",
+    "list of figures",
+    "references",
+    "appendix",
+    "appendices",
+    # B.9 Safety
+    "pregnancy",
+    # B.10 Statistics
+    "interim analysis",
+    "statistical analyses",
+    # B.12 Quality Control / GCP
+    "good clinical practice",
+})
 
 
 # -----------------------------------------------------------------------
@@ -222,6 +282,18 @@ class MatchResult:
 
 
 # -----------------------------------------------------------------------
+# Scoring constants (PTCV-135)
+# -----------------------------------------------------------------------
+# Cap the denominator in keyword scoring to prevent dense sections
+# (e.g. B.4 with 35 max_possible) from diluting single-keyword
+# matches relative to sparse sections (e.g. B.6 with 14).
+_DENOM_CAP = 20
+
+# Keywords with this many characters or fewer use word-boundary
+# matching to prevent false positives (e.g. "dose" in "overdose").
+_SHORT_KW_THRESHOLD = 5
+
+# -----------------------------------------------------------------------
 # Content-length hint for enriching query embeddings
 # -----------------------------------------------------------------------
 _CONTENT_HINT_LEN = 200  # chars from content_spans to append
@@ -265,7 +337,7 @@ class SectionMatcher:
         self._review_threshold = review_threshold
         self._synonym_boost = synonym_boost
 
-        # Load ICH schema — 14 sections (B.1 through B.14)
+        # Load ICH schema — 16 sections (B.1 through B.16)
         schema = load_ich_schema()
         self._section_defs: dict[str, IchSectionDef] = (
             schema.sections
@@ -414,6 +486,12 @@ class SectionMatcher:
         Reuses the weighted formula from
         ``RuleBasedClassifier._score_block``:
         ``(pattern_hits * 2 + keyword_hits) / max_possible``.
+
+        PTCV-135 improvements:
+        - Denominator capped at ``_DENOM_CAP`` to normalise scores
+          across sparse and dense sections.
+        - Short keywords (<=5 chars) use word-boundary matching to
+          prevent false positives (e.g. "dose" in "overdose").
         """
         combined = (
             header_title + " " + section_text[:500]
@@ -424,18 +502,31 @@ class SectionMatcher:
             for p in ich_def.patterns
             if re.search(p, combined, re.IGNORECASE)
         )
-        keyword_hits = sum(
-            1
-            for kw in ich_def.keywords
-            if kw.lower() in combined
-        )
+        keyword_hits = 0
+        for kw in ich_def.keywords:
+            kw_lower = kw.lower()
+            if len(kw_lower) <= _SHORT_KW_THRESHOLD:
+                # Word-boundary match for short keywords
+                if re.search(
+                    r"\b" + re.escape(kw_lower) + r"\b",
+                    combined,
+                ):
+                    keyword_hits += 1
+            else:
+                # Substring match for longer keywords
+                if kw_lower in combined:
+                    keyword_hits += 1
 
-        max_possible = (
+        raw_max = (
             len(ich_def.patterns) * 2 + len(ich_def.keywords)
         )
-        if max_possible == 0:
+        if raw_max == 0:
             return 0.0
-        return (pattern_hits * 2 + keyword_hits) / max_possible
+        max_possible = min(raw_max, _DENOM_CAP)
+        return min(
+            1.0,
+            (pattern_hits * 2 + keyword_hits) / max_possible,
+        )
 
     # ------------------------------------------------------------------
     # Synonym boost
@@ -444,7 +535,12 @@ class SectionMatcher:
     def _apply_synonym_boost(
         self, title: str, raw_scores: list[float]
     ) -> list[float]:
-        """Apply synonym boost to raw scores for one header."""
+        """Apply synonym boost and B.1 exclusions for one header.
+
+        Positive boosts from ``_SYNONYM_BOOSTS`` are applied first,
+        then B.1 exclusion terms (PTCV-155) zero out the B.1 score
+        for headers that should never map to General Information.
+        """
         boosted = list(raw_scores)
         title_lower = title.lower()
         for synonym, ich_code in _SYNONYM_BOOSTS.items():
@@ -453,6 +549,15 @@ class SectionMatcher:
                 boosted[idx] = min(
                     1.0, boosted[idx] + self._synonym_boost
                 )
+
+        # PTCV-155 Tier 2: Prevent noise headers from mapping to B.1.
+        if "B.1" in self._ref_codes:
+            for excl_term in _B1_EXCLUSION_TERMS:
+                if excl_term in title_lower:
+                    b1_idx = self._ref_codes.index("B.1")
+                    boosted[b1_idx] = 0.0
+                    break
+
         return boosted
 
     # ------------------------------------------------------------------
