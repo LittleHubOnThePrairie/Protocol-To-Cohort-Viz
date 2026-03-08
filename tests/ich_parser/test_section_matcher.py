@@ -515,6 +515,87 @@ class TestB3ObjectivesMatching:
         assert top.ich_section_code == "B.3"
         assert top.confidence != MatchConfidence.LOW
 
+    def test_objectives_and_endpoints_maps_high(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """PTCV-143: 'OBJECTIVES AND ENDPOINTS' must reach HIGH."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="OBJECTIVES AND ENDPOINTS",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+        assert top.confidence == MatchConfidence.HIGH
+
+    def test_primary_objectives_maps_high(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """PTCV-143: 'Primary Objectives' maps to B.3 HIGH."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Primary Objectives",
+                ),
+            ],
+            section_headers=[],
+            content_spans={},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+        assert top.confidence == MatchConfidence.HIGH
+
+    def test_objectives_with_rich_content_reaches_high(
+        self, matcher: SectionMatcher
+    ) -> None:
+        """PTCV-143: Bare 'Objectives' with objectives content → HIGH."""
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(
+                    level=1,
+                    number="3",
+                    title="Objectives",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "3": (
+                    "Primary Objectives: To assess the safety. "
+                    "Secondary Objectives: To assess the effect. "
+                    "Exploratory Objectives: To evaluate PK."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.3"
+        assert top.confidence == MatchConfidence.HIGH
+
 
 # -------------------------------------------------------------------
 # TestSynonymBoost

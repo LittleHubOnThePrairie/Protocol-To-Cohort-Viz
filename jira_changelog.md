@@ -5,6 +5,24 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-08T20:05:16Z] PTCV-143: B.3 Trial Objectives and Purpose not populating in assembled template
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+B.3 Trial Objectives and Purpose not populating in assembled template
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-08T19:43:38Z] PTCV-99: Extract and consolidate bibliographic references into B.2.7 with citation filtering
 
 **Status Change:** In Progress -> Done

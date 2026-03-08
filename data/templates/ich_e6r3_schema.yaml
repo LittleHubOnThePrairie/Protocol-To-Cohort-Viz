@@ -71,16 +71,23 @@ sections:
       - "\\bobjectives?\\b"
       - "\\bpurpose\\b"
       - "\\bhypothes[ie]s\\b"
-      - "\\bprimary\\s+(?:objective|endpoint|outcome)\\b"
-      - "\\bsecondary\\s+(?:objective|endpoint|outcome)\\b"
+      - "\\bprimary\\s+(?:objectives?|endpoints?|outcomes?)\\b"
+      - "\\bsecondary\\s+(?:objectives?|endpoints?|outcomes?)\\b"
+      - "\\bestimands?\\b"
+      - "\\bstudy\\s+(?:aims?|goals?)\\b"
+      - "\\bexploratory\\s+(?:objectives?|endpoints?|outcomes?)\\b"
     keywords:
       - "objective"
       - "purpose"
-      - "primary endpoint"
-      - "secondary endpoint"
       - "hypothesis"
+      - "aim"
+      - "endpoint"
+      - "estimand"
+      - "study aim"
+      - "trial goal"
       - "primary outcome"
-      - "efficacy endpoint"
+      - "secondary outcome"
+      - "exploratory endpoint"
 
   B.4:
     name: "Trial Design"
@@ -151,6 +158,9 @@ sections:
       - "\\bwithdrawal\\b"
       - "\\btreatment\\s+(?:discontinuation|withdrawal|termination)\\b"
       - "\\bstopping\\s+rules?\\b"
+      - "\\bdrop.?out\\b"
+      - "\\blost\\s+to\\s+follow.up\\b"
+      - "\\bsubject\\s+(?:discontinuation|withdrawal)\\b"
     keywords:
       - "discontinuation"
       - "withdrawal"
@@ -158,6 +168,10 @@ sections:
       - "treatment termination"
       - "dropout"
       - "lost to follow-up"
+      - "participant withdrawal"
+      - "premature discontinuation"
+      - "study completion"
+      - "early termination"
 
   B.7:
     name: "Treatment of Participants"
@@ -264,16 +278,32 @@ sections:
   B.11:
     name: "Direct Access to Source Data/Documents"
     description: >-
-      Direct Access to Source Data/Documents (monitoring,
-      audit, inspection, source data verification)
+      Direct Access to Source Data/Documents (source data
+      verification, direct access, source documents)
     requirement: mandatory
     render_order: 11
+    patterns:
+      - "\\bsource\\s+data\\s+(?:verification|access)\\b"
+      - "\\bdirect\\s+access\\b"
+      - "\\bsource\\s+(?:document|record)\\b"
+    keywords:
+      - "source data verification"
+      - "direct access"
+      - "source document"
+      - "source record"
+
+  B.12:
+    name: "Quality Control and Quality Assurance"
+    description: >-
+      Quality Control and Quality Assurance (monitoring,
+      audit, inspection, GCP compliance, data integrity)
+    requirement: mandatory
+    render_order: 12
     patterns:
       - "\\bquality\\s+(?:control|assurance|management)\\b"
       - "\\baudit\\b"
       - "\\binspection\\b"
       - "\\bmonitoring\\s+(?:plan|visits?|procedures?)\\b"
-      - "\\bsource\\s+data\\s+(?:verification|access)\\b"
       - "\\bdata\\s+(?:management|governance|integrity)\\b"
       - "\\bGCP\\b"
       - "\\bICH\\s+E6\\b"
@@ -285,18 +315,19 @@ sections:
       - "monitoring"
       - "GCP"
       - "ICH E6"
-      - "source data verification"
       - "data management"
       - "data integrity"
       - "regulatory compliance"
+      - "site monitoring"
+      - "risk-based monitoring"
 
-  B.12:
+  B.13:
     name: "Ethics"
     description: >-
       Ethics (ethics committee, IRB approval, informed
       consent process, subject information)
     requirement: mandatory
-    render_order: 12
+    render_order: 13
     patterns:
       - "\\bethics\\s+(?:committee|review|approval)\\b"
       - "\\bIRB\\b"
@@ -315,13 +346,13 @@ sections:
       - "consent form"
       - "assent"
 
-  B.13:
+  B.14:
     name: "Data Handling and Record Keeping"
     description: >-
       Data Handling and Record Keeping (CRF, data
       management, electronic records, archiving)
     requirement: mandatory
-    render_order: 13
+    render_order: 14
     patterns:
       - "\\bdata\\s+handling\\b"
       - "\\brecord\\s+keeping\\b"
@@ -330,6 +361,8 @@ sections:
       - "\\beCRF\\b"
       - "\\belectronic\\s+(?:data|record)\\b"
       - "\\barchiv(?:ing|e)\\b"
+      - "\\bdata\\s+(?:entry|collection|storage)\\b"
+      - "\\bessential\\s+documents?\\b"
     keywords:
       - "data handling"
       - "record keeping"
@@ -340,29 +373,46 @@ sections:
       - "electronic records"
       - "archiving"
       - "data retention"
+      - "essential documents"
+      - "data collection"
+      - "data storage"
+      - "regulatory filing"
 
-  B.14:
-    name: "Financing, Insurance, and Publication Policy"
+  B.15:
+    name: "Financing and Insurance"
     description: >-
-      Financing, Insurance, and Publication Policy
-      (financial disclosure, insurance, publication)
+      Financing and Insurance (financial disclosure,
+      insurance, compensation, indemnity, funding)
     requirement: mandatory
-    render_order: 14
+    render_order: 15
     patterns:
       - "\\bfinanc(?:ing|ial)\\b"
       - "\\binsurance\\b"
-      - "\\bpublication\\s+(?:policy|plan|agreement)\\b"
       - "\\bcompensation\\b"
       - "\\bindemnity\\b"
     keywords:
       - "financing"
       - "financial disclosure"
       - "insurance"
-      - "publication"
-      - "publication policy"
       - "compensation"
       - "indemnity"
       - "funding"
+
+  B.16:
+    name: "Publication Policy"
+    description: >-
+      Publication Policy (publication plan, publication
+      agreement, authorship)
+    requirement: recommended
+    render_order: 16
+    patterns:
+      - "\\bpublication\\s+(?:policy|plan|agreement)\\b"
+      - "\\bauthorship\\b"
+    keywords:
+      - "publication"
+      - "publication policy"
+      - "publication plan"
+      - "authorship"
 
 # Configurable thresholds, patterns, and constants (PTCV-69).
 # Centralises values that were previously hardcoded across multiple files.
@@ -408,7 +458,7 @@ configuration:
 #   compact — compressed XML (<ich_e6r3><section code="B.X" ...>)
 stage_prompts:
   retemplater:
-    sections: [B.1, B.2, B.3, B.4, B.5, B.6, B.7, B.8, B.9, B.10, B.11, B.12, B.13, B.14]
+    sections: [B.1, B.2, B.3, B.4, B.5, B.6, B.7, B.8, B.9, B.10, B.11, B.12, B.13, B.14, B.15, B.16]
     format: full
   coverage_reviewer:
     sections: [B.3, B.4, B.5]
