@@ -5,6 +5,210 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-08T19:43:38Z] PTCV-99: Extract and consolidate bibliographic references into B.2.7 with citation filtering
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Extract and consolidate bibliographic references into B.2.7 with citation filtering
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-08T19:20:39Z] PTCV-157: Improve B.8 (Efficacy Assessment) section matching: expand synonym boosts and reduce full-doc dump fallback
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Improve B.8 (Efficacy Assessment) section matching: expand synonym boosts and reduce full-doc dump fallback
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-08T18:59:12Z] PTCV-155: Improve B.1 (General Information) section matching: synonym boosts, noise reduction, and front-matter extraction
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Improve B.1 (General Information) section matching: synonym boosts, noise reduction, and front-matter extraction
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T21:55:58Z] PTCV-148: Streamlit Comparison Tool: Side-by-side original vs extracted viewer
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Streamlit Comparison Tool: Side-by-side original vs extracted viewer
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/analysis/data_store.py
+- C:/Dev/PTCV/src/ptcv/ui/pages/__init__.py
+- C:/Dev/PTCV/src/ptcv/ui/pages/comparison_viewer.py
+- C:/Dev/PTCV/tests/analysis/test_data_store.py
+- C:/Dev/PTCV/tests/ui/__init__.py
+- C:/Dev/PTCV/tests/ui/test_comparison_viewer.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: e803f53, b2f755d, edf9645
+
+---
+## [2026-03-07T21:55:43Z] PTCV-152: Build assessment x visit x type matrix from query pipeline output
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-3
+
+**Summary:**
+Build assessment x visit x type matrix from query pipeline output
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/soa_extractor/matrix_builder.py
+- C:/Dev/PTCV/src/ptcv/soa_extractor/__init__.py
+- C:/Dev/PTCV/tests/soa_extractor/test_matrix_builder.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T20:49:46Z] PTCV-124: Improve progress bar display with percentage and elapsed time
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Improve progress bar display with percentage and elapsed time
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T20:40:53Z] PTCV-125: Investigate slow Section Classification stage in query pipeline
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Investigate slow Section Classification stage in query pipeline
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/summarization_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_summarization_matcher.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T20:34:04Z] PTCV-126: SoA & SDTM tab remains gated after Query Pipeline completes on NCT04919499
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoA & SDTM tab remains gated after Query Pipeline completes on NCT04919499
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/query_persistence.py
+- C:/Dev/PTCV/src/ptcv/ui/checkpoint_manager.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/template_assembler.py
+- C:/Dev/PTCV/tests/ui/test_query_persistence.py
+
+**Test Coverage:**
+4 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T20:28:54Z] PTCV-130: SoA & SDTM tab not available after running Query Pipeline
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+SoA & SDTM tab not available after running Query Pipeline
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-07T19:29:36Z] PTCV-129: TOC entries leak into B.8 section content with 0.00 avg confidence
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-3
+
+**Summary:**
+TOC entries leak into B.8 section content with 0.00 avg confidence
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/toc_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_toc_extractor.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: b2f755d, edf9645, d53ee1e
+
+---
+## [2026-03-07T19:29:30Z] PTCV-127: Regression: NCT04919499 section 8+ parsing yields raw PDF text with headers/footers
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+**PRD:** PRD-3
+
+**Summary:**
+Regression: NCT04919499 section 8+ parsing yields raw PDF text with headers/footers
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/toc_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_toc_extractor.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: b2f755d, edf9645, d53ee1e
+
+---
 ## [2026-03-07T14:26:06Z] PTCV-123: Add stage-level progress bars to query workflow UI
 
 **Status Change:** In Progress -> Done

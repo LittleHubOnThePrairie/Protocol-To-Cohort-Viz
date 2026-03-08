@@ -11,6 +11,7 @@ from ptcv.ich_parser.query_extractor import (
     ExtractionResult,
     QueryExtraction,
     QueryExtractor,
+    _CITATION_MIN_LEN,
     _LLM_TRANSFORM_MAX_CHARS,
     _NUMBERED_HEADING_RE,
     _TEXT_LONG_MAX_CHARS,
@@ -25,10 +26,13 @@ from ptcv.ich_parser.query_extractor import (
     _extract_table,
     _extract_text_long,
     _extract_text_short,
+    _is_full_citation,
     _match_heading_to_subsection,
     _query_keywords,
     _score_paragraph,
     _select_relevant_paragraphs,
+    extract_citations,
+    filter_citations,
 )
 from ptcv.ich_parser.query_schema import AppendixBQuery
 from ptcv.ich_parser.section_matcher import (
@@ -2075,3 +2079,299 @@ class TestUnscopedLengthCap:
         )
         # The relevant paragraph should appear in the output
         assert "PASI 75" in excerpt
+
+
+# ===================================================================
+# TestCitationDetection (PTCV-99)
+# ===================================================================
+
+
+class TestIsFullCitation:
+    """Unit tests for _is_full_citation() pattern matching."""
+
+    def test_apa_style(self) -> None:
+        line = (
+            "Smith, J. A., & Jones, B. C. (2021). Efficacy of "
+            "pembrolizumab in advanced NSCLC: a meta-analysis. "
+            "J Clin Oncol, 39(15), 1234-1245."
+        )
+        assert _is_full_citation(line) is True
+
+    def test_vancouver_numbered(self) -> None:
+        line = (
+            "1. Anderson BC, Chen L, Williams DP. Phase III trial "
+            "of nivolumab in hepatocellular carcinoma. Lancet Oncol. "
+            "2022;23(4):512-521."
+        )
+        assert _is_full_citation(line) is True
+
+    def test_vancouver_bracketed(self) -> None:
+        line = (
+            "[12] Garcia MR, Patel S. Biomarker-driven patient "
+            "stratification in oncology trials. Nat Rev Clin Oncol. "
+            "2020;17(2):89-104."
+        )
+        assert _is_full_citation(line) is True
+
+    def test_doi_reference(self) -> None:
+        line = (
+            "Thompson K, et al. Novel endpoints in dermatology "
+            "trials: a systematic review. doi: 10.1016/j.jaad.2023.01.045"
+        )
+        assert _is_full_citation(line) is True
+
+    def test_pmid_reference(self) -> None:
+        line = (
+            "Wilson D, Brown E. Adaptive designs in oncology: "
+            "current landscape and future directions. PMID: 34567890"
+        )
+        assert _is_full_citation(line) is True
+
+    def test_short_parenthetical_rejected(self) -> None:
+        assert _is_full_citation("(Smith et al., 2023)") is False
+
+    def test_short_text_rejected(self) -> None:
+        assert _is_full_citation("See reference 12.") is False
+
+    def test_empty_rejected(self) -> None:
+        assert _is_full_citation("") is False
+
+    def test_long_but_no_pattern(self) -> None:
+        line = "A" * (_CITATION_MIN_LEN + 10)
+        assert _is_full_citation(line) is False
+
+    def test_whitespace_stripped(self) -> None:
+        line = (
+            "   Smith, J. A. (2020). Long title that exceeds the "
+            "minimum length threshold for detection purposes.   "
+        )
+        assert _is_full_citation(line) is True
+
+
+class TestExtractCitations:
+    """Unit tests for extract_citations()."""
+
+    def test_extracts_from_mixed_text(self) -> None:
+        text = (
+            "The study showed efficacy (Smith et al., 2020).\n"
+            "\n"
+            "Smith, J. A., & Jones, B. C. (2021). Efficacy of "
+            "pembrolizumab in advanced NSCLC: a meta-analysis. "
+            "J Clin Oncol, 39(15), 1234-1245.\n"
+            "\n"
+            "Results were consistent with prior work."
+        )
+        result = extract_citations(text)
+        assert len(result) == 1
+        assert "pembrolizumab" in result[0]
+
+    def test_preserves_order(self) -> None:
+        text = (
+            "1. Anderson BC, Chen L. Phase III trial of nivolumab "
+            "in hepatocellular carcinoma. Lancet Oncol. 2022.\n"
+            "2. Garcia MR, Patel S. Biomarker-driven patient "
+            "stratification in oncology. Nat Rev Clin Oncol. 2020."
+        )
+        result = extract_citations(text)
+        assert len(result) == 2
+        assert "Anderson" in result[0]
+        assert "Garcia" in result[1]
+
+    def test_no_citations_returns_empty(self) -> None:
+        text = "This is a normal paragraph with no references."
+        assert extract_citations(text) == []
+
+    def test_empty_input(self) -> None:
+        assert extract_citations("") == []
+
+    def test_skips_parenthetical(self) -> None:
+        text = (
+            "As noted by (Author, 2021) the results were "
+            "significant [1-3]."
+        )
+        assert extract_citations(text) == []
+
+
+class TestFilterCitations:
+    """Unit tests for filter_citations()."""
+
+    def test_removes_full_citations(self) -> None:
+        text = (
+            "Results showed improvement.\n"
+            "\n"
+            "Smith, J. A. (2021). A comprehensive review of "
+            "clinical trial design methods in modern oncology. "
+            "J Clin Oncol, 39(15), 1234.\n"
+            "\n"
+            "Conclusions were drawn."
+        )
+        result = filter_citations(text)
+        assert "Results showed improvement" in result
+        assert "Conclusions were drawn" in result
+        assert "Smith, J. A." not in result
+
+    def test_preserves_parenthetical_refs(self) -> None:
+        text = "The effect was significant (Smith et al., 2023)."
+        result = filter_citations(text)
+        assert "(Smith et al., 2023)" in result
+
+    def test_cleans_excessive_blank_lines(self) -> None:
+        text = (
+            "Line 1.\n\n"
+            "Smith, J. A. (2021). Very long citation that is at "
+            "least sixty characters so it meets the minimum. "
+            "J Clin Oncol, 39(15).\n\n\n"
+            "Line 2."
+        )
+        result = filter_citations(text)
+        assert "\n\n\n" not in result
+
+    def test_no_citations_unchanged(self) -> None:
+        text = "Normal text with no citations at all."
+        assert filter_citations(text) == text
+
+    def test_empty_input(self) -> None:
+        assert filter_citations("") == ""
+
+
+class TestConsolidateCitations:
+    """Unit tests for QueryExtractor._consolidate_citations()."""
+
+    def test_collects_into_b27(self) -> None:
+        citation = (
+            "Smith, J. A. (2021). Efficacy of treatment X in "
+            "advanced cancer: a randomized controlled trial. "
+            "J Clin Oncol, 39(15), 1234-1245."
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.5": (
+                f"Inclusion criteria.\n{citation}",
+                "section_5",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        assert "B.2.7" in routes
+        assert "Smith" in routes["B.2.7"][0]
+        # Citation stripped from B.5
+        assert "Smith" not in routes["B.5"][0]
+
+    def test_appends_to_existing_b27(self) -> None:
+        citation = (
+            "Jones, B. C. (2022). Novel biomarkers for patient "
+            "stratification in clinical oncology trials. "
+            "Nat Rev Clin Oncol, 19(8), 501-515."
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.2.7": (
+                "Existing references content.",
+                "existing_src",
+                MatchConfidence.HIGH,
+            ),
+            "B.8": (
+                f"Efficacy endpoints.\n{citation}",
+                "section_8",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        content_b27 = routes["B.2.7"][0]
+        assert "Existing references content" in content_b27
+        assert "Consolidated Bibliography" in content_b27
+        assert "Jones" in content_b27
+
+    def test_uses_b2_confidence_when_no_b27(self) -> None:
+        citation = (
+            "Wilson, D. (2020). Adaptive designs in oncology: "
+            "current landscape and future directions for practice. "
+            "doi: 10.1016/j.example.2020.01.001"
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.2": (
+                "Background text.",
+                "section_2",
+                MatchConfidence.REVIEW,
+            ),
+            "B.5": (
+                f"Criteria.\n{citation}",
+                "section_5",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        assert "B.2.7" in routes
+        assert routes["B.2.7"][2] == MatchConfidence.REVIEW
+
+    def test_no_citations_noop(self) -> None:
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.5": (
+                "Normal text with no citations.",
+                "section_5",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        assert "B.2.7" not in routes
+
+    def test_deduplicates_citations(self) -> None:
+        citation = (
+            "Smith, J. A. (2021). Efficacy of treatment X in "
+            "advanced cancer: a randomized controlled trial. "
+            "J Clin Oncol, 39(15), 1234-1245."
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.5": (
+                f"Criteria text.\n{citation}",
+                "section_5",
+                MatchConfidence.HIGH,
+            ),
+            "B.8": (
+                f"Efficacy text.\n{citation}",
+                "section_8",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        b27_content = routes["B.2.7"][0]
+        # Should appear only once despite being in two routes
+        assert b27_content.count("J Clin Oncol") == 1
+
+    def test_preserves_b2_route_citations(self) -> None:
+        citation = (
+            "Smith, J. A. (2021). Efficacy of treatment X in "
+            "advanced cancer: a randomized controlled trial. "
+            "J Clin Oncol, 39(15), 1234-1245."
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.2": (
+                f"Background info.\n{citation}",
+                "section_2",
+                MatchConfidence.HIGH,
+            ),
+            "B.5": (
+                f"Criteria.\n{citation}",
+                "section_5",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        # B.2 content should NOT be filtered
+        assert "Smith" in routes["B.2"][0]
+        # B.5 content SHOULD be filtered
+        assert "Smith" not in routes["B.5"][0]
+
+    def test_review_confidence_when_no_b2(self) -> None:
+        citation = (
+            "Anderson, K. (2023). Long citation text that exceeds "
+            "the sixty character minimum for detection purposes. "
+            "PMID: 12345678"
+        )
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.8": (
+                f"Efficacy.\n{citation}",
+                "section_8",
+                MatchConfidence.HIGH,
+            ),
+        }
+        QueryExtractor._consolidate_citations(routes)
+        assert routes["B.2.7"][2] == MatchConfidence.REVIEW

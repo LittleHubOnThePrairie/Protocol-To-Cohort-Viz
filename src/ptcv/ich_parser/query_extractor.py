@@ -691,6 +691,116 @@ def _extract_statement(
 
 
 # -----------------------------------------------------------------------
+# Citation detection and filtering (PTCV-99)
+# -----------------------------------------------------------------------
+# Detects full bibliographic references, collects them for B.2.7,
+# and strips them from content destined for other sections.
+# Short parenthetical references like "(Smith et al., 2023)" or
+# "[1]" are preserved inline.
+
+# Full citation patterns:
+# - APA:      "Author, A. B. (Year). Title. Journal, Vol(Issue), Pages."
+# - Vancouver: "1. Author AB. Title. Journal. Year;Vol(Issue):Pages."
+# - Numbered:  "[1] Author. Title. Journal 2023; ..."
+# - DOI refs:  "... doi:10.xxxx/yyyy" or "https://doi.org/..."
+
+# A full citation is >=60 chars and matches at least one pattern.
+_CITATION_MIN_LEN = 60
+
+# APA-style: Author, A. B. (Year).
+_APA_RE = re.compile(
+    r"[A-Z][a-z]+,?\s+[A-Z]\..*?\(\d{4}\)\.\s+.+?\.",
+)
+
+# Vancouver/numbered: "1." or "[1]" at start with author initials
+_VANCOUVER_RE = re.compile(
+    r"(?:^\d{1,3}[.)]\s+|^\[\d{1,3}\]\s+)"
+    r"[A-Z][a-z]+\s+[A-Z]{1,3}[,.]",
+    re.MULTILINE,
+)
+
+# DOI anywhere in a line
+_DOI_RE = re.compile(
+    r"(?:doi:\s*10\.\d{4,}/\S+|"
+    r"https?://doi\.org/10\.\d{4,}/\S+)",
+    re.IGNORECASE,
+)
+
+# PMID reference
+_PMID_RE = re.compile(r"PMID:\s*\d+", re.IGNORECASE)
+
+# Parenthetical references to PRESERVE (not strip).
+# e.g. "(Smith et al., 2023)", "(Author, Year)", "[1-3]", "[12]"
+_PARENTHETICAL_RE = re.compile(
+    r"\([A-Z][a-z]+(?:\s+et\s+al\.?)?,?\s+\d{4}\)"
+    r"|\[\d{1,3}(?:[,\-–]\s*\d{1,3})*\]"
+)
+
+
+def _is_full_citation(line: str) -> bool:
+    """Return ``True`` if *line* is a full bibliographic reference.
+
+    Criteria: length >= ``_CITATION_MIN_LEN`` AND matches at least
+    one citation pattern (APA, Vancouver, DOI, PMID).  Short
+    parenthetical references are excluded.
+    """
+    if len(line.strip()) < _CITATION_MIN_LEN:
+        return False
+    if _APA_RE.search(line):
+        return True
+    if _VANCOUVER_RE.search(line):
+        return True
+    if _DOI_RE.search(line):
+        return True
+    if _PMID_RE.search(line):
+        return True
+    return False
+
+
+def extract_citations(text: str) -> list[str]:
+    """Extract full bibliographic references from *text*.
+
+    Splits text into lines and returns lines that match citation
+    patterns.  Does NOT return short parenthetical refs.
+
+    Args:
+        text: Content to scan for citations.
+
+    Returns:
+        List of full citation strings, preserving original order.
+    """
+    citations: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped and _is_full_citation(stripped):
+            citations.append(stripped)
+    return citations
+
+
+def filter_citations(text: str) -> str:
+    """Remove full bibliographic references from *text*.
+
+    Preserves short parenthetical references like
+    ``"(Smith et al., 2023)"`` and ``"[1]"``.
+
+    Args:
+        text: Content to filter.
+
+    Returns:
+        Text with full citations removed.
+    """
+    lines = text.split("\n")
+    kept: list[str] = []
+    for line in lines:
+        if line.strip() and _is_full_citation(line.strip()):
+            continue
+        kept.append(line)
+    # Clean up excessive blank lines from removal
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+    return result.strip()
+
+
+# -----------------------------------------------------------------------
 # Dispatcher
 # -----------------------------------------------------------------------
 
@@ -926,6 +1036,11 @@ class QueryExtractor:
         # PTCV-155 Tier 3: Inject front-matter as B.1 fallback
         # when no HIGH/REVIEW content was matched for B.1.
         self._inject_front_matter_route(routes, protocol_index)
+
+        # PTCV-99: Citation extraction and consolidation.
+        # Collect full citations from all routes, inject into B.2.7,
+        # and strip from non-B.2 routes.
+        self._consolidate_citations(routes)
 
         extractions: list[QueryExtraction] = []
         gaps: list[ExtractionGap] = []
@@ -1311,6 +1426,78 @@ class QueryExtractor:
                 "front_matter",
                 MatchConfidence.REVIEW,
             )
+
+    # ------------------------------------------------------------------
+    # Citation consolidation (PTCV-99)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _consolidate_citations(
+        routes: dict[str, tuple[str, str, MatchConfidence]],
+    ) -> None:
+        """Collect citations from routes, inject into B.2.7, filter others.
+
+        1. Scans all routes for full bibliographic references.
+        2. Consolidates unique citations into B.2.7 (deduped, ordered).
+        3. Strips full citations from non-B.2 routes.
+        4. Preserves parenthetical references like "(Author, Year)".
+
+        Modifies *routes* in place.
+        """
+        all_citations: list[str] = []
+        seen: set[str] = set()
+
+        # Collect citations from all routes
+        for code, (content, _src, _conf) in list(routes.items()):
+            found = extract_citations(content)
+            for c in found:
+                normalised = c.strip().lower()
+                if normalised not in seen:
+                    seen.add(normalised)
+                    all_citations.append(c)
+
+        if not all_citations:
+            return
+
+        logger.info(
+            "PTCV-99: Collected %d unique citations for B.2.7",
+            len(all_citations),
+        )
+
+        # Build consolidated bibliography for B.2.7
+        bibliography = "\n".join(all_citations)
+
+        if "B.2.7" in routes:
+            existing, src, conf = routes["B.2.7"]
+            routes["B.2.7"] = (
+                f"{existing}\n\n"
+                f"--- Consolidated Bibliography ---\n"
+                f"{bibliography}",
+                f"{src}, citation_extraction",
+                conf,
+            )
+        elif "B.2" in routes:
+            _, src, conf = routes["B.2"]
+            routes["B.2.7"] = (
+                bibliography,
+                "citation_extraction",
+                conf,
+            )
+        else:
+            routes["B.2.7"] = (
+                bibliography,
+                "citation_extraction",
+                MatchConfidence.REVIEW,
+            )
+
+        # Strip citations from non-B.2 routes
+        for code in list(routes.keys()):
+            if code.startswith("B.2"):
+                continue
+            content, src, conf = routes[code]
+            filtered = filter_citations(content)
+            if filtered != content:
+                routes[code] = (filtered, src, conf)
 
     # ------------------------------------------------------------------
     # Per-query processing

@@ -72,6 +72,10 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "literature review": "B.2",
     "preclinical": "B.2",
     "nonclinical": "B.2",
+    "references": "B.2",
+    "bibliography": "B.2",
+    "citations": "B.2",
+    "literature": "B.2",
     # B.3 Objectives
     "objective": "B.3",
     "purpose": "B.3",
