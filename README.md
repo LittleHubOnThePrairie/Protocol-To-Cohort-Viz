@@ -13,6 +13,10 @@ generates SDTM trial design datasets (TS, TA, TE, TV, TI) with accompanying Defi
 All artifact writes are immutable (WORM) with a tamper-evident SHA-256 lineage chain, satisfying
 21 CFR Part 11, ICH E6(R3), and ALCOA+ requirements.
 
+The pipeline employs a **2D graceful degradation matrix** with independent extraction and
+classification axes, ensuring the system always produces output even when optional components
+(Docling, NeoBERT, Claude API) are unavailable.
+
 The project ships a Streamlit application with two independent processing pipelines:
 
 - **Process (LLM Retemplater)** — rule-based ICH section classification followed by optional
@@ -26,76 +30,130 @@ Both pipelines feed the SoA extraction and SDTM generation stages.
 
 ```
 src/ptcv/
-    protocol_search/    — Search and download protocols from EU-CTR and ClinicalTrials.gov
-    extraction/         — Format detection and text/table extraction from PDF and CTR-XML
-    ich_parser/         — ICH E6(R3) section classifier, LLM retemplater, query extractor,
-                          and template assembler
-    soa_extractor/      — Schedule of Activities parser, CDISC USDM v4.0 mapper, and
-                          query pipeline bridge
-    sdtm/               — SDTM domain generators, Define-XML, CT normalizer, and validator
-    annotations/        — Span-level annotation service for section boundaries
-    storage/            — StorageGateway abstraction (FilesystemAdapter / MinIO WORM)
-    compliance/         — Audit trail, data integrity, and access control (21 CFR Part 11)
-    pipeline/           — End-to-end PipelineOrchestrator wiring all stages
-    ui/                 — Streamlit application with modular component library
+    protocol_search/    -- Search and download protocols from EU-CTR and ClinicalTrials.gov
+    extraction/         -- Format detection, text/table extraction from PDF and CTR-XML,
+                           and hybrid Claude vision enhancement for sparse pages (PTCV-172)
+    ich_parser/         -- ICH E6(R3) section classifier, LLM retemplater, query extractor,
+                           classification cascade (NeoBERT + RAG + Sonnet), and template
+                           assembler
+    soa_extractor/      -- Schedule of Activities parser with 3-level cascade (table, vision,
+                           LLM text construction), CDISC USDM v4.0 mapper, and query bridge
+    sdtm/               -- SDTM domain generators, Define-XML, CT normalizer, and validator
+    annotations/        -- Span-level annotation service for section boundaries
+    storage/            -- StorageGateway abstraction (FilesystemAdapter / MinIO WORM)
+    compliance/         -- Audit trail, data integrity, and access control (21 CFR Part 11)
+    pipeline/           -- PipelineOrchestrator with 2D degradation chain (PTCV-163)
+    analysis/           -- Batch analysis runner and quality benchmarking
+    benchmark/          -- Extraction quality comparator and metrics
+    ui/                 -- Streamlit application with modular component library
 ```
 
 ### Pipeline stages
 
-1. **protocol_search** — retrieves protocol PDFs or CTR-XML from registries, stores via
+1. **protocol_search** -- retrieves protocol PDFs or CTR-XML from registries, stores via
    `StorageGateway` with SHA-256 checksums.
-2. **extraction** — `ExtractionService` detects format (`ProtocolFormat`) and runs the
-   appropriate extractor, writing `text_blocks.parquet` and `tables.parquet`.
-3. **ich_parser** — dual-path classification:
-   - *Rule-based*: `IchParser` classifies text blocks against 16 ICH E6(R3) sections;
-     low-confidence sections enter the `ReviewQueue`.
-   - *Query-driven*: `QueryExtractor` runs a schema of structured queries per section,
-     optionally transforming results via Claude Sonnet. `TemplateAssembler` merges
-     query hits into an `AssembledProtocol` with per-section coverage reports.
-4. **soa_extractor** — `SoaExtractor` parses the Schedule of Activities table from ICH
-   sections (or from the query pipeline via `query_bridge`) and maps activities to
-   CDISC USDM v4.0 entities (`UsdmTimepoint`, `UsdmActivity`, `UsdmScheduledInstance`).
-5. **sdtm** — `SdtmService` generates SDTM trial design domains (TS, TA, TE, TV, TI)
+2. **extraction** -- `ExtractionService` detects format (`ProtocolFormat`) and runs the
+   appropriate extractor, writing `text_blocks.parquet` and `tables.parquet`. At E1 level,
+   `VisionEnhancer` renders sparse/low-quality pages to PNG and sends them to Claude vision
+   API for structured JSON extraction.
+3. **soa_extraction** -- `SoaExtractor` runs a 3-level cascade to build USDM entities:
+   - *Level 1*: Table-based extraction (pre-extracted tables, PDF discovery, text parsing)
+   - *Level 2*: Claude vision extraction for complex merged-cell tables (PTCV-172)
+   - *Level 3*: Sonnet text construction from B.4/B.7/B.8/B.9 prose (PTCV-166)
+4. **classification_cascade** -- `ClassificationRouter` runs a hybrid local + Sonnet cascade:
+   rule-based or NeoBERT classifiers produce initial predictions; low-confidence sections are
+   routed to Claude Sonnet with optional RAG context from prior protocols (PTCV-161, PTCV-162).
+5. **retemplating** -- `LlmRetemplater` reorganizes non-ICH protocols into standard
+   ICH E6(R3) structure via two-pass Claude Opus classification and text assembly.
+6. **sdtm** -- `SdtmService` generates SDTM trial design domains (TS, TA, TE, TV, TI)
    and `DefineXmlGenerator` produces Define-XML v2.1; `ValidationService` runs Pinnacle 21,
    FDA TCG, and Define-XML checks.
-6. **pipeline** — `PipelineOrchestrator` orchestrates stages 1-5 with per-stage lineage
+7. **pipeline** -- `PipelineOrchestrator` orchestrates stages 1-6 with per-stage lineage
    checkpoints and SHA-256 chain verification.
+
+### 2D degradation matrix (PTCV-163)
+
+The pipeline selects the highest available quality level on each axis independently:
+
+| Extraction | Description | Requirements |
+|-----------|-------------|--------------|
+| E1 | Docling + Vision | `docling`, `PTCV_VISION_API_KEY` |
+| E2 | Docling only | `docling` |
+| E3 | pdfplumber cascade | None (always available) |
+
+| Classification | Description | Requirements |
+|---------------|-------------|--------------|
+| C1 | NeoBERT + RAG + Sonnet | `torch`, `transformers`, NeoBERT model, RAG index, `ANTHROPIC_API_KEY` |
+| C2 | NeoBERT + Sonnet | `torch`, `transformers`, NeoBERT model, `ANTHROPIC_API_KEY` |
+| C3 | RuleBased + Sonnet | `ANTHROPIC_API_KEY` |
+| C4 | NeoBERT + RuleBased | `torch`, `transformers`, NeoBERT model |
+| C5 | RuleBased only | None (always available) |
+
+E3+C5 is guaranteed to work with zero external dependencies.
+
+### SoA extraction cascade (PTCV-166)
+
+| Level | Source | Method | Trigger |
+|-------|--------|--------|---------|
+| 1 | Pre-extracted tables / PDF discovery / text parsing | `SoaTableParser`, `TableDiscovery` | Always tried first |
+| 2 | Claude vision API | `VisionEnhancer` | E1 extraction level |
+| 3 | Sonnet text construction | `LlmSoaBuilder` | < 3 activities from L1/L2 |
 
 ### Key modules
 
 | Module | Key files | Purpose |
 |--------|-----------|---------|
-| `ich_parser` | `query_extractor.py`, `template_assembler.py`, `query_schema.py` | Query-driven extraction with LLM transformation and protocol assembly |
+| `extraction` | `extraction_service.py`, `pdf_extractor.py`, `vision_enhancer.py` | PDF/XML extraction with vision fallback |
+| `ich_parser` | `classification_router.py`, `neobert_classifier.py`, `rag_index.py` | Hybrid classification cascade with ML and RAG |
+| `ich_parser` | `query_extractor.py`, `template_assembler.py`, `query_schema.py` | Query-driven extraction with LLM transformation |
 | `ich_parser` | `parser.py`, `classifier.py`, `llm_retemplater.py` | Rule-based classification and LLM retemplating |
-| `ich_parser` | `models.py`, `review_queue.py`, `parquet_writer.py` | Data models, human review queue, Parquet I/O |
-| `soa_extractor` | `parser.py`, `extractor.py`, `query_bridge.py` | SoA table parsing with query pipeline integration |
+| `soa_extractor` | `extractor.py`, `llm_soa_builder.py`, `query_bridge.py` | 3-level SoA cascade with LLM text construction |
 | `soa_extractor` | `mapper.py`, `resolver.py`, `table_discovery.py` | USDM mapping, visit synonyms, PDF table discovery |
 | `sdtm` | `domain_generators.py`, `define_xml.py`, `ct_normalizer.py` | SDTM domain generation and controlled terminology |
+| `pipeline` | `orchestrator.py`, `degradation.py` | Pipeline orchestration with 2D degradation chain |
 | `ui` | `app.py`, `components/query_pipeline.py` | Streamlit application and query pipeline UI |
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.13+ (CUDA torch compatibility)
 - Java runtime (JRE 8+) for `tabula-py`
 
-### Python dependencies
+### Python dependencies (runtime)
 
 | Package | Version | Purpose |
 |---------|---------|---------|
 | `minio` | >= 7.2.0 | MinIO client for WORM object storage (production) |
 | `pyarrow` | >= 14.0.0 | Parquet read/write for all intermediate artifacts |
 | `duckdb` | >= 0.10.0 | In-process analytics over Parquet files |
-| `pdfplumber` | >= 0.11.0 | Primary PDF text and table extraction |
+| `PyMuPDF` | >= 1.24.0 | PDF rendering for vision extraction |
+| `pymupdf4llm` | >= 0.0.17 | PDF-to-markdown conversion |
+| `pdfplumber` | >= 0.11.0 | PDF text and table extraction |
 | `camelot-py[base]` | >= 0.11.0 | Lattice/stream table extraction fallback |
 | `tabula-py` | >= 2.9.0 | Java-based table extraction (third fallback) |
 | `pandas` | >= 2.0.0 | Tabular data manipulation |
+| `spacy` | >= 3.8.0 | NLP for section matching |
 | `lxml` | >= 5.0.0 | CTR-XML / CDISC ODM parsing |
 | `PyYAML` | >= 6.0 | YAML schema loading |
 | `requests` | >= 2.31.0 | HTTP client for registry API calls |
-| `anthropic` | >= 0.40.0 | Claude API for LLM retemplating and query transformation |
+| `anthropic` | >= 0.40.0 | Claude API for classification, retemplating, vision, and SoA construction |
 | `pyreadstat` | >= 1.3.0 | SDTM XPT serialization |
 | `streamlit` | >= 1.28.0 | Interactive web application |
 | `plotly` | >= 5.0.0 | Schedule of Visits swimlane visualization |
+
+### ML dependencies (optional)
+
+Install separately for NeoBERT fine-tuning and RAG index support:
+
+```bash
+pip install -r requirements-ml.txt
+```
+
+| Package | Purpose |
+|---------|---------|
+| `torch` >= 2.10.0 | PyTorch for NeoBERT |
+| `transformers` >= 4.38.0 | Hugging Face model loading |
+| `sentence-transformers` >= 2.2.0 | RAG embedding model |
+| `faiss-cpu` >= 1.7.4 | Vector similarity search for RAG index |
 
 ## Installation
 
@@ -104,8 +162,11 @@ src/ptcv/
 git clone https://github.com/LittleHubOnThePrairie/Protocol-To-Cohort-Viz.git
 cd Protocol-To-Cohort-Viz
 
-# Install dependencies
+# Install runtime dependencies
 pip install -r requirements.txt
+
+# (Optional) Install ML dependencies for NeoBERT/RAG
+pip install -r requirements-ml.txt
 ```
 
 ## Usage
@@ -124,7 +185,7 @@ The application provides a tabbed interface:
 | **Process** | Run ICH section classification and optional LLM retemplating |
 | **Query Pipeline** | Run query-driven extraction with optional Claude Sonnet transformation |
 | **SoA & SDTM** | Extract Schedule of Activities and generate SDTM datasets |
-| **Benchmark** | View classification performance metrics |
+| **Analysis** | Batch analysis runner and extraction quality benchmarking |
 
 ### Run the full pipeline programmatically
 
@@ -215,35 +276,40 @@ Downloaded protocols are stored under `data/protocols/` by default:
 
 ```
 data/protocols/
-    clinicaltrials/      — ClinicalTrials.gov PDF/XML files (83 protocols)
-    eu-ctr/              — EU-CTR / CTIS PDF/XML files
-    metadata/            — Protocol metadata JSON
-    lineage.db           — SQLite append-only lineage chain
+    clinicaltrials/      -- ClinicalTrials.gov PDF/XML files (83 protocols)
+    eu-ctr/              -- EU-CTR / CTIS PDF/XML files
+    metadata/            -- Protocol metadata JSON
+    lineage.db           -- SQLite append-only lineage chain
 ```
 
 ### Environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key for LLM retemplating and query transformation |
+| `ANTHROPIC_API_KEY` | Claude API key for classification cascade, retemplating, vision, and SoA construction |
+| `PTCV_VISION_API_KEY` | API key for Claude vision extraction (enables E1 degradation level) |
+| `PTCV_VISION_MAX_PAGES` | Max pages for vision extraction per protocol (default: 5) |
+| `PTCV_NEOBERT_MODEL` | Path to NeoBERT checkpoint directory (enables C1/C2/C4 classification) |
+| `PTCV_RAG_INDEX` | Path to RAG vector index directory (enables C1 classification) |
 
 ## Testing
 
-The test suite contains 2,180+ tests across all modules:
+The test suite contains 3,200+ tests across all modules:
 
 ```
 tests/
-    ich_parser/         — ICH classification, query extraction, template assembly
-    soa_extractor/      — SoA parsing, USDM mapping, query bridge
-    sdtm/               — SDTM domain generation, Define-XML, validation
-    extraction/         — PDF/XML extraction
-    storage/            — Storage gateway adapters
-    pipeline/           — End-to-end pipeline orchestration
-    annotations/        — Span annotation service
-    protocol_search/    — Protocol download and search
-    ui/                 — Streamlit components and visualization
-    smoke/              — Integration smoke tests
-    scripts/            — Utility script tests
+    ich_parser/         -- ICH classification, query extraction, template assembly,
+                           classification cascade, NeoBERT, RAG index
+    soa_extractor/      -- SoA parsing, USDM mapping, query bridge, LLM SoA builder
+    sdtm/               -- SDTM domain generation, Define-XML, validation
+    extraction/         -- PDF/XML extraction, vision enhancer, markdown normalizer
+    storage/            -- Storage gateway adapters
+    pipeline/           -- Pipeline orchestration, degradation chain
+    analysis/           -- Batch analysis, benchmarking
+    annotations/        -- Span annotation service
+    protocol_search/    -- Protocol download and search
+    ui/                 -- Streamlit components and visualization
+    smoke/              -- Integration smoke tests
 ```
 
 ```bash
