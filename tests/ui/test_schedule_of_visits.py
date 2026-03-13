@@ -1,9 +1,14 @@
-"""Unit tests for schedule of visits swimlane component (PTCV-34, PTCV-71).
+"""Unit tests for schedule of visits component (PTCV-34, PTCV-71, PTCV-151).
 
 Tests the pure-Python helpers (classify_swimlane, build_sov_grid,
 build_sov_csv, build_sov_figure) without Streamlit runtime.
 
+PTCV-151: Tests updated for assessment × visit matrix output.
+
 Covers GHERKIN scenarios:
+  - Builder outputs assessment-level rows (PTCV-151)
+  - Screening visit anchored at day 0 (PTCV-151)
+  - No assessments are concatenated (PTCV-151)
   - Clinical encounter row lists clinician-collected variables
   - Specimen row lists specimen types and derived assays
   - Imaging row lists imaging modality
@@ -11,7 +16,6 @@ Covers GHERKIN scenarios:
   - CSV download has correct structure
   - Intervention swimlane displays drug administration (PTCV-71)
   - Specimen-based tests classified correctly (PTCV-71)
-  - Existing Clinical Encounter activities unchanged (PTCV-71)
   - Backward-compatible classify_swimlane signature (PTCV-71)
 """
 
@@ -36,8 +40,10 @@ from ptcv.soa_extractor.models import (
 from ptcv.ui.components.schedule_of_visits import (
     SWIMLANE_ROWS,
     _dedup_timepoints,
+    _rebase_to_screening,
     build_sov_csv,
     build_sov_figure,
+    build_sov_figure_from_matrix,
     build_sov_grid,
     classify_swimlane,
 )
@@ -113,7 +119,7 @@ class TestClassifySwimlane:
         ("Treatment", "Intervention"),
         ("Assessment", "Clinical Encounter"),
         ("Vital Signs", "Clinical Encounter"),
-        ("ECG", "Clinical Encounter"),
+        ("ECG", "Other"),
         ("Safety", "Clinical Encounter"),
         ("Consent", "Clinical Encounter"),
         ("Lab", "Specimens"),
@@ -158,7 +164,7 @@ class TestKeywordReclassification:
         "Treatment administration",
     ])
     def test_intervention_keywords(self, name: str) -> None:
-        """Activities with intervention keywords → Intervention."""
+        """Activities with intervention keywords -> Intervention."""
         assert classify_swimlane("Other", name) == "Intervention"
         assert classify_swimlane("Procedure", name) == "Intervention"
 
@@ -181,11 +187,11 @@ class TestKeywordReclassification:
         ("Hepatitis B screening", "Specimens"),
     ])
     def test_specimen_keywords(self, name: str, expected: str) -> None:
-        """Activities with specimen keywords → Specimens."""
+        """Activities with specimen keywords -> Specimens."""
         assert classify_swimlane("Assessment", name) == expected
 
     def test_specimen_keyword_does_not_override_lab(self) -> None:
-        """Lab type already maps to Specimens — no change needed."""
+        """Lab type already maps to Specimens -- no change needed."""
         assert classify_swimlane("Lab", "CBC") == "Specimens"
 
     def test_specimen_keyword_does_not_override_imaging(self) -> None:
@@ -201,71 +207,114 @@ class TestKeywordReclassification:
         assert classify_swimlane("Vital Signs", "Blood pressure") == "Clinical Encounter"
 
     def test_intervention_overrides_clinical_encounter(self) -> None:
-        """An Assessment named 'Study drug' → Intervention."""
+        """An Assessment named 'Study drug' -> Intervention."""
         assert classify_swimlane("Assessment", "Study drug dose") == "Intervention"
 
 
 # ---------------------------------------------------------------------------
-# build_sov_grid
+# _rebase_to_screening (PTCV-151)
+# ---------------------------------------------------------------------------
+
+class TestRebaseToScreening:
+    """PTCV-151: Screening day anchored at day 0."""
+
+    def test_screening_becomes_day_zero(self) -> None:
+        tps = [
+            _tp("v1", "Screening", day_offset=-14),
+            _tp("v2", "Baseline", day_offset=1),
+            _tp("v3", "EOT", day_offset=84),
+        ]
+        rebased = _rebase_to_screening(tps)
+        assert rebased["v1"] == 0
+        assert rebased["v2"] == 15
+        assert rebased["v3"] == 98
+
+    def test_all_positive_offsets(self) -> None:
+        """When minimum offset is 0, nothing shifts."""
+        tps = [_tp("t1", "V1", 0), _tp("t2", "V2", 7)]
+        rebased = _rebase_to_screening(tps)
+        assert rebased["t1"] == 0
+        assert rebased["t2"] == 7
+
+    def test_empty_returns_empty(self) -> None:
+        assert _rebase_to_screening([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# build_sov_grid -- PTCV-151: assessment x visit matrix
 # ---------------------------------------------------------------------------
 
 class TestBuildSovGrid:
-    """Tests for build_sov_grid()."""
+    """Tests for build_sov_grid() -- assessment-level output (PTCV-151)."""
 
-    def test_grid_has_expected_cells(self) -> None:
+    def test_grid_has_expected_keys(self) -> None:
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
-        # Should have cells for each (visit, swimlane) combo that has data
         assert len(grid) > 0
-        # All records have required keys
         for rec in grid:
-            assert "visit_name" in rec
-            assert "swimlane" in rec
-            assert "activities" in rec
-            assert "activity_count" in rec
+            assert "assessment" in rec
+            assert "assessment_type" in rec
+            assert "visit_label" in rec
+            assert "day" in rec
+            assert "visit_index" in rec
+            assert "activity_id" in rec
 
-    def test_clinical_encounter_row_for_vitals(self) -> None:
+    def test_one_record_per_scheduled_instance(self) -> None:
+        """[PTCV-151 Scenario: Builder outputs assessment-level rows]"""
+        grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
+        # 8 scheduled instances in INSTANCES
+        assert len(grid) == 8
+
+    def test_no_concatenated_activity_names(self) -> None:
+        """[PTCV-151 Scenario: No assessments concatenated]"""
+        grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
+        for rec in grid:
+            assert "," not in rec["assessment"]
+
+    def test_screening_anchored_at_day_zero(self) -> None:
+        """[PTCV-151 Scenario: Screening visit anchored at day 0]"""
+        grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
+        screening = [r for r in grid if r["visit_label"] == "Screening"]
+        assert len(screening) > 0
+        assert all(r["day"] == 0 for r in screening)
+        # Baseline (C1D1) should have positive day offset
+        c1d1 = [r for r in grid if r["visit_label"] == "C1D1"]
+        assert all(r["day"] > 0 for r in c1d1)
+
+    def test_clinical_encounter_for_vitals(self) -> None:
         """[PTCV-34 Scenario: Clinical encounter row lists variables]"""
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
-        clinical_cells = [
-            r for r in grid if r["swimlane"] == "Clinical Encounter"
+        vitals = [
+            r for r in grid
+            if r["assessment"] == "Vital Signs"
         ]
         # Vitals scheduled at all 3 visits
-        assert len(clinical_cells) == 3
-        for cell in clinical_cells:
-            assert "Vital Signs" in cell["activities"]
+        assert len(vitals) == 3
+        assert all(r["assessment_type"] == "Clinical Encounter" for r in vitals)
 
-    def test_specimen_row_for_labs(self) -> None:
+    def test_specimen_for_labs(self) -> None:
         """[PTCV-34 Scenario: Specimen row lists specimen types]"""
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
-        specimen_cells = [
-            r for r in grid if r["swimlane"] == "Specimens"
-        ]
+        cbc = [r for r in grid if r["assessment"] == "CBC"]
         # CBC scheduled at Screening + C1D1
-        assert len(specimen_cells) == 2
-        for cell in specimen_cells:
-            assert "CBC" in cell["activities"]
+        assert len(cbc) == 2
+        assert all(r["assessment_type"] == "Specimens" for r in cbc)
 
-    def test_imaging_row_for_mri(self) -> None:
+    def test_imaging_for_mri(self) -> None:
         """[PTCV-34 Scenario: Imaging row lists imaging modality]"""
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
-        imaging_cells = [
-            r for r in grid if r["swimlane"] == "Imaging"
-        ]
+        mri = [r for r in grid if r["assessment"] == "MRI Brain"]
         # MRI Brain at Screening + EOT
-        assert len(imaging_cells) == 2
-        for cell in imaging_cells:
-            assert "MRI Brain" in cell["activities"]
+        assert len(mri) == 2
+        assert all(r["assessment_type"] == "Imaging" for r in mri)
 
-    def test_other_row_for_procedure(self) -> None:
+    def test_other_for_procedure(self) -> None:
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
-        other_cells = [
-            r for r in grid if r["swimlane"] == "Other"
-        ]
+        ecg = [r for r in grid if r["assessment"] == "ECG Holter"]
         # ECG Holter at C1D1
-        assert len(other_cells) == 1
-        assert "ECG Holter" in other_cells[0]["activities"]
+        assert len(ecg) == 1
+        assert ecg[0]["assessment_type"] == "Other"
 
-    def test_grid_sorted_by_visit_then_swimlane(self) -> None:
+    def test_grid_sorted_by_visit_then_type(self) -> None:
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
         visit_indices = [r["visit_index"] for r in grid]
         assert visit_indices == sorted(visit_indices)
@@ -278,8 +327,8 @@ class TestBuildSovGrid:
         grid = build_sov_grid([], ACTIVITIES, INSTANCES)
         assert grid == []
 
-    def test_multiple_activities_same_cell(self) -> None:
-        """Two activities in the same swimlane at the same visit."""
+    def test_two_activities_same_visit_produce_two_records(self) -> None:
+        """Two activities at the same visit produce separate records."""
         acts = [
             _act("a10", "Physical Exam", "Assessment"),
             _act("a11", "ECOG Score", "Assessment"),
@@ -288,17 +337,16 @@ class TestBuildSovGrid:
         grid = build_sov_grid(TIMEPOINTS, acts, insts)
         clinical_v1 = [
             r for r in grid
-            if r["swimlane"] == "Clinical Encounter"
-            and r["visit_name"] == "Screening"
+            if r["assessment_type"] == "Clinical Encounter"
+            and r["visit_label"] == "Screening"
         ]
-        assert len(clinical_v1) == 1
-        assert clinical_v1[0]["activity_count"] == 2
-        assert "ECOG Score" in clinical_v1[0]["activities"]
-        assert "Physical Exam" in clinical_v1[0]["activities"]
+        assert len(clinical_v1) == 2
+        names = {r["assessment"] for r in clinical_v1}
+        assert names == {"Physical Exam", "ECOG Score"}
 
 
 # ---------------------------------------------------------------------------
-# build_sov_csv
+# build_sov_csv -- PTCV-151
 # ---------------------------------------------------------------------------
 
 class TestBuildSovCsv:
@@ -309,7 +357,7 @@ class TestBuildSovCsv:
         csv_str = build_sov_csv(TIMEPOINTS, ACTIVITIES, INSTANCES)
         reader = csv.reader(io.StringIO(csv_str))
         header = next(reader)
-        assert header == ["Visit", "Day", "Category", "Activities"]
+        assert header == ["Assessment", "Assessment Type", "Visit", "Day"]
 
     def test_csv_row_count_matches_grid(self) -> None:
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
@@ -325,21 +373,27 @@ class TestBuildSovCsv:
         assert "C1D1" in csv_str
         assert "EOT" in csv_str
 
+    def test_csv_contains_assessment_names(self) -> None:
+        csv_str = build_sov_csv(TIMEPOINTS, ACTIVITIES, INSTANCES)
+        assert "Vital Signs" in csv_str
+        assert "CBC" in csv_str
+        assert "MRI Brain" in csv_str
+
     def test_empty_data_returns_header_only(self) -> None:
         csv_str = build_sov_csv([], [], [])
         reader = csv.reader(io.StringIO(csv_str))
         rows = list(reader)
         assert len(rows) == 1
-        assert rows[0] == ["Visit", "Day", "Category", "Activities"]
+        assert rows[0] == ["Assessment", "Assessment Type", "Visit", "Day"]
 
 
 # ---------------------------------------------------------------------------
-# build_sov_figure
+# build_sov_figure -- PTCV-151: assessment x visit chart
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(not HAS_PLOTLY, reason="plotly not installed")
 class TestBuildSovFigure:
-    """Tests for build_sov_figure() — Plotly chart builder."""
+    """Tests for build_sov_figure() -- assessment x visit chart."""
 
     def test_figure_has_traces(self) -> None:
         fig = build_sov_figure(
@@ -366,10 +420,20 @@ class TestBuildSovFigure:
         fig_low = build_sov_figure(
             TIMEPOINTS, ACTIVITIES, INSTANCES, low_confidence=True,
         )
-        # Colours should differ between the two
         normal_colors = {t.marker.color for t in fig_normal.data}
         low_colors = {t.marker.color for t in fig_low.data}
         assert normal_colors != low_colors
+
+    def test_figure_yaxis_has_assessment_names(self) -> None:
+        """PTCV-151: Y-axis shows individual assessment names."""
+        fig = build_sov_figure(
+            TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
+        )
+        ticktext = list(fig.layout.yaxis.ticktext)
+        assert "Vital Signs" in ticktext
+        assert "CBC" in ticktext
+        assert "MRI Brain" in ticktext
+        assert "ECG Holter" in ticktext
 
     def test_figure_xaxis_has_visit_labels(self) -> None:
         fig = build_sov_figure(
@@ -381,27 +445,24 @@ class TestBuildSovFigure:
         assert "C1D1" in joined
         assert "EOT" in joined
 
-    def test_figure_xaxis_has_day_offsets(self) -> None:
-        """PTCV-72: X-axis labels include day offsets."""
+    def test_figure_xaxis_has_rebased_day_offsets(self) -> None:
+        """PTCV-151: X-axis labels use rebased days (screening = day 0)."""
         fig = build_sov_figure(
             TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
         )
         ticktext = fig.layout.xaxis.ticktext
         joined = " ".join(ticktext)
-        assert "Day -14" in joined  # Screening
-        assert "Day 1" in joined    # C1D1
-        assert "Day 84" in joined   # EOT
+        assert "Day 0" in joined   # Screening (was -14)
+        assert "Day 15" in joined  # C1D1 (was 1, rebased: 1 - (-14) = 15)
+        assert "Day 98" in joined  # EOT (was 84, rebased: 84 - (-14) = 98)
 
-    def test_figure_yaxis_has_swimlane_labels(self) -> None:
+    def test_figure_height_scales_with_assessments(self) -> None:
+        """Chart height increases with more assessments."""
         fig = build_sov_figure(
             TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
         )
-        ticktext = fig.layout.yaxis.ticktext
-        assert "Intervention" in ticktext
-        assert "Clinical Encounter" in ticktext
-        assert "Specimens" in ticktext
-        assert "Imaging" in ticktext
-        assert "Other" in ticktext
+        # 4 assessments: max(400, 30*4) = 400
+        assert fig.layout.height >= 400
 
 
 # ---------------------------------------------------------------------------
@@ -409,34 +470,34 @@ class TestBuildSovFigure:
 # ---------------------------------------------------------------------------
 
 class TestInterventionSwimlaneGrid:
-    """PTCV-71: Drug administration appears in Intervention swimlane."""
+    """PTCV-71: Drug administration appears in Intervention type."""
 
     def test_drug_admin_type_in_intervention(self) -> None:
-        """Activity type 'Drug Administration' → Intervention row."""
+        """Activity type 'Drug Administration' -> Intervention."""
         acts = [_act("a20", "Study Drug", "Drug Administration")]
         insts = [_inst("a20", "v2")]
         grid = build_sov_grid(TIMEPOINTS, acts, insts)
-        intervention = [r for r in grid if r["swimlane"] == "Intervention"]
+        intervention = [r for r in grid if r["assessment_type"] == "Intervention"]
         assert len(intervention) == 1
-        assert "Study Drug" in intervention[0]["activities"]
+        assert intervention[0]["assessment"] == "Study Drug"
 
     def test_keyword_reclassification_in_grid(self) -> None:
         """Activity with name 'Placebo infusion' reclassified in grid."""
         acts = [_act("a21", "Placebo infusion", "Procedure")]
         insts = [_inst("a21", "v1")]
         grid = build_sov_grid(TIMEPOINTS, acts, insts)
-        intervention = [r for r in grid if r["swimlane"] == "Intervention"]
+        intervention = [r for r in grid if r["assessment_type"] == "Intervention"]
         assert len(intervention) == 1
-        assert "Placebo infusion" in intervention[0]["activities"]
+        assert intervention[0]["assessment"] == "Placebo infusion"
 
     def test_specimen_reclassification_in_grid(self) -> None:
-        """Activity 'Urine pregnancy test' (Assessment) → Specimens."""
+        """Activity 'Urine pregnancy test' (Assessment) -> Specimens."""
         acts = [_act("a22", "Urine pregnancy test", "Assessment")]
         insts = [_inst("a22", "v1")]
         grid = build_sov_grid(TIMEPOINTS, acts, insts)
-        specimens = [r for r in grid if r["swimlane"] == "Specimens"]
+        specimens = [r for r in grid if r["assessment_type"] == "Specimens"]
         assert len(specimens) == 1
-        assert "Urine pregnancy test" in specimens[0]["activities"]
+        assert specimens[0]["assessment"] == "Urine pregnancy test"
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +508,7 @@ class TestTimepointDedup:
     """PTCV-73: Duplicate timepoints collapsed on x-axis."""
 
     def test_dedup_merges_same_name_and_offset(self) -> None:
-        """25 timepoints with same name+offset → 1 unique."""
+        """25 timepoints with same name+offset -> 1 unique."""
         tps = [
             _tp(f"dup-{i}", "Screening", day_offset=7)
             for i in range(25)
@@ -455,7 +516,6 @@ class TestTimepointDedup:
         unique, id_map = _dedup_timepoints(tps)
         assert len(unique) == 1
         assert unique[0].visit_name == "Screening"
-        # All map to the same canonical id
         assert len(set(id_map.values())) == 1
 
     def test_dedup_preserves_distinct_visits(self) -> None:
@@ -473,8 +533,7 @@ class TestTimepointDedup:
         assert len(unique) == 2
 
     def test_grid_merges_duplicate_timepoint_activities(self) -> None:
-        """Activities from duplicate timepoints merge into one column."""
-        # 3 duplicate Screening timepoints, each with a different activity
+        """Activities from duplicate timepoints merge into one visit column."""
         tps = [
             _tp("dup-1", "Screening", day_offset=7),
             _tp("dup-2", "Screening", day_offset=7),
@@ -491,12 +550,13 @@ class TestTimepointDedup:
             _inst("a32", "dup-3"),
         ]
         grid = build_sov_grid(tps, acts, insts)
-        # All activities collapsed under one "Screening" visit
-        visit_names = {r["visit_name"] for r in grid}
-        assert visit_names == {"Screening"}
-        # 3 swimlane rows (Clinical Encounter, Specimens, Imaging)
-        swimlanes = {r["swimlane"] for r in grid}
-        assert swimlanes == {"Clinical Encounter", "Specimens", "Imaging"}
+        # All activities under one "Screening" visit
+        visit_labels = {r["visit_label"] for r in grid}
+        assert visit_labels == {"Screening"}
+        # 3 separate assessment records
+        assert len(grid) == 3
+        assessments = {r["assessment"] for r in grid}
+        assert assessments == {"Vital Signs", "CBC", "MRI Brain"}
 
     @pytest.mark.skipif(not HAS_PLOTLY, reason="plotly not installed")
     def test_figure_xaxis_deduped(self) -> None:
@@ -510,3 +570,186 @@ class TestTimepointDedup:
         fig = build_sov_figure(tps, acts, insts)
         assert len(fig.layout.xaxis.ticktext) == 1
         assert "Screening" in fig.layout.xaxis.ticktext[0]
+
+
+# ---------------------------------------------------------------------------
+# PTCV-131: eDiary and ECG classification fixes
+# ---------------------------------------------------------------------------
+
+class TestEdiarySwimlane:
+    """PTCV-131: eDiary should be 'Other', not 'Clinical Encounter'."""
+
+    def test_ediary_assessment_reclassified(self) -> None:
+        assert classify_swimlane("Assessment", "eDiary") == "Other"
+
+    def test_electronic_diary_reclassified(self) -> None:
+        assert classify_swimlane("Assessment", "Electronic diary") == "Other"
+
+    def test_patient_diary_reclassified(self) -> None:
+        assert classify_swimlane("Assessment", "Patient diary") == "Other"
+
+    def test_ediary_in_grid(self) -> None:
+        """eDiary activity lands in Other in full grid."""
+        acts = [_act("a50", "eDiary", "Assessment")]
+        insts = [_inst("a50", "v1")]
+        grid = build_sov_grid(TIMEPOINTS, acts, insts)
+        other = [r for r in grid if r["assessment_type"] == "Other"]
+        assert len(other) == 1
+        assert other[0]["assessment"] == "eDiary"
+
+
+class TestEcgSwimlane:
+    """PTCV-131: ECG type should map to 'Other'."""
+
+    def test_ecg_direct_type(self) -> None:
+        assert classify_swimlane("ECG") == "Other"
+
+    def test_ecg_name_reclassifies_assessment(self) -> None:
+        assert classify_swimlane("Assessment", "ECG") == "Other"
+
+    def test_electrocardiogram_reclassifies(self) -> None:
+        assert classify_swimlane("Assessment", "Electrocardiogram") == "Other"
+
+
+# ---------------------------------------------------------------------------
+# PTCV-131: Visit sort order
+# ---------------------------------------------------------------------------
+
+class TestVisitSortOrder:
+    """PTCV-131: Visits sorted chronologically by day_offset then number."""
+
+    def test_v1_v2_v3_v4_order(self) -> None:
+        """V1 through V4 should appear in order."""
+        tps = [
+            _tp("t4", "V4", day_offset=4),
+            _tp("t2", "V2", day_offset=2),
+            _tp("t1", "V1", day_offset=1),
+            _tp("t3", "V3", day_offset=3),
+        ]
+        acts = [_act("a60", "Vitals", "Vital Signs")]
+        insts = [
+            _inst("a60", "t1"), _inst("a60", "t2"),
+            _inst("a60", "t3"), _inst("a60", "t4"),
+        ]
+        grid = build_sov_grid(tps, acts, insts)
+        visit_labels = [r["visit_label"] for r in grid]
+        assert visit_labels == ["V1", "V2", "V3", "V4"]
+
+    def test_mixed_day_offsets_sorted(self) -> None:
+        """Visits with real day offsets sort correctly."""
+        tps = [
+            _tp("t1", "EOT", day_offset=84),
+            _tp("t2", "Screening", day_offset=-14),
+            _tp("t3", "C1D1", day_offset=1),
+        ]
+        acts = [_act("a61", "CBC", "Lab")]
+        insts = [
+            _inst("a61", "t1"),
+            _inst("a61", "t2"),
+            _inst("a61", "t3"),
+        ]
+        grid = build_sov_grid(tps, acts, insts)
+        visit_labels = [r["visit_label"] for r in grid]
+        assert visit_labels == ["Screening", "C1D1", "EOT"]
+
+
+# ---------------------------------------------------------------------------
+# PTCV-151: build_sov_figure_from_matrix
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not HAS_PLOTLY, reason="plotly not installed")
+class TestBuildSovFigureFromMatrix:
+    """Tests for the assessment x visit matrix chart (PTCV-151)."""
+
+    def test_basic_matrix_chart(self) -> None:
+        """3 assessments x 3 visits produces a figure with traces."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+        )
+        assert fig is not None
+        assert len(fig.data) >= 1
+
+    def test_assessments_on_y_axis(self) -> None:
+        """Y-axis tick labels include individual assessment names."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+        )
+        y_labels = fig.layout.yaxis.ticktext
+        assert y_labels is not None
+        label_set = set(y_labels)
+        for act in ACTIVITIES:
+            assert act.activity_name in label_set
+
+    def test_visits_on_x_axis(self) -> None:
+        """X-axis labels contain visit names."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+        )
+        x_labels = fig.layout.xaxis.ticktext
+        assert x_labels is not None
+        joined = " ".join(x_labels)
+        assert "Screening" in joined
+        assert "C1D1" in joined
+        assert "EOT" in joined
+
+    def test_screening_anchored_day_0(self) -> None:
+        """X-axis shows Day 0 for screening visit."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+        )
+        x_labels = fig.layout.xaxis.ticktext
+        assert x_labels is not None
+        assert "Day 0" in x_labels[0]
+
+    def test_type_grouping(self) -> None:
+        """Assessments are grouped by type on the Y-axis."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+        )
+        y_labels = list(fig.layout.yaxis.ticktext)
+        specimens = [
+            i for i, l in enumerate(y_labels) if l == "CBC"
+        ]
+        others = [
+            i for i, l in enumerate(y_labels) if l == "ECG Holter"
+        ]
+        if specimens and others:
+            assert min(specimens) < min(others)
+
+    def test_at_home_detected(self) -> None:
+        """eDiary assessment gets At-home type."""
+        tps = [
+            _tp("v1", "Screening", -14),
+            _tp("v2", "V1", 1),
+            _tp("v3", "V2", 8),
+        ]
+        acts = [
+            _act("a1", "Vital Signs", "Vital Signs"),
+            _act("a2", "CBC", "Lab"),
+            _act("a3", "eDiary", "Other"),
+        ]
+        insts = [
+            _inst("a1", "v1"), _inst("a1", "v2"),
+            _inst("a2", "v1"), _inst("a2", "v3"),
+            _inst("a3", "v2"), _inst("a3", "v3"),
+        ]
+        fig = build_sov_figure_from_matrix(tps, acts, insts)
+        trace_names = [t.name for t in fig.data]
+        assert "At-home" in trace_names
+
+    def test_empty_matrix_fallback(self) -> None:
+        """Empty instances fall back to swimlane chart."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, [],
+        )
+        assert fig is not None
+
+    def test_low_confidence_muted_colors(self) -> None:
+        """Muted palette used when low_confidence=True."""
+        fig = build_sov_figure_from_matrix(
+            TIMEPOINTS, ACTIVITIES, INSTANCES,
+            low_confidence=True,
+        )
+        for trace in fig.data:
+            color = trace.marker.color
+            assert "rgba" in str(color)

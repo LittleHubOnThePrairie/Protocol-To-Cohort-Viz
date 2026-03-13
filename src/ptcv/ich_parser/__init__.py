@@ -29,6 +29,14 @@ Public API:
 
 from .models import IchSection, ReviewQueueEntry
 from .classifier import SectionClassifier, RuleBasedClassifier, RAGClassifier
+from .classification_router import (
+    CascadeResult,
+    ClassificationRouter,
+    LocalCandidate,
+    RoutingDecision,
+    RoutingStats,
+    SonnetJudgement,
+)
 from .fidelity_checker import FidelityChecker
 from .format_detector import FormatDetector, FormatDetectionResult, ProtocolFormat
 from .m11_parser import M11ProtocolParser
@@ -58,23 +66,47 @@ from .summarization_matcher import (
     build_subsection_registry,
     compute_composite_score,
 )
-from .template_assembler import AssembledProtocol, assemble_template
+from .template_assembler import (
+    AssembledProtocol,
+    ClassifiedSection,
+    assemble_from_classified,
+    assemble_template,
+)
 from .toc_extractor import ProtocolIndex, extract_protocol_index
 from .parser import IchParser
+
+# Optional ML-based classifier (requires torch + transformers)
+try:
+    from .neobert_classifier import NeoBERTClassifier
+except ImportError:
+    pass
+
+# Optional RAG index (requires sentence-transformers + faiss-cpu)
+try:
+    from .rag_index import RagExemplar, RagIndex, RagIndexStats
+except ImportError:
+    pass
 
 __all__ = [
     "AppendixBQuery",
     "AssembledProtocol",
+    "ClassifiedSection",
     "BenchmarkReport",
+    "CascadeResult",
+    "ClassificationRouter",
     "ExtractionGap",
     "ExtractionResult",
     "FidelityChecker",
     "IchParser",
     "IchSection",
+    "LocalCandidate",
     "ReviewQueueEntry",
+    "RoutingDecision",
+    "RoutingStats",
     "SectionClassifier",
     "RuleBasedClassifier",
     "RAGClassifier",
+    "SonnetJudgement",
     "ReviewQueue",
     "FormatDetector",
     "FormatDetectionResult",
@@ -88,6 +120,7 @@ __all__ = [
     "SectionMatch",
     "SectionMatcher",
     "SectionMapping",
+    "assemble_from_classified",
     "assemble_template",
     "extract_protocol_index",
     "load_query_schema",
@@ -101,4 +134,7 @@ __all__ = [
     "SummarizationMatcher",
     "build_subsection_registry",
     "compute_composite_score",
+    "RagExemplar",
+    "RagIndex",
+    "RagIndexStats",
 ]

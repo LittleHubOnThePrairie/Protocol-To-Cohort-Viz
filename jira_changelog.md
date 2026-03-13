@@ -5,6 +5,195 @@ Use "Post summary of all Jira changes to Confluence" to sync to Confluence.
 
 ---
 
+## [2026-03-10T12:13:34Z] PTCV-179: Wire classified assembly backend (PTCV-165) into query pipeline UI with new pipeline stage progress tracking
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Wire classified assembly backend (PTCV-165) into query pipeline UI with new pipeline stage progress tracking
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/soa_extractor/query_bridge.py
+- C:/Dev/PTCV/src/ptcv/ui/components/progress_tracker.py
+- C:/Dev/PTCV/src/ptcv/ui/components/query_pipeline.py
+- C:/Dev/PTCV/src/ptcv/ui/app.py
+- C:/Dev/PTCV/tests/ui/test_progress_tracker.py
+- C:/Dev/PTCV/tests/ui/test_query_pipeline.py
+- C:/Dev/PTCV/tests/soa_extractor/test_query_bridge.py
+
+**Test Coverage:**
+4 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T18:47:03Z] PTCV-165: ICH E6(R3) document assembly from classified pipeline output
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+ICH E6(R3) document assembly from classified pipeline output
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/template_assembler.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/tests/ich_parser/test_classified_assembler.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T17:26:02Z] PTCV-161: Hybrid cascade: confidence-based routing from local classifier to Sonnet
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Hybrid cascade: confidence-based routing from local classifier to Sonnet
+
+**Files Modified:**
+- C:/Dev/PTCV/data/templates/ich_e6r3_schema.yaml
+- C:/Dev/PTCV/src/ptcv/ich_parser/classification_router.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/classifier.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/schema_loader.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/__init__.py
+- C:/Dev/PTCV/src/ptcv/pipeline/models.py
+- C:/Dev/PTCV/src/ptcv/pipeline/orchestrator.py
+- C:/Dev/PTCV/tests/ich_parser/test_classification_router.py
+- C:/Dev/PTCV/tests/pipeline/test_models.py
+- C:/Dev/PTCV/tests/pipeline/test_orchestrator.py
+
+**Test Coverage:**
+5 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T15:25:43Z] PTCV-160: TOC order hints for ambiguous Markdown headings (supplements PTCV-171)
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+TOC order hints for ambiguous Markdown headings (supplements PTCV-171)
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T15:00:57Z] PTCV-171: Update section matcher and route builder to leverage Markdown heading hierarchy
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Update section matcher and route builder to leverage Markdown heading hierarchy
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ich_parser/section_matcher.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/query_extractor.py
+- C:/Dev/PTCV/tests/ich_parser/test_section_matcher.py
+- C:/Dev/PTCV/tests/ich_parser/test_query_extractor.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T14:19:23Z] PTCV-170: Replace pdfplumber extraction with pymupdf4llm in Stage 1 of pipeline
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Replace pdfplumber extraction with pymupdf4llm in Stage 1 of pipeline
+
+**Files Modified:**
+- C:/Dev/PTCV/requirements.txt
+- C:/Dev/PTCV/src/ptcv/extraction/pdf_extractor.py
+- C:/Dev/PTCV/src/ptcv/extraction/extraction_service.py
+- C:/Dev/PTCV/src/ptcv/ich_parser/toc_extractor.py
+- C:/Dev/PTCV/tests/extraction/test_pdf_extractor.py
+- C:/Dev/PTCV/tests/extraction/test_extraction_service.py
+- C:/Dev/PTCV/tests/ich_parser/test_toc_extractor.py
+
+**Test Coverage:**
+3 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-09T13:35:41Z] PTCV-174: PoC: Benchmark Nougat PDF-to-Markdown on 5 representative protocols and compare to PTCV-168 results
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+PoC: Benchmark Nougat PDF-to-Markdown on 5 representative protocols and compare to PTCV-168 results
+
+**Files Modified:**
+- C:/Dev/PTCV/scripts/benchmark_pdf_to_markdown.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-08T20:25:06Z] PTCV-43: Full-protocol annotation view with span selection
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Full-protocol annotation view with span selection
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/annotation_review.py
+- C:/Dev/PTCV/src/ptcv/annotations/span_mapper.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-08T20:25:06Z] PTCV-41: Improve annotation review: fix truncation, add notes
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Improve annotation review: fix truncation, add notes
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/annotation_review.py
+
+**Test Coverage:**
+1 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
+## [2026-03-08T20:25:06Z] PTCV-40: Add human-in-the-loop annotation UI
+
+**Status Change:** In Progress -> Done
+**Actor:** Claude Code
+
+**Summary:**
+Add human-in-the-loop annotation UI
+
+**Files Modified:**
+- C:/Dev/PTCV/src/ptcv/ui/components/annotation_review.py
+- C:/Dev/PTCV/src/ptcv/annotations/models.py
+
+**Test Coverage:**
+2 test file(s) found
+Branch: `master` | Commits: 28700ea, fc72881, a7eb13d
+
+---
 ## [2026-03-08T20:05:16Z] PTCV-143: B.3 Trial Objectives and Purpose not populating in assembled template
 
 **Status Change:** In Progress -> Done

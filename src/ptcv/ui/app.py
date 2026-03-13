@@ -109,10 +109,17 @@ from ptcv.ich_parser.llm_retemplater import LlmRetemplater
 from ptcv.ich_parser.parquet_writer import parquet_to_sections
 from ptcv.sdtm import SdtmService
 from ptcv.soa_extractor import SoaExtractor
+from ptcv.ich_parser.template_assembler import (
+    AssembledProtocol,
+    CoverageReport,
+)
 from ptcv.soa_extractor.query_bridge import (
     assembled_to_sections,
     get_assembled_protocol,
     has_query_pipeline_results,
+)
+from ptcv.ui.query_persistence import (
+    load_assembled_protocol,
 )
 from ptcv.soa_extractor.writer import UsdmParquetWriter
 from ptcv.storage import FilesystemAdapter
@@ -155,6 +162,33 @@ from ptcv.ui.components.section_align import align_sections, build_comparison_ht
 from ptcv.ui.pipeline_stages import STAGE_BY_KEY
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Feature flag: disable Process tab (PTCV-142)
+# ---------------------------------------------------------------------------
+_PROCESS_TAB_DISABLED = bool(
+    os.environ.get("PTCV_DISABLE_PROCESS_TAB", "")
+)
+
+
+def _build_tab_names(
+    review_label: str,
+    include_process: bool = True,
+) -> list[str]:
+    """Build the ordered tab name list.
+
+    Extracted for testability (PTCV-142).
+    """
+    names: list[str] = []
+    if include_process:
+        names.append("Process")
+    names.extend([
+        "Results", "Quality", "SoA & SDTM",
+        "Mock Data", "Query Pipeline", "Benchmark",
+        "Refinement", review_label,
+    ])
+    return names
+
 
 # Default paths relative to PTCV project root
 _DATA_ROOT = Path("C:/Dev/PTCV/data")
@@ -689,6 +723,47 @@ def _run_sdtm_generation(
     }
 
 
+def _run_sdtm_from_assembled(
+    assembled: "AssembledProtocol",
+    soa_cached: dict | None,
+    gateway: FilesystemAdapter,
+    registry_id: str,
+) -> dict:
+    """Run SDTM generation from query pipeline AssembledProtocol (PTCV-140).
+
+    Args:
+        assembled: Completed AssembledProtocol from the query pipeline.
+        soa_cached: SoA extraction result dict (may be None).
+        gateway: Initialised FilesystemAdapter.
+        registry_id: Trial registry identifier.
+
+    Returns:
+        Dict with keys: sdtm_result, sections, has_soa,
+        registry_id, format_verdict.
+    """
+    timepoints = []
+    if soa_cached and soa_cached.get("timepoints"):
+        timepoints = soa_cached["timepoints"]
+
+    sdtm_svc = SdtmService(gateway=gateway)
+    sdtm_result = sdtm_svc.generate_from_assembled(
+        assembled=assembled,
+        timepoints=timepoints,
+        registry_id=registry_id,
+    )
+
+    # Build IchSections for the SDTM viewer (display purposes).
+    sections = assembled_to_sections(assembled, registry_id=registry_id)
+
+    return {
+        "sdtm_result": sdtm_result,
+        "sections": sections,
+        "has_soa": len(timepoints) > 0,
+        "registry_id": registry_id,
+        "format_verdict": "query_pipeline",
+    }
+
+
 def _run_fidelity_check(
     cached: dict,
     gateway: FilesystemAdapter,
@@ -802,6 +877,195 @@ def _display_fidelity(fidelity_cached: dict) -> None:
                 or sr.drift_flags
             ):
                 st.markdown("No issues detected.")
+
+
+def compute_quality_verdict(
+    coverage: CoverageReport,
+) -> dict:
+    """Compute quality verdict from a CoverageReport (PTCV-138).
+
+    Pure function — no Streamlit dependency. Returns a dict
+    with verdict, coverage_pct, and query_pct for testability.
+
+    Args:
+        coverage: CoverageReport from an AssembledProtocol.
+
+    Returns:
+        Dict with keys: verdict ("PASS", "REVIEW", "FAIL"),
+        coverage_pct (float 0-100), query_pct (float 0-100).
+    """
+    coverage_pct = (
+        coverage.populated_count / coverage.total_sections * 100
+        if coverage.total_sections > 0
+        else 0.0
+    )
+    query_pct = (
+        coverage.answered_queries / coverage.total_queries * 100
+        if coverage.total_queries > 0
+        else 0.0
+    )
+
+    if coverage_pct >= 75 and coverage.average_confidence >= 0.70:
+        verdict = "PASS"
+    elif coverage_pct >= 50:
+        verdict = "REVIEW"
+    else:
+        verdict = "FAIL"
+
+    return {
+        "verdict": verdict,
+        "coverage_pct": coverage_pct,
+        "query_pct": query_pct,
+    }
+
+
+def _display_query_quality(
+    assembled: AssembledProtocol,
+) -> None:
+    """Render quality metrics from query pipeline results (PTCV-138).
+
+    Shows section coverage, confidence distribution, query answer
+    rate, and per-section details derived from the AssembledProtocol
+    coverage report — replacing the Process-tab-only fidelity check
+    when query pipeline results are available.
+
+    Args:
+        assembled: Completed AssembledProtocol from the query pipeline.
+    """
+    cov = assembled.coverage
+    st.subheader("Query Pipeline Quality")
+
+    qv = compute_quality_verdict(cov)
+    coverage_pct = qv["coverage_pct"]
+
+    if qv["verdict"] == "PASS":
+        st.success(
+            f"Quality: PASS — {coverage_pct:.0f}% section coverage, "
+            f"{cov.average_confidence:.0%} avg confidence"
+        )
+    elif qv["verdict"] == "REVIEW":
+        st.warning(
+            f"Quality: REVIEW — {coverage_pct:.0f}% section coverage, "
+            f"{cov.average_confidence:.0%} avg confidence"
+        )
+    else:
+        st.error(
+            f"Quality: FAIL — {coverage_pct:.0f}% section coverage, "
+            f"{cov.average_confidence:.0%} avg confidence"
+        )
+
+    # Top-level metrics.
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(
+            "Sections Populated",
+            f"{cov.populated_count}/{cov.total_sections}",
+        )
+    with col2:
+        st.metric("Gap Sections", cov.gap_count)
+    with col3:
+        st.metric(
+            "Queries Answered",
+            f"{cov.answered_queries}/{cov.total_queries} "
+            f"({qv['query_pct']:.0f}%)",
+        )
+    with col4:
+        st.metric(
+            "Avg Confidence",
+            f"{cov.average_confidence:.2f}",
+        )
+
+    # Confidence distribution bar.
+    col_h, col_m, col_l = st.columns(3)
+    with col_h:
+        st.metric("High Confidence", cov.high_confidence_count)
+    with col_m:
+        st.metric("Medium Confidence", cov.medium_confidence_count)
+    with col_l:
+        st.metric("Low Confidence", cov.low_confidence_count)
+
+    # Gap sections.
+    if cov.gap_sections:
+        st.markdown(
+            "**Gap sections (no content):** "
+            + ", ".join(cov.gap_sections)
+        )
+
+    # Low confidence sections.
+    if cov.low_confidence_sections:
+        st.markdown(
+            "**Low confidence sections:** "
+            + ", ".join(cov.low_confidence_sections)
+        )
+
+    # Per-section expandable details.
+    st.divider()
+    st.subheader("Per-Section Detail")
+    for section in assembled.sections:
+        if section.is_gap:
+            icon = "gap"
+        elif section.has_low_confidence:
+            icon = "low"
+        else:
+            icon = "ok"
+
+        label = (
+            f"{section.section_code} — "
+            f"{section.section_name} "
+            f"[{icon}] "
+            f"(conf: {section.average_confidence:.2f}, "
+            f"queries: {section.answered_required_count}"
+            f"/{section.required_query_count})"
+        )
+
+        with st.expander(label):
+            if section.is_gap:
+                st.warning("No content extracted for this section.")
+            elif section.has_low_confidence:
+                st.warning(
+                    "One or more queries returned low-confidence "
+                    "results. Manual review recommended."
+                )
+            else:
+                st.info("Section populated with adequate confidence.")
+
+            if section.hits:
+                for hit in section.hits:
+                    conf_str = f"{hit.confidence:.2f}"
+                    preview = hit.extracted_content[:200]
+                    if len(hit.extracted_content) > 200:
+                        preview += "..."
+                    st.markdown(
+                        f"- **{hit.query_id}** "
+                        f"(conf {conf_str}): {preview}"
+                    )
+
+
+def _display_query_results(assembled: AssembledProtocol) -> None:
+    """Render extraction results from query pipeline (PTCV-137).
+
+    Shows quality metrics (via :func:`_display_query_quality`),
+    the assembled Appendix B template markdown preview, and a
+    download button.
+
+    Args:
+        assembled: Completed AssembledProtocol from the query pipeline.
+    """
+    _display_query_quality(assembled)
+
+    st.divider()
+    st.subheader("Assembled Appendix B Template")
+    md = assembled.to_markdown()
+    with st.container(height=500):
+        st.markdown(md)
+
+    st.download_button(
+        label="Download Assembled Template (.md)",
+        data=md,
+        file_name="assembled_appendix_b.md",
+        mime="text/markdown",
+        key="btn_dl_results_assembled",
+    )
 
 
 def _display_verdict(result: dict) -> None:
@@ -1030,7 +1294,20 @@ def main() -> None:
     for _warn in _SECRET_WARNINGS:
         st.warning(_warn)
 
-    # Sidebar: file browser only
+    # Sidebar: mode selector + file browser
+    with st.sidebar:
+        app_mode = st.radio(
+            "Mode",
+            ["Protocol Viewer", "Batch Analysis"],
+            key="app_mode",
+            horizontal=True,
+        )
+
+    if app_mode == "Batch Analysis":
+        from ptcv.ui.pages.analysis_page import render_analysis_page
+        render_analysis_page()
+        return
+
     source, file_path = render_file_browser(_PROTOCOLS_DIR)
 
     if file_path is None:
@@ -1048,7 +1325,7 @@ def main() -> None:
     # Initialise caches
     for ck in (
         "parse_cache", "soa_cache", "sdtm_cache", "fidelity_cache",
-        "query_cache", "benchmark_cache",
+        "query_cache", "benchmark_cache", "classified_cache",
     ):
         if ck not in st.session_state:
             st.session_state[ck] = {}
@@ -1067,199 +1344,310 @@ def main() -> None:
         f"Review ({pending})" if pending > 0 else "Review"
     )
 
-    (
-        tab_process, tab_results, tab_quality, tab_soa,
-        tab_mock, tab_query, tab_benchmark, tab_refinement,
-        tab_review,
-    ) = st.tabs([
-        "Process", "Results", "Quality", "SoA & SDTM",
-        "Mock Data", "Query Pipeline", "Benchmark",
-        "Refinement", review_label,
-    ])
+    _tab_names = _build_tab_names(
+        review_label, include_process=not _PROCESS_TAB_DISABLED,
+    )
+    _tabs = dict(zip(_tab_names, st.tabs(_tab_names)))
+    tab_process = _tabs.get("Process")
+    tab_results = _tabs["Results"]
+    tab_quality = _tabs["Quality"]
+    tab_soa = _tabs["SoA & SDTM"]
+    tab_mock = _tabs["Mock Data"]
+    tab_query = _tabs["Query Pipeline"]
+    tab_benchmark = _tabs["Benchmark"]
+    tab_refinement = _tabs["Refinement"]
+    tab_review = _tabs[review_label]
 
-    # === Process tab ===
-    with tab_process:
-        # Checkpoint resume (PTCV-83)
-        if has_checkpoints(_DATA_ROOT, file_sha):
-            resume_label = get_resume_label(_DATA_ROOT, file_sha)
-            col_r, col_c = st.columns([3, 1])
-            with col_r:
-                if st.button(
-                    resume_label or "Resume pipeline",
-                    key="btn_resume",
-                ):
-                    restored = load_checkpoints(_DATA_ROOT, file_sha)
-                    for ck, data in restored.items():
-                        st.session_state[ck][file_sha] = data
-                    st.toast(
-                        f"Restored {len(restored)} stage(s) "
-                        "from checkpoint",
-                    )
-                    st.rerun()
-            with col_c:
-                if st.button("Start fresh", key="btn_clear_cp"):
-                    clear_checkpoints(_DATA_ROOT, file_sha)
-                    for ck in (
-                        "parse_cache", "soa_cache",
-                        "fidelity_cache", "sdtm_cache",
+    # === Process tab (PTCV-142: deprecated) ===
+    if tab_process is not None:
+        with tab_process:
+            st.warning(
+                "The Process tab extraction is deprecated. "
+                "Use the **Query Pipeline** tab for better "
+                "results with per-section confidence and "
+                "query coverage.",
+            )
+            logger.info("Process tab rendered (deprecated)")
+
+            # Checkpoint resume (PTCV-83)
+            if has_checkpoints(_DATA_ROOT, file_sha):
+                resume_label = get_resume_label(
+                    _DATA_ROOT, file_sha,
+                )
+                col_r, col_c = st.columns([3, 1])
+                with col_r:
+                    if st.button(
+                        resume_label or "Resume pipeline",
+                        key="btn_resume",
                     ):
-                        st.session_state[ck].pop(file_sha, None)
-                    st.toast("Checkpoints cleared")
-                    st.rerun()
-
-        # Settings expander
-        with st.expander("Settings", expanded=False):
-            tier_options = list(_MODEL_TIERS.keys())
-            selected_tier = st.radio(
-                "Retemplating model",
-                tier_options,
-                index=tier_options.index(_DEFAULT_TIER),
-                key="model_tier",
-            )
-            if page_count > 0 and _has_anthropic_key():
-                low, high = estimate_cost(page_count, selected_tier)
-                st.caption(
-                    f"Est. cost ({page_count} pages): "
-                    f"${low:.2f}\u2013${high:.2f}"
-                )
-            elif not _has_anthropic_key():
-                st.caption("No API key — deterministic fallback")
-
-        # Process button
-        if cached:
-            st.success(
-                "Protocol processed. See **Results** tab.",
-            )
-        else:
-            if st.button(
-                "Process Protocol",
-                type="primary",
-                key="btn_process",
-            ):
-                gateway = _get_gateway()
-                tier = st.session_state.get(
-                    "model_tier", _DEFAULT_TIER,
-                )
-                with st.status(
-                    f"Extracting and retemplating "
-                    f"{page_count} pages ({tier})...",
-                    expanded=True,
-                ) as status:
-                    t0 = time.monotonic()
-                    try:
-                        result = _run_parse(
-                            pdf_bytes, file_path.name,
-                            gateway, model_tier=tier,
-                        )
-                        elapsed = time.monotonic() - t0
-                        st.session_state["parse_cache"][
-                            file_sha
-                        ] = result
-                        cached = result
-                        save_checkpoint(
+                        restored = load_checkpoints(
                             _DATA_ROOT, file_sha,
-                            "parse_cache", result,
                         )
-                        status.update(
-                            label=(
-                                "Extraction + Retemplating: "
-                                f"Complete ({elapsed:.1f}s)"
-                            ),
-                            state="complete",
+                        for ck, data in restored.items():
+                            if ck == "query_cache":
+                                qk = (
+                                    f"{file_sha}_checkpoint"
+                                )
+                                st.session_state[ck][qk] = (
+                                    data
+                                )
+                            else:
+                                st.session_state[ck][
+                                    file_sha
+                                ] = data
+                        st.toast(
+                            f"Restored {len(restored)} "
+                            "stage(s) from checkpoint",
                         )
-                    except Exception:
-                        elapsed = time.monotonic() - t0
-                        status.update(
-                            label=(
-                                "Extraction + Retemplating: "
-                                f"Error ({elapsed:.1f}s)"
-                            ),
-                            state="error",
+                        st.rerun()
+                with col_c:
+                    if st.button(
+                        "Start fresh", key="btn_clear_cp",
+                    ):
+                        clear_checkpoints(
+                            _DATA_ROOT, file_sha,
                         )
-                        st.code(
-                            traceback.format_exc(),
-                            language="text",
+                        for ck in (
+                            "parse_cache", "soa_cache",
+                            "fidelity_cache", "sdtm_cache",
+                        ):
+                            st.session_state[ck].pop(
+                                file_sha, None,
+                            )
+                        qcache = st.session_state.get(
+                            "query_cache", {},
                         )
+                        for qk in list(qcache):
+                            if qk.startswith(file_sha):
+                                qcache.pop(qk, None)
+                        st.toast("Checkpoints cleared")
+                        st.rerun()
 
-    # === Results tab ===
+            # Settings expander
+            with st.expander("Settings", expanded=False):
+                tier_options = list(_MODEL_TIERS.keys())
+                selected_tier = st.radio(
+                    "Retemplating model",
+                    tier_options,
+                    index=tier_options.index(
+                        _DEFAULT_TIER,
+                    ),
+                    key="model_tier",
+                )
+                if (
+                    page_count > 0
+                    and _has_anthropic_key()
+                ):
+                    low, high = estimate_cost(
+                        page_count, selected_tier,
+                    )
+                    st.caption(
+                        f"Est. cost ({page_count} "
+                        f"pages): "
+                        f"${low:.2f}\u2013${high:.2f}"
+                    )
+                elif not _has_anthropic_key():
+                    st.caption(
+                        "No API key — deterministic "
+                        "fallback"
+                    )
+
+            # Process button
+            if cached:
+                st.success(
+                    "Protocol processed. "
+                    "See **Results** tab.",
+                )
+            else:
+                if st.button(
+                    "Process Protocol",
+                    type="primary",
+                    key="btn_process",
+                ):
+                    logger.info(
+                        "Process tab: _run_parse() invoked"
+                    )
+                    gateway = _get_gateway()
+                    tier = st.session_state.get(
+                        "model_tier", _DEFAULT_TIER,
+                    )
+                    with st.status(
+                        f"Extracting and retemplating "
+                        f"{page_count} pages "
+                        f"({tier})...",
+                        expanded=True,
+                    ) as status:
+                        t0 = time.monotonic()
+                        try:
+                            result = _run_parse(
+                                pdf_bytes,
+                                file_path.name,
+                                gateway,
+                                model_tier=tier,
+                            )
+                            elapsed = (
+                                time.monotonic() - t0
+                            )
+                            st.session_state[
+                                "parse_cache"
+                            ][file_sha] = result
+                            cached = result
+                            save_checkpoint(
+                                _DATA_ROOT,
+                                file_sha,
+                                "parse_cache",
+                                result,
+                            )
+                            status.update(
+                                label=(
+                                    "Extraction + "
+                                    "Retemplating: "
+                                    "Complete "
+                                    f"({elapsed:.1f}s)"
+                                ),
+                                state="complete",
+                            )
+                        except Exception:
+                            elapsed = (
+                                time.monotonic() - t0
+                            )
+                            status.update(
+                                label=(
+                                    "Extraction + "
+                                    "Retemplating: "
+                                    "Error "
+                                    f"({elapsed:.1f}s)"
+                                ),
+                                state="error",
+                            )
+                            st.code(
+                                traceback.format_exc(),
+                                language="text",
+                            )
+
+    # ------------------------------------------------------------------
+    # Query pipeline assembled protocol — shared by Results, Quality,
+    # & SoA tabs.  Fetched once here (PTCV-138, PTCV-137).
+    # ------------------------------------------------------------------
+    _qp_assembled = get_assembled_protocol(
+        st.session_state, file_sha,
+    )
+    if _qp_assembled is None:
+        _qp_assembled = load_assembled_protocol(
+            _get_gateway(), file_sha,
+        )
+
+    # === Results tab (PTCV-137: prefer query pipeline) ===
     with tab_results:
-        if cached:
+        if _qp_assembled is not None:
+            _display_query_results(_qp_assembled)
+            if cached:
+                st.divider()
+                st.caption(
+                    "Process tab results also available \u2014 "
+                    "expand below to compare."
+                )
+                with st.expander("Process Tab Results"):
+                    _display_verdict(cached)
+                    st.divider()
+                    _render_regeneration(cached)
+        elif cached:
+            st.info(
+                "Run the **Query Pipeline** tab for richer "
+                "extraction results with per-section confidence."
+            )
             _display_verdict(cached)
             st.divider()
             _render_regeneration(cached)
         else:
             st.info(
-                "Go to the **Process** tab and click "
-                "**Process Protocol** to get started."
+                "Run the **Query Pipeline** or **Process** tab "
+                "to generate results."
             )
 
-    # === Quality tab ===
+    # === Quality tab (PTCV-138: query pipeline first) ===
     with tab_quality:
-        if not cached:
+        if not cached and _qp_assembled is None:
             st.info(
-                "Process the protocol first to enable "
-                "quality checks."
+                "Run the **Process** tab or **Query Pipeline** "
+                "first to enable quality checks."
             )
-        elif fidelity_cached:
-            _display_fidelity(fidelity_cached)
         else:
-            if st.button(
-                "Run Fidelity Check",
-                type="primary",
-                key="btn_fidelity",
-            ):
-                gateway = _get_gateway()
-                with st.status(
-                    "Running Fidelity Check...",
-                    expanded=True,
-                ) as status:
-                    t0 = time.monotonic()
-                    st.write(
-                        "Comparing retemplated vs original...",
-                    )
-                    try:
-                        fidelity_result = _run_fidelity_check(
-                            cached, gateway,
-                            enable_llm=_has_anthropic_key(),
-                        )
-                        elapsed = time.monotonic() - t0
-                        st.session_state["fidelity_cache"][
-                            file_sha
-                        ] = fidelity_result
-                        fidelity_cached = fidelity_result
-                        save_checkpoint(
-                            _DATA_ROOT, file_sha,
-                            "fidelity_cache", fidelity_result,
-                        )
-                        status.update(
-                            label=(
-                                "Fidelity Check: "
-                                f"Complete ({elapsed:.1f}s)"
-                            ),
-                            state="complete",
-                        )
-                        st.rerun()
-                    except Exception:
-                        elapsed = time.monotonic() - t0
-                        status.update(
-                            label=(
-                                "Fidelity Check: "
-                                f"Error ({elapsed:.1f}s)"
-                            ),
-                            state="error",
-                        )
-                        st.code(
-                            traceback.format_exc(),
-                            language="text",
-                        )
+            # Query pipeline quality metrics (primary).
+            if _qp_assembled is not None:
+                _display_query_quality(_qp_assembled)
+            else:
+                st.info(
+                    "Run the **Query Pipeline** tab for "
+                    "detailed quality metrics. "
+                    "Fidelity check is available below."
+                )
+
+            # Fidelity check (secondary, requires Process tab).
+            if cached:
+                st.divider()
+                if fidelity_cached:
+                    _display_fidelity(fidelity_cached)
+                else:
+                    if st.button(
+                        "Run Fidelity Check",
+                        type="primary",
+                        key="btn_fidelity",
+                    ):
+                        gateway = _get_gateway()
+                        with st.status(
+                            "Running Fidelity Check...",
+                            expanded=True,
+                        ) as status:
+                            t0 = time.monotonic()
+                            st.write(
+                                "Comparing retemplated vs "
+                                "original...",
+                            )
+                            try:
+                                fidelity_result = (
+                                    _run_fidelity_check(
+                                        cached, gateway,
+                                        enable_llm=(
+                                            _has_anthropic_key()
+                                        ),
+                                    )
+                                )
+                                elapsed = time.monotonic() - t0
+                                st.session_state[
+                                    "fidelity_cache"
+                                ][file_sha] = fidelity_result
+                                fidelity_cached = fidelity_result
+                                save_checkpoint(
+                                    _DATA_ROOT, file_sha,
+                                    "fidelity_cache",
+                                    fidelity_result,
+                                )
+                                status.update(
+                                    label=(
+                                        "Fidelity Check: "
+                                        "Complete "
+                                        f"({elapsed:.1f}s)"
+                                    ),
+                                    state="complete",
+                                )
+                                st.rerun()
+                            except Exception:
+                                elapsed = time.monotonic() - t0
+                                status.update(
+                                    label=(
+                                        "Fidelity Check: "
+                                        "Error "
+                                        f"({elapsed:.1f}s)"
+                                    ),
+                                    state="error",
+                                )
+                                st.code(
+                                    traceback.format_exc(),
+                                    language="text",
+                                )
 
     # === SoA & SDTM tab ===
-    # PTCV-112: SoA tab is accessible when Process tab OR Query
-    # Pipeline has run. Query pipeline results provide assembled
-    # Appendix B sections as input to the SoA parser.
-    _qp_assembled = get_assembled_protocol(
-        st.session_state, file_sha,
-    )
     _soa_available = bool(cached) or _qp_assembled is not None
 
     with tab_soa:
@@ -1388,7 +1776,15 @@ def main() -> None:
                     registry_id=sdtm_cached["registry_id"],
                     format_verdict=sdtm_cached["format_verdict"],
                 )
-            elif soa_cached and cached:
+            elif soa_cached and (cached or _qp_assembled is not None):
+                # Prefer query pipeline when assembled protocol exists
+                _use_assembled = _qp_assembled is not None
+                _source_label = (
+                    "Source: Query Pipeline"
+                    if _use_assembled
+                    else "Source: Process Tab"
+                )
+                st.caption(_source_label)
                 if st.button(
                     "Generate SDTM",
                     type="primary",
@@ -1402,9 +1798,21 @@ def main() -> None:
                         t0 = time.monotonic()
                         st.write("Generating SDTM domains...")
                         try:
-                            sdtm_result = _run_sdtm_generation(
-                                cached, soa_cached, gateway,
-                            )
+                            if _use_assembled:
+                                sdtm_result = _run_sdtm_from_assembled(
+                                    _qp_assembled,
+                                    soa_cached,
+                                    gateway,
+                                    registry_id=(
+                                        cached["registry_id"]
+                                        if cached
+                                        else file_sha[:20]
+                                    ),
+                                )
+                            else:
+                                sdtm_result = _run_sdtm_generation(
+                                    cached, soa_cached, gateway,
+                                )
                             elapsed = time.monotonic() - t0
                             st.session_state["sdtm_cache"][
                                 file_sha
@@ -1435,10 +1843,10 @@ def main() -> None:
                                 traceback.format_exc(),
                                 language="text",
                             )
-            elif soa_cached and not cached:
+            elif soa_cached and not cached and _qp_assembled is None:
                 st.caption(
-                    "SDTM generation requires the Process tab. "
-                    "Run it first, then re-run SoA Extraction."
+                    "SDTM generation requires the Process tab "
+                    "or Query Pipeline. Run one first."
                 )
             else:
                 st.caption(
@@ -1588,37 +1996,60 @@ def main() -> None:
         query_cached = st.session_state["query_cache"].get(file_sha)
         render_refinement_panel(registry_id, query_cached)
 
-    # === Review tab ===
+    # === Review tab (PTCV-139: query pipeline first) ===
     with tab_review:
-        if cached:
+        _review_sections: list | None = None
+
+        # Prefer query pipeline sections when available.
+        if _qp_assembled is not None:
+            _review_sections = assembled_to_sections(
+                _qp_assembled,
+                registry_id=registry_id,
+            )
+
+        # Fall back to Process tab sections.
+        if not _review_sections and cached:
             gateway = _get_gateway()
             section_bytes = gateway.get_artifact(
                 cached["artifact_key"],
             )
-            review_sections = parquet_to_sections(section_bytes)
+            _review_sections = parquet_to_sections(
+                section_bytes,
+            )
+
+        if _review_sections:
+            gateway = _get_gateway()
             protocol_text = ""
-            text_key = cached.get("text_artifact_key")
-            if text_key:
-                text_bytes = gateway.get_artifact(text_key)
-                text_blocks = parquet_to_text_blocks(text_bytes)
-                text_blocks_sorted = sorted(
-                    text_blocks,
-                    key=lambda b: (
-                        b.page_number, b.block_index,
-                    ),
-                )
-                protocol_text = "\n".join(
-                    b.text
-                    for b in text_blocks_sorted
-                    if b.text.strip()
-                )
+            if cached:
+                text_key = cached.get("text_artifact_key")
+                if text_key:
+                    text_bytes = gateway.get_artifact(text_key)
+                    text_blocks = parquet_to_text_blocks(
+                        text_bytes,
+                    )
+                    text_blocks_sorted = sorted(
+                        text_blocks,
+                        key=lambda b: (
+                            b.page_number, b.block_index,
+                        ),
+                    )
+                    protocol_text = "\n".join(
+                        b.text
+                        for b in text_blocks_sorted
+                        if b.text.strip()
+                    )
             render_annotation_review(
-                sections=review_sections,
+                sections=_review_sections,
                 registry_id=registry_id,
                 gateway=gateway,
                 protocol_text=protocol_text,
             )
             st.divider()
+        elif not cached and _qp_assembled is None:
+            st.info(
+                "Run the **Process** tab or **Query Pipeline** "
+                "first to enable review."
+            )
 
         # Review Queue — always filtered to current protocol
         render_review_queue(registry_id=registry_id)

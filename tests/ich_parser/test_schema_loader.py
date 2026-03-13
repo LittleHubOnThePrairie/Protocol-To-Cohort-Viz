@@ -5,10 +5,10 @@ Feature: ICH E6(R3) YAML schema loader
   I want section definitions loaded from a single YAML file
   So that hardcoded dicts are eliminated and sections stay consistent
 
-  Scenario: Schema loads all 14 sections
+  Scenario: Schema loads all 16 sections
     Given the ich_e6r3_schema.yaml file exists
     When load_ich_schema() is called
-    Then the returned IchSchema contains exactly 14 sections B.1-B.14
+    Then the returned IchSchema contains exactly 16 sections B.1-B.16
 
   Scenario: get_section_defs returns description dict
     When get_section_defs() is called
@@ -56,19 +56,19 @@ from ptcv.ich_parser.schema_loader import (
 )
 
 # All expected section codes
-_ALL_CODES = [f"B.{i}" for i in range(1, 15)]
+_ALL_CODES = [f"B.{i}" for i in range(1, 17)]
 
 
 class TestLoadIchSchema:
-    """Scenario: Schema loads all 14 sections."""
+    """Scenario: Schema loads all 16 sections."""
 
     def test_returns_ich_schema(self) -> None:
         schema = load_ich_schema()
         assert isinstance(schema, IchSchema)
 
-    def test_contains_14_sections(self) -> None:
+    def test_contains_16_sections(self) -> None:
         schema = load_ich_schema()
-        assert len(schema.sections) == 14
+        assert len(schema.sections) == 16
 
     def test_all_codes_present(self) -> None:
         schema = load_ich_schema()
@@ -102,7 +102,7 @@ class TestGetSectionDefs:
             assert isinstance(k, str)
             assert isinstance(v, str)
 
-    def test_all_14_codes(self) -> None:
+    def test_all_16_codes(self) -> None:
         defs = get_section_defs()
         assert set(defs.keys()) == set(_ALL_CODES)
 
@@ -113,7 +113,7 @@ class TestGetSectionDefs:
 
     def test_b14_description_content(self) -> None:
         defs = get_section_defs()
-        assert "financ" in defs["B.14"].lower()
+        assert "data handling" in defs["B.14"].lower()
 
 
 class TestGetSectionOrder:
@@ -126,9 +126,9 @@ class TestGetSectionOrder:
             assert isinstance(item, tuple)
             assert len(item) == 2
 
-    def test_14_entries(self) -> None:
+    def test_16_entries(self) -> None:
         order = get_section_order()
-        assert len(order) == 14
+        assert len(order) == 16
 
     def test_sorted_by_render_order(self) -> None:
         order = get_section_order()
@@ -138,7 +138,7 @@ class TestGetSectionOrder:
     def test_first_and_last(self) -> None:
         order = get_section_order()
         assert order[0] == ("B.1", "General Information")
-        assert order[-1] == ("B.14", "Financing, Insurance, and Publication Policy")
+        assert order[-1] == ("B.16", "Publication Policy")
 
 
 class TestGetClassifierSections:
@@ -148,7 +148,7 @@ class TestGetClassifierSections:
         sections = get_classifier_sections()
         assert isinstance(sections, dict)
 
-    def test_all_14_codes(self) -> None:
+    def test_all_16_codes(self) -> None:
         sections = get_classifier_sections()
         assert set(sections.keys()) == set(_ALL_CODES)
 
@@ -200,7 +200,7 @@ class TestCaching:
         custom = load_ich_schema(path=schema_path)
         default = load_ich_schema()
         # Custom load returns correct data but is a separate object
-        assert len(custom.sections) == 14
+        assert len(custom.sections) == 16
         assert isinstance(default, IchSchema)
 
 
@@ -216,10 +216,10 @@ class TestStagePromptConfig:
         schema = load_ich_schema()
         assert len(schema.stage_prompts) >= 4
 
-    def test_retemplater_has_all_14(self) -> None:
+    def test_retemplater_has_all_16(self) -> None:
         schema = load_ich_schema()
         cfg = schema.stage_prompts["retemplater"]
-        assert len(cfg.sections) == 14
+        assert len(cfg.sections) == 16
 
     def test_coverage_reviewer_sections(self) -> None:
         schema = load_ich_schema()
@@ -253,13 +253,13 @@ class TestRetemplaterStagePrompt:
         prompt = get_stage_prompt("retemplater")
         assert prompt.startswith("  B.1:")
 
-    def test_full_format_ends_with_b14(self) -> None:
-        """Natural sort: B.14 comes last (PTCV-97)."""
+    def test_full_format_ends_with_b16(self) -> None:
+        """Natural sort: B.16 comes last (PTCV-97, PTCV-135)."""
         prompt = get_stage_prompt("retemplater")
         lines = prompt.strip().split("\n")
-        assert lines[-1].strip().startswith("B.14:")
+        assert lines[-1].strip().startswith("B.16:")
 
-    def test_full_format_contains_all_14(self) -> None:
+    def test_full_format_contains_all_16(self) -> None:
         prompt = get_stage_prompt("retemplater")
         for code in _ALL_CODES:
             assert f"  {code}:" in prompt
@@ -311,7 +311,7 @@ class TestStageFiltering:
         prompt = get_stage_prompt("coverage_reviewer")
         assert "B.1" not in prompt
         assert "B.2" not in prompt
-        for i in range(6, 15):
+        for i in range(6, 17):
             assert f"B.{i}" not in prompt
 
     def test_annotation_service_3_sections(self) -> None:
@@ -492,3 +492,100 @@ class TestConfigurationBlock:
         assert "priority_sections" in cfg
         assert "soa_detection" in cfg
         assert "coverage" in cfg
+
+
+# ===================================================================
+# PTCV-154: Schema consistency tests
+# ===================================================================
+
+
+class TestSchemaConsistency:
+    """Verify query schema and classifier schema use the same section codes.
+
+    PTCV-154: Section numbering mismatch between schemas caused B.15
+    queries (financing) to route to B.15 classifier section (formerly
+    Supplements and Amendments), producing 50% malformed extractions.
+    """
+
+    def test_query_schema_sections_exist_in_classifier(self) -> None:
+        """Every query schema_section must exist in classifier schema."""
+        from ptcv.ich_parser.query_schema import load_query_schema
+
+        schema = load_ich_schema()
+        queries = load_query_schema()
+        classifier_codes = set(schema.sections.keys())
+
+        for q in queries:
+            assert q.schema_section in classifier_codes, (
+                f"Query {q.query_id} references schema_section "
+                f"'{q.schema_section}' which does not exist in "
+                f"classifier schema (has: {sorted(classifier_codes)})"
+            )
+
+    def test_query_parent_sections_exist_in_classifier(self) -> None:
+        """Every query parent_section must exist in classifier schema."""
+        from ptcv.ich_parser.query_schema import load_query_schema
+
+        schema = load_ich_schema()
+        queries = load_query_schema()
+        classifier_codes = set(schema.sections.keys())
+
+        parent_sections = {q.parent_section for q in queries}
+        for ps in parent_sections:
+            assert ps in classifier_codes, (
+                f"Query parent_section '{ps}' does not exist in "
+                f"classifier schema"
+            )
+
+    def test_assembler_names_match_classifier(self) -> None:
+        """APPENDIX_B_SECTION_NAMES codes must match classifier schema."""
+        from ptcv.ich_parser.template_assembler import (
+            APPENDIX_B_SECTION_NAMES,
+        )
+
+        schema = load_ich_schema()
+        assert set(APPENDIX_B_SECTION_NAMES.keys()) == set(
+            schema.sections.keys()
+        ), "template_assembler section codes diverged from schema"
+
+    def test_synonym_boost_targets_exist_in_classifier(self) -> None:
+        """Every _SYNONYM_BOOSTS target code must exist in classifier."""
+        from ptcv.ich_parser.section_matcher import _SYNONYM_BOOSTS
+
+        schema = load_ich_schema()
+        classifier_codes = set(schema.sections.keys())
+
+        for synonym, code in _SYNONYM_BOOSTS.items():
+            assert code in classifier_codes, (
+                f"Synonym boost '{synonym}' → '{code}' targets a "
+                f"section code not in classifier schema"
+            )
+
+    def test_b15_is_financing(self) -> None:
+        """B.15 must be Financing and Insurance (PTCV-154 regression)."""
+        schema = load_ich_schema()
+        assert schema.sections["B.15"].name == "Financing and Insurance"
+
+    def test_b16_is_publication(self) -> None:
+        """B.16 must be Publication Policy (PTCV-154 regression)."""
+        schema = load_ich_schema()
+        assert schema.sections["B.16"].name == "Publication Policy"
+
+    def test_b12_is_quality_control(self) -> None:
+        """B.12 must be Quality Control (PTCV-154 split from B.11)."""
+        schema = load_ich_schema()
+        assert schema.sections["B.12"].name == (
+            "Quality Control and Quality Assurance"
+        )
+
+    def test_b13_is_ethics(self) -> None:
+        """B.13 must be Ethics (PTCV-154 renumbered from B.12)."""
+        schema = load_ich_schema()
+        assert schema.sections["B.13"].name == "Ethics"
+
+    def test_b14_is_data_handling(self) -> None:
+        """B.14 must be Data Handling (PTCV-154 renumbered from B.13)."""
+        schema = load_ich_schema()
+        assert schema.sections["B.14"].name == (
+            "Data Handling and Record Keeping"
+        )

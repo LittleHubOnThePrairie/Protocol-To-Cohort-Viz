@@ -82,8 +82,26 @@ _NONVISIT_RE = re.compile(
     r"|\b(?:investigator.?s?\s+brochure)\b"
     r"|\b(?:clinical\s+study\s+report)\b"
 )
+# Parenthetical unit suffixes to strip from visit names (PTCV-180).
+# Matches trailing "(cGy)", "(mg/kg)", "(mL)", etc.
+_UNIT_SUFFIX_RE = re.compile(
+    r"\s*\([^)]*"
+    r"(?:cGy|mGy|Gy|mg|mL|\u03bcg|mcg|\xb5g|IU|mmol|\xb5mol|ng|kg)"
+    r"[^)]*\)\s*$",
+    re.IGNORECASE,
+)
+
 # Visit names longer than this are almost certainly boilerplate
 _MAX_VISIT_NAME_LEN = 60
+
+
+def _canonicalize_visit_name(header: str) -> str:
+    """Strip parenthetical unit suffixes from visit names (PTCV-180).
+
+    Converts "Day 2 (cGy)" to "Day 2", "Week 4 (mg/kg)" to "Week 4".
+    Non-unit parentheticals like "(Day -30 to -1)" are preserved.
+    """
+    return _UNIT_SUFFIX_RE.sub("", header).strip()
 
 
 def _is_boilerplate_header(header: str) -> bool:
@@ -151,6 +169,11 @@ _ACTIVITY_KEYWORDS: list[tuple[str, str]] = [
     ("urinalysis", "Lab"),
     ("pk", "Pharmacokinetics"),
     ("pharmacokinetic", "Pharmacokinetics"),
+    ("electronic diary", "Other"),
+    ("e-diary", "Other"),
+    ("ediary", "Other"),
+    ("patient diary", "Other"),
+    ("diary", "Other"),
     ("biopsy", "Procedure"),
     ("imaging", "Imaging"),
     ("mri", "Imaging"),
@@ -217,6 +240,8 @@ class UsdmMapper:
 
         # Track activities across tables to avoid duplicates
         activity_name_to_id: dict[str, str] = {}
+        # Track timepoints by canonical name for cross-table dedup (PTCV-180)
+        visit_name_to_tp_id: dict[str, str] = {}
 
         for table in tables:
             tps, acts, insts, syns = self._map_table(
@@ -228,7 +253,24 @@ class UsdmMapper:
                 timestamp,
                 activity_name_to_id,
             )
-            all_timepoints.extend(tps)
+
+            # Deduplicate timepoints across tables (PTCV-180).
+            # When a visit_name already exists, remap instances to the
+            # existing timepoint_id instead of creating a duplicate.
+            for tp in tps:
+                existing_id = visit_name_to_tp_id.get(tp.visit_name)
+                if existing_id is not None:
+                    old_id = tp.timepoint_id
+                    for inst in insts:
+                        if inst.timepoint_id == old_id:
+                            inst.timepoint_id = existing_id
+                    logger.debug(
+                        "Dedup timepoint %r: reused %s", tp.visit_name, existing_id,
+                    )
+                else:
+                    visit_name_to_tp_id[tp.visit_name] = tp.timepoint_id
+                    all_timepoints.append(tp)
+
             all_activities.extend(acts)
             all_instances.extend(insts)
             all_synonyms.extend(syns)
@@ -308,7 +350,7 @@ class UsdmMapper:
                 registry_id=registry_id,
                 timepoint_id=tp_id,
                 epoch_id="",  # filled after epoch build
-                visit_name=header.strip() or resolved.visit_type,
+                visit_name=_canonicalize_visit_name(header) or resolved.visit_type,
                 visit_type=resolved.visit_type,
                 day_offset=resolved.day_offset,
                 window_early=resolved.window_early,

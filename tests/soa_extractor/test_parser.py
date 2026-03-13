@@ -99,6 +99,117 @@ class TestMarkdownTableParsing:
         assert table.section_code == "B.4"
 
 
+class TestPTCV128RejectionGuards:
+    """Regression tests for PTCV-128: prose text misclassified as SoA."""
+
+    MMRM_TEXT = (
+        "VISIT SCHEDULE\n\n"
+        "The visit schedule is described in section 8.2.\n\n"
+        "1. MMRM will be used for the analysis for the change of UACR\n"
+        "2. Descriptive statistics will be provided for the change of UACR\n"
+        "3. The primary endpoint is the change from baseline\n"
+        "4. Safety will be assessed at each study visit\n"
+        "5. Adverse events will be monitored throughout the trial\n"
+    )
+
+    def test_aligned_parser_rejects_prose_with_soa_keyword(self, parser):
+        """Prose containing 'visit schedule' should not become a table."""
+        section = make_section(self.MMRM_TEXT, code="B.8")
+        table = parser.parse([section])
+        assert table is None
+
+    def test_pipe_table_rejects_no_markers(self, parser):
+        """Pipe table with no X/✓ markers should be rejected."""
+        text = """\
+| Category | Description | Notes |
+|----------|-------------|-------|
+| Stat     | MMRM model  | primary |
+| Stat     | Descriptive | secondary |
+"""
+        section = make_section(text, code="B.10")
+        table = parser.parse([section])
+        assert table is None
+
+    def test_aligned_parser_accepts_valid_visit_headers(self, parser):
+        """Headers matching visit patterns (Day1, Week2) should parse."""
+        # SoA keyword on a short line so it doesn't become the header
+        text = (
+            "Visit schedule\n"
+            "Activity Day1 Week2 Week4\n"
+            "ECG X X X\n"
+            "Labs X X X\n"
+        )
+        section = make_section(text, code="B.8")
+        table = parser.parse([section])
+        assert table is not None
+        assert "Day1" in table.visit_headers or "Week2" in table.visit_headers
+
+    def test_aligned_parser_rejects_english_word_headers(self, parser):
+        """Common English words as headers must be rejected."""
+        text = (
+            "Assessment schedule for the trial.\n\n"
+            "Analysis will be performed using MMRM\n"
+            "Statistics will be provided for endpoints\n"
+            "Results will be summarised in tables\n"
+        )
+        section = make_section(text, code="B.8")
+        table = parser.parse([section])
+        assert table is None
+
+
+class TestAlignedTableHeaderValidation:
+    """PTCV-151: Stricter header validation for aligned-table parser."""
+
+    def test_rejects_single_visit_header(self, parser):
+        """Text with only 1 visit-like token in headers → None."""
+        text = (
+            "Schedule of activities for this study.\n\n"
+            "Assessment Screening B double-blind, placebo\n"
+            "ECG X X X\n"
+            "Labs X X X\n"
+        )
+        section = make_section(text, code="B.4")
+        table = parser.parse([section])
+        assert table is None
+
+    def test_requires_minimum_three_visit_columns(self, parser):
+        """Fewer than 3 visit columns → None (even if all are visit-like)."""
+        text = (
+            "Visit schedule\n\n"
+            "Assessment Screening Baseline\n"
+            "ECG X X\n"
+            "Labs X X\n"
+        )
+        section = make_section(text, code="B.4")
+        table = parser.parse([section])
+        assert table is None
+
+    def test_accepts_three_valid_visit_headers(self, parser):
+        """Three visit-like headers should be accepted."""
+        text = (
+            "Visit schedule\n\n"
+            "Assessment Screening Baseline Week4\n"
+            "ECG X X X\n"
+            "Labs X X X\n"
+        )
+        section = make_section(text, code="B.4")
+        table = parser.parse([section])
+        assert table is not None
+        assert len(table.visit_headers) == 3
+
+    def test_rejects_mostly_prose_headers(self, parser):
+        """Headers that are mostly non-visit words → None."""
+        text = (
+            "Study procedures summary\n\n"
+            "Method Statistical Primary Secondary Screening Endpoint\n"
+            "Analysis X X X X X\n"
+            "Review X X X X X\n"
+        )
+        section = make_section(text, code="B.8")
+        table = parser.parse([section])
+        assert table is None
+
+
 class TestSampleSoaFromConftest:
     def test_full_sample_parses(self, parser, sample_ich_sections):
         table = parser.parse(sample_ich_sections)

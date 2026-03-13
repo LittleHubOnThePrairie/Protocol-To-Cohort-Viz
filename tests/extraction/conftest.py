@@ -9,12 +9,44 @@ from __future__ import annotations
 import io
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
 # Ensure src/ is on the path for non-installed package
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
+
+# ---------------------------------------------------------------------------
+# Stub fitz (PyMuPDF) and pymupdf4llm for environments where they
+# are not installed.  This prevents the toc_extractor → fitz import
+# chain failure that blocks any import touching ich_parser.__init__.
+# The stub must include a functional `open` method because
+# pdf_extractor._normalize_page_rotation calls fitz.open() after
+# a try/except ImportError guard (not AttributeError).
+# ---------------------------------------------------------------------------
+if "fitz" not in sys.modules:
+    _fitz = types.ModuleType("fitz")
+
+    class _StubFitzDoc:
+        """Minimal fitz.Document stand-in (zero pages)."""
+
+        def __init__(self, **kw: object) -> None:
+            pass
+
+        def __len__(self) -> int:
+            return 0
+
+        def close(self) -> None:
+            pass
+
+    _fitz.open = lambda **kw: _StubFitzDoc(**kw)  # type: ignore[attr-defined]
+    sys.modules["fitz"] = _fitz
+
+if "pymupdf4llm" not in sys.modules:
+    _pymupdf = types.ModuleType("pymupdf4llm")
+    _pymupdf.to_markdown = lambda doc, **kw: []  # type: ignore[attr-defined]
+    sys.modules["pymupdf4llm"] = _pymupdf
 
 
 # ---------------------------------------------------------------------------

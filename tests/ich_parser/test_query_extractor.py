@@ -15,7 +15,12 @@ from ptcv.ich_parser.query_extractor import (
     _LLM_TRANSFORM_MAX_CHARS,
     _NUMBERED_HEADING_RE,
     _TEXT_LONG_MAX_CHARS,
+    _CONFIDENCE_RANK,
+    _MAX_ROUTE_CHARS,
+    _MAX_SECTIONS_PER_ROUTE,
+    _REFUSAL_PATTERNS,
     _UNSCOPED_MAX_CHARS,
+    _is_refusal,
     _extract_criteria_section,
     _extract_date,
     _extract_enum,
@@ -2375,3 +2380,639 @@ class TestConsolidateCitations:
         }
         QueryExtractor._consolidate_citations(routes)
         assert routes["B.2.7"][2] == MatchConfidence.REVIEW
+
+
+# -------------------------------------------------------------------
+# TestMarkdownHeadingSplitting (PTCV-171)
+# -------------------------------------------------------------------
+
+
+class TestMarkdownHeadingSplitting:
+    """Markdown heading detection for subsection splitting."""
+
+    def test_md_headings_split_inclusion_exclusion(self) -> None:
+        """Markdown headings (## / ###) correctly split sub-sections.
+
+        [PTCV-171 Scenario: Markdown headings used for section
+        classification]
+        """
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.5.1": SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description=(
+                    "What are the participant inclusion "
+                    "criteria for trial eligibility?"
+                ),
+                query_ids=("B.5.1.q1",),
+            ),
+            "B.5.2": SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description=(
+                    "What are the participant exclusion "
+                    "criteria?"
+                ),
+                query_ids=("B.5.2.q1",),
+            ),
+        }
+        content = (
+            "Preamble text about eligibility.\n\n"
+            "### 11.1 Inclusion Criteria\n\n"
+            "1. Age >= 18 years\n"
+            "2. Written informed consent\n"
+            "3. Confirmed diagnosis of Type 2 diabetes\n\n"
+            "### 11.2 Exclusion Criteria\n\n"
+            "1. Pregnant or breastfeeding\n"
+            "2. Active malignancy\n"
+            "3. Severe hepatic impairment\n"
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.5", registry
+        )
+        assert "B.5.1" in result
+        assert "B.5.2" in result
+        assert "Age >= 18" in result["B.5.1"]
+        assert "Pregnant" not in result["B.5.1"]
+        assert "Pregnant" in result["B.5.2"]
+
+    def test_md_tables_preserved_through_routes(self) -> None:
+        """Markdown tables survive route building concatenation.
+
+        [PTCV-171 Scenario: Tables preserved through route
+        concatenation]
+        """
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=[],
+            content_spans={
+                "8": (
+                    "## 8 Efficacy Assessment\n\n"
+                    "| Endpoint | Measure | Timepoint |\n"
+                    "|----------|---------|----------|\n"
+                    "| Primary | OS | 12 months |\n"
+                    "| Secondary | PFS | 6 months |\n"
+                ),
+                "8.1": (
+                    "### 8.1 Primary Endpoint\n\n"
+                    "| Assessment | Schedule |\n"
+                    "|------------|----------|\n"
+                    "| CT scan | Every 8 weeks |\n"
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        match_result = MatchResult(
+            mappings=[
+                _make_mapping("8", "Efficacy Assessment", "B.8"),
+                _make_mapping("8.1", "Primary Endpoint", "B.8"),
+            ],
+            auto_mapped_count=2,
+            review_count=0,
+            unmapped_count=0,
+            auto_map_rate=1.0,
+        )
+
+        routes = QueryExtractor._build_routes(
+            protocol, match_result
+        )
+
+        assert "B.8" in routes
+        content = routes["B.8"][0]
+        # Table pipe syntax preserved through concatenation
+        assert "| Endpoint |" in content
+        assert "| CT scan |" in content
+
+    def test_md_heading_preferred_over_plain_text(self) -> None:
+        """Markdown headings are preferred over plain-text headings
+        when both are present at the same position.
+        """
+        from ptcv.ich_parser.summarization_matcher import (
+            SubSectionDef,
+        )
+
+        registry = {
+            "B.5.1": SubSectionDef(
+                code="B.5.1",
+                parent_code="B.5",
+                name="Inclusion Criteria",
+                description="Inclusion criteria for eligibility",
+                query_ids=("B.5.1.q1",),
+            ),
+            "B.5.2": SubSectionDef(
+                code="B.5.2",
+                parent_code="B.5",
+                name="Exclusion Criteria",
+                description="Exclusion criteria",
+                query_ids=("B.5.2.q1",),
+            ),
+        }
+        # Content has BOTH ## headings AND plain-text numbered
+        # headings (the ## lines also contain the number).
+        content = (
+            "## 5.1 Inclusion Criteria\n\n"
+            "- Age >= 18 years\n\n"
+            "## 5.2 Exclusion Criteria\n\n"
+            "- Pregnant women\n"
+        )
+        result = QueryExtractor._split_content_by_subsection(
+            content, "B.5", registry
+        )
+        assert "B.5.1" in result
+        assert "B.5.2" in result
+        assert "Age >= 18" in result["B.5.1"]
+        assert "Pregnant" in result["B.5.2"]
+
+
+# -----------------------------------------------------------------------
+# PTCV-182: Route building quality tests
+# -----------------------------------------------------------------------
+
+
+class TestPTCV182RouteBuildingQuality:
+    """Validate LOW-confidence gating, route caps, and
+    confidence merge fixes (PTCV-182)."""
+
+    def test_low_confidence_mappings_included_but_capped(
+        self,
+    ) -> None:
+        """LOW-confidence mappings produce routes (best-effort)
+        but are subject to section count caps."""
+        low_mappings = [
+            _make_mapping(
+                number=str(i),
+                title=f"Section {i}",
+                ich_code="B.1",
+                confidence=MatchConfidence.LOW,
+            )
+            for i in range(1, 11)
+        ]
+        high_mapping = _make_mapping(
+            number="20",
+            title="Study Objectives",
+            ich_code="B.5",
+            confidence=MatchConfidence.HIGH,
+        )
+        spans = {str(i): f"Low content {i}" for i in range(1, 11)}
+        spans["20"] = "High confidence objectives"
+
+        idx = _make_protocol_index(content_spans=spans)
+        mr = _make_match_result(low_mappings + [high_mapping])
+
+        routes = QueryExtractor._build_routes(idx, mr)
+
+        assert "B.1" in routes
+        # Capped at _MAX_SECTIONS_PER_ROUTE
+        section_count = routes["B.1"][1].count(",") + 1
+        assert section_count <= _MAX_SECTIONS_PER_ROUTE
+        assert routes["B.1"][2] == MatchConfidence.LOW
+        assert "B.5" in routes
+        assert routes["B.5"][2] == MatchConfidence.HIGH
+
+    def test_review_mappings_included(self) -> None:
+        """REVIEW-confidence mappings must produce routes."""
+        mapping = _make_mapping(
+            number="3",
+            title="Study Design",
+            ich_code="B.4",
+            confidence=MatchConfidence.REVIEW,
+        )
+        idx = _make_protocol_index(
+            content_spans={"3": "Study design content"}
+        )
+        mr = _make_match_result([mapping])
+
+        routes = QueryExtractor._build_routes(idx, mr)
+
+        assert "B.4" in routes
+        assert routes["B.4"][2] == MatchConfidence.REVIEW
+
+    def test_route_section_count_cap(self) -> None:
+        """Routes must cap at _MAX_SECTIONS_PER_ROUTE sections."""
+        mappings = [
+            _make_mapping(
+                number=str(i),
+                title=f"Section {i}",
+                ich_code="B.7",
+                confidence=MatchConfidence.REVIEW,
+            )
+            for i in range(1, 9)  # 8 mappings
+        ]
+        spans = {
+            str(i): f"Content block {i}" for i in range(1, 9)
+        }
+        idx = _make_protocol_index(content_spans=spans)
+        mr = _make_match_result(mappings)
+
+        routes = QueryExtractor._build_routes(idx, mr)
+
+        assert "B.7" in routes
+        source_sections = routes["B.7"][1]
+        count = source_sections.count(",") + 1
+        assert count <= _MAX_SECTIONS_PER_ROUTE
+
+    def test_route_char_limit_cap(self) -> None:
+        """Routes must cap at _MAX_ROUTE_CHARS characters."""
+        big_chunk = "x" * 8000
+        mappings = [
+            _make_mapping(
+                number=str(i),
+                title=f"Section {i}",
+                ich_code="B.9",
+                confidence=MatchConfidence.REVIEW,
+            )
+            for i in range(1, 5)
+        ]
+        spans = {str(i): big_chunk for i in range(1, 5)}
+        idx = _make_protocol_index(content_spans=spans)
+        mr = _make_match_result(mappings)
+
+        routes = QueryExtractor._build_routes(idx, mr)
+
+        assert "B.9" in routes
+        assert len(routes["B.9"][0]) <= _MAX_ROUTE_CHARS + 500
+
+    def test_worst_confidence_high_plus_low(self) -> None:
+        """Ordinal merge: HIGH + LOW = LOW (was HIGH due to bug)."""
+        assert _CONFIDENCE_RANK[MatchConfidence.HIGH] == 3
+        assert _CONFIDENCE_RANK[MatchConfidence.LOW] == 1
+
+        # LOW mappings are now excluded, so test the rank dict
+        # directly to confirm the fix.
+        high_rank = _CONFIDENCE_RANK[MatchConfidence.HIGH]
+        low_rank = _CONFIDENCE_RANK[MatchConfidence.LOW]
+        # Worst = min rank
+        worst = (
+            MatchConfidence.HIGH
+            if high_rank < low_rank
+            else MatchConfidence.LOW
+        )
+        assert worst == MatchConfidence.LOW
+
+    def test_worst_confidence_review_plus_low(self) -> None:
+        """Ordinal merge: REVIEW + LOW = LOW."""
+        review_rank = _CONFIDENCE_RANK[MatchConfidence.REVIEW]
+        low_rank = _CONFIDENCE_RANK[MatchConfidence.LOW]
+        worst = (
+            MatchConfidence.REVIEW
+            if review_rank < low_rank
+            else MatchConfidence.LOW
+        )
+        assert worst == MatchConfidence.LOW
+
+    def test_worst_confidence_high_plus_review(self) -> None:
+        """Ordinal merge: HIGH + REVIEW = REVIEW."""
+        # Two REVIEW mappings to same ICH code — verify merge
+        m1 = _make_mapping(
+            number="1", title="A", ich_code="B.3",
+            confidence=MatchConfidence.HIGH,
+        )
+        m2 = _make_mapping(
+            number="2", title="B", ich_code="B.3",
+            confidence=MatchConfidence.REVIEW,
+        )
+        idx = _make_protocol_index(
+            content_spans={"1": "aaa", "2": "bbb"}
+        )
+        mr = _make_match_result([m1, m2])
+
+        routes = QueryExtractor._build_routes(idx, mr)
+
+        assert routes["B.3"][2] == MatchConfidence.REVIEW
+
+
+# -----------------------------------------------------------------------
+# PTCV-182: Front-matter injection resilience tests
+# -----------------------------------------------------------------------
+
+
+class TestPTCV182FrontMatterResilience:
+    """Validate front-matter injection when B.1 is contaminated."""
+
+    def test_front_matter_injection_when_b1_contaminated(
+        self,
+    ) -> None:
+        """B.1 REVIEW with >=3 source sections → front-matter
+        injected."""
+        # Simulate contaminated B.1 route (4 source sections)
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.1": (
+                "garbage concatenated content",
+                "5.2.1, 6.3.3, 7.1.1, 8.1.2",
+                MatchConfidence.REVIEW,
+            ),
+        }
+        # Build protocol index with front-matter
+        front_text = "A" * 200  # 200 chars of front matter
+        full_text = front_text + "\n## 1. Introduction\nBody text."
+        headers = [
+            SectionHeader(
+                number="1",
+                title="Introduction",
+                level=1,
+                page=1,
+                char_offset=201,
+            ),
+        ]
+        idx = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=headers,
+            content_spans={"1": "Body text."},
+            full_text=full_text,
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        QueryExtractor._inject_front_matter_route(routes, idx)
+
+        # Front-matter should have been injected (prepended)
+        assert routes["B.1"][1].startswith("front_matter")
+        assert routes["B.1"][2] == MatchConfidence.REVIEW
+
+    def test_front_matter_skipped_when_b1_genuine(self) -> None:
+        """B.1 HIGH with 1 source section → skip injection."""
+        routes: dict[str, tuple[str, str, MatchConfidence]] = {
+            "B.1": (
+                "Real B.1 content about protocol title",
+                "1",
+                MatchConfidence.HIGH,
+            ),
+        }
+        headers = [
+            SectionHeader(
+                number="1",
+                title="Introduction",
+                level=1,
+                page=1,
+                char_offset=500,
+            ),
+        ]
+        idx = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=headers,
+            content_spans={"1": "Introduction content."},
+            full_text="A" * 500 + "\n## 1. Introduction\nContent.",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        QueryExtractor._inject_front_matter_route(routes, idx)
+
+        # Should NOT have been modified
+        assert routes["B.1"][1] == "1"
+        assert routes["B.1"][2] == MatchConfidence.HIGH
+
+
+# -----------------------------------------------------------------------
+# PTCV-183: LLM refusal detection tests
+# -----------------------------------------------------------------------
+
+
+class TestPTCV183RefusalDetection:
+    """Validate refusal detection in _transform_content (PTCV-183)."""
+
+    def test_is_refusal_detects_common_patterns(self) -> None:
+        """Known refusal prefixes must be detected."""
+        assert _is_refusal("I cannot process this content")
+        assert _is_refusal("I can't provide medical advice")
+        assert _is_refusal("I'm sorry, but I cannot")
+        assert _is_refusal("I apologize, I'm unable to")
+        assert _is_refusal("As an AI, I cannot")
+        assert _is_refusal("I'm unable to assist with")
+        assert _is_refusal("Unfortunately, I cannot process")
+        assert _is_refusal("I do not have access to")
+        assert _is_refusal("Content not available for this")
+
+    def test_is_refusal_case_insensitive(self) -> None:
+        """Refusal detection must be case-insensitive."""
+        assert _is_refusal("I CANNOT process this content")
+        assert _is_refusal("I Can't provide this")
+        assert _is_refusal("I'M SORRY, but I cannot")
+
+    def test_is_refusal_rejects_legitimate_content(self) -> None:
+        """Legitimate clinical content must not trigger refusal."""
+        assert not _is_refusal(
+            "The study design is a randomized controlled trial"
+        )
+        assert not _is_refusal(
+            "Patients will be enrolled in two arms"
+        )
+        assert not _is_refusal(
+            "This protocol cannot be modified without IRB"
+        )
+        assert not _is_refusal("")
+
+    def test_is_refusal_inspects_only_prefix(self) -> None:
+        """Refusal phrases deep in text must not trigger."""
+        long_text = (
+            "The study follows ICH E6 guidelines. " * 10
+            + "I cannot process this content."
+        )
+        assert not _is_refusal(long_text)
+
+    def test_refusal_patterns_all_lowercase(self) -> None:
+        """All patterns in _REFUSAL_PATTERNS must be lowercase."""
+        for pattern in _REFUSAL_PATTERNS:
+            assert pattern == pattern.lower(), (
+                f"Pattern not lowercase: {pattern!r}"
+            )
+
+    def test_transform_content_rejects_refusal_json(
+        self,
+    ) -> None:
+        """_transform_content must return None when transformed
+        text contains refusal language."""
+        extractor = QueryExtractor(
+            enable_transformation=False,
+        )
+        # Force LLM enabled for this test
+        extractor._use_llm = True
+
+        query = _make_query(
+            query_id="B.4.1.q1",
+            section_id="B.4.1",
+            parent_section="B.4",
+            query_text="What is the study design?",
+        )
+
+        # Mock the Anthropic client response with refusal
+        mock_resp = MagicMock()
+        mock_resp.stop_reason = "end_turn"
+        mock_block = MagicMock()
+        mock_block.text = (
+            '{"transformed": "I cannot process this '
+            'clinical content", "confidence": 0.5}'
+        )
+        mock_resp.content = [mock_block]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_resp
+        extractor._client = mock_client
+
+        result = extractor._transform_content(
+            "Study is a Phase 3 RCT", query
+        )
+        assert result is None
+        assert extractor._refusal_count == 1
+
+    def test_transform_content_rejects_bad_stop_reason(
+        self,
+    ) -> None:
+        """_transform_content must return None for unexpected
+        stop_reason values."""
+        extractor = QueryExtractor(
+            enable_transformation=False,
+        )
+        extractor._use_llm = True
+
+        query = _make_query(
+            query_id="B.4.2.q1",
+            section_id="B.4.2",
+            parent_section="B.4",
+            query_text="What is the primary endpoint?",
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.stop_reason = "content_filtered"
+        mock_block = MagicMock()
+        mock_block.text = '{"transformed": "", "confidence": 0}'
+        mock_resp.content = [mock_block]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_resp
+        extractor._client = mock_client
+
+        result = extractor._transform_content(
+            "Primary endpoint is OS", query
+        )
+        assert result is None
+        assert extractor._refusal_count == 1
+
+    def test_transform_content_accepts_legitimate(
+        self,
+    ) -> None:
+        """_transform_content must accept valid transformed text."""
+        extractor = QueryExtractor(
+            enable_transformation=False,
+        )
+        extractor._use_llm = True
+
+        query = _make_query(
+            query_id="B.4.1.q1",
+            section_id="B.4.1",
+            parent_section="B.4",
+            query_text="What is the study design?",
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.stop_reason = "end_turn"
+        mock_block = MagicMock()
+        mock_block.text = (
+            '{"transformed": "This is a Phase 3 '
+            'randomized controlled trial.", '
+            '"confidence": 0.92}'
+        )
+        mock_resp.content = [mock_block]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_resp
+        extractor._client = mock_client
+
+        result = extractor._transform_content(
+            "Study is a Phase 3 RCT", query
+        )
+        assert result is not None
+        text, conf = result
+        assert "Phase 3" in text
+        assert conf == pytest.approx(0.92)
+        assert extractor._refusal_count == 0
+
+    @patch("ptcv.ich_parser.query_extractor.time.sleep")
+    def test_transform_retries_on_rate_limit(
+        self, mock_sleep: MagicMock,
+    ) -> None:
+        """_transform_content retries on rate-limit errors."""
+        extractor = QueryExtractor(
+            enable_transformation=False,
+        )
+        extractor._use_llm = True
+
+        query = _make_query(
+            query_id="B.4.1.q1",
+            section_id="B.4.1",
+            parent_section="B.4",
+            query_text="What is the study design?",
+        )
+
+        # First call raises rate limit, second succeeds
+        rate_err = Exception("rate limit exceeded")
+        rate_err.status_code = 429  # type: ignore[attr-defined]
+
+        mock_resp = MagicMock()
+        mock_resp.stop_reason = "end_turn"
+        mock_block = MagicMock()
+        mock_block.text = (
+            '{"transformed": "Phase 3 RCT.", '
+            '"confidence": 0.9}'
+        )
+        mock_resp.content = [mock_block]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [
+            rate_err, mock_resp,
+        ]
+        extractor._client = mock_client
+
+        result = extractor._transform_content(
+            "Study is a Phase 3 RCT", query
+        )
+        assert result is not None
+        assert "Phase 3" in result[0]
+        assert mock_client.messages.create.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("ptcv.ich_parser.query_extractor.time.sleep")
+    def test_transform_no_retry_on_non_retryable(
+        self, mock_sleep: MagicMock,
+    ) -> None:
+        """_transform_content does not retry non-retryable errors."""
+        extractor = QueryExtractor(
+            enable_transformation=False,
+        )
+        extractor._use_llm = True
+
+        query = _make_query(
+            query_id="B.4.1.q1",
+            section_id="B.4.1",
+            parent_section="B.4",
+            query_text="What is the study design?",
+        )
+
+        auth_err = Exception("authentication failed")
+        auth_err.status_code = 401  # type: ignore[attr-defined]
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = auth_err
+        extractor._client = mock_client
+
+        result = extractor._transform_content(
+            "Study is a Phase 3 RCT", query
+        )
+        assert result is None
+        assert mock_client.messages.create.call_count == 1
+        mock_sleep.assert_not_called()

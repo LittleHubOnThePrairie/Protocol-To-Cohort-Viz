@@ -23,7 +23,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-import pdfplumber
+import fitz
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +476,67 @@ def _strip_page_headers_footers(
     return cleaned
 
 
+def _strip_patterns_from_text(
+    text: str,
+    patterns: set[str],
+) -> str:
+    """Remove lines matching header/footer patterns (PTCV-189).
+
+    Unlike :func:`_strip_page_headers_footers` which operates on
+    per-page text with positional constraints (top-N / bottom-N),
+    this function strips matching lines *anywhere* in a continuous
+    text.  Used to clean pymupdf4llm markdown which has already
+    been flattened into a single string.
+
+    Matching uses substring containment rather than exact equality
+    because pymupdf4llm may wrap lines differently from the plain
+    text extractor (e.g. concatenating header fragments that were
+    separate lines in ``page.get_text()``).
+
+    Only patterns longer than 10 characters are used for substring
+    matching to avoid false positives on short normalised forms.
+
+    Args:
+        text: Full document text (markdown or plain).
+        patterns: Normalised line patterns from
+            :func:`_detect_repeating_lines`.
+
+    Returns:
+        Cleaned text with matching lines removed.
+    """
+    if not patterns:
+        return text
+
+    # Use longer patterns for substring matching to avoid
+    # false positives (e.g. "C CI" is too short).
+    long_pats = {p for p in patterns if len(p) > 10}
+    short_pats = {p for p in patterns if len(p) <= 10}
+
+    lines = text.split("\n")
+    kept: list[str] = []
+    stripped = 0
+    for line in lines:
+        norm = _DIGIT_NORM_RE.sub("#", line.strip())
+        # Exact match (handles short patterns safely)
+        if norm in patterns:
+            stripped += 1
+            continue
+        # Substring containment for long patterns
+        if long_pats and any(p in norm for p in long_pats):
+            stripped += 1
+            continue
+        kept.append(line)
+
+    if stripped > 0:
+        logger.info(
+            "PTCV-189: Stripped %d header/footer lines from "
+            "pymupdf4llm markdown",
+            stripped,
+        )
+
+    return "\n".join(kept)
+
+
 def _parse_toc_page(text: str) -> list[TOCEntry]:
     """Parse TOC entries from a single page of text."""
     entries: list[TOCEntry] = []
@@ -777,13 +838,15 @@ def extract_protocol_index(
     page_texts: list[tuple[int, str]] = []
     toc_page_nums: list[int] = []
     toc_entries: list[TOCEntry] = []
+    _pymupdf4llm_text: Optional[str] = None
 
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        page_count = len(pdf.pages)
+    doc = fitz.open(str(pdf_path))
+    try:
+        page_count = len(doc)
 
-        for i, page in enumerate(pdf.pages):
+        for i in range(page_count):
             page_num = i + 1  # 1-based
-            text = page.extract_text() or ""
+            text = doc[i].get_text() or ""
             page_texts.append((page_num, text))
 
             # Detect TOC pages (only in first ~15 pages)
@@ -796,7 +859,9 @@ def extract_protocol_index(
         # Also check pages adjacent to TOC pages (multi-page TOC)
         if toc_page_nums:
             last_toc = max(toc_page_nums)
-            for check_page in range(last_toc + 1, min(last_toc + 4, page_count + 1)):
+            for check_page in range(
+                last_toc + 1, min(last_toc + 4, page_count + 1)
+            ):
                 idx = check_page - 1
                 text = page_texts[idx][1]
                 toc_count = _count_toc_lines(text)
@@ -805,6 +870,26 @@ def extract_protocol_index(
                     toc_entries.extend(_parse_toc_page(text))
                 else:
                     break  # Stop if no more TOC lines
+
+        # PTCV-170: Get pymupdf4llm structured markdown while doc is open
+        try:
+            import pymupdf4llm
+
+            from ptcv.extraction.markdown_normalizer import (
+                normalize_markdown,
+            )
+
+            md_raw = pymupdf4llm.to_markdown(doc)
+            normalized = normalize_markdown(md_raw, extract_toc=False)
+            _pymupdf4llm_text = normalized.text
+        except Exception as exc:
+            logger.warning(
+                "pymupdf4llm markdown extraction failed: %s "
+                "— using plain text for full_text",
+                exc,
+            )
+    finally:
+        doc.close()
 
     toc_found = len(toc_page_nums) > 0
 
@@ -817,6 +902,9 @@ def extract_protocol_index(
     # PTCV-127: Strip repeating page headers/footers before assembly.
     # This removes sponsor headers, confidentiality notices, copyright
     # lines, and document reference footers that repeat across pages.
+    # PTCV-189: Detect patterns first so we can reuse them for
+    # pymupdf4llm text (which bypasses per-page stripping).
+    _hdr_pats, _ftr_pats = _detect_repeating_lines(page_texts)
     page_texts = _strip_page_headers_footers(page_texts)
 
     # Build full text and page offset map (PTCV-109)
@@ -877,11 +965,35 @@ def extract_protocol_index(
         toc_found,
     )
 
-    # PTCV-129: Clean full_text of TOC residue so the query extractor's
-    # full-text fallback path doesn't pick up TOC entries.  This runs
-    # AFTER header detection and content span resolution (which rely
-    # on unmodified char offsets) so it's safe to mutate.
-    full_text = strip_toc_lines(full_text)
+    # PTCV-170: If pymupdf4llm markdown is available, use it as full_text
+    # for richer downstream consumption (tables, headings, structure).
+    # Re-resolve char_offsets and content_spans against the markdown.
+    if _pymupdf4llm_text is not None:
+        # PTCV-189: Strip detected header/footer patterns from the
+        # pymupdf4llm text.  The per-page stripping at line 845
+        # only cleaned page_texts; the pymupdf4llm markdown is a
+        # separate extraction that still contains them.
+        full_text = _strip_patterns_from_text(
+            _pymupdf4llm_text, _hdr_pats | _ftr_pats,
+        )
+        # Re-resolve header char_offsets against the markdown text
+        for header in headers:
+            search_pat = (
+                re.escape(header.number) + r"\.?\s+"
+                + re.escape(header.title[:40])
+            )
+            offset_match = re.search(search_pat, full_text)
+            header.char_offset = (
+                offset_match.start() if offset_match else -1
+            )
+        # Re-build content_spans from the markdown full_text
+        content_spans = _resolve_content_spans(headers, full_text)
+    else:
+        # PTCV-129: Clean plain-text full_text of TOC residue so the
+        # query extractor's full-text fallback doesn't pick up TOC
+        # entries.  Only needed when using plain text (pymupdf4llm
+        # normalizer already strips TOC dot-leaders).
+        full_text = strip_toc_lines(full_text)
 
     return ProtocolIndex(
         source_path=str(pdf_path),

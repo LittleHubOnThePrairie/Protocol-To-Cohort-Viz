@@ -8,6 +8,17 @@ A synonym boost table provides additive score increases for
 well-known protocol header synonyms (e.g. "Inclusion Criteria"
 → B.5), improving precision without brittle hard-coded overrides.
 
+PTCV-171: Markdown heading hierarchy from pymupdf4llm output is used
+as a strong classification signal.  When content spans contain
+``## Title`` headings, these are weighted higher than body text for
+keyword scoring, improving confidence and reducing B.1 noise.
+
+PTCV-160: When PTCV-171's heading matching produces ambiguous REVIEW-tier
+results (top-2 candidates within a small score delta), TOC entry ordering
+is used as a tiebreaker.  The candidate whose ICH section code fits the
+sequential order of neighboring headers is boosted.  Protocols without
+a TOC are handled gracefully (no-op).
+
 .. note::
 
    Cohere embedding support was removed in PTCV-102.  The keyword
@@ -199,6 +210,29 @@ _SYNONYM_BOOSTS: dict[str, str] = {
 }
 
 # -----------------------------------------------------------------------
+# Markdown heading detection (PTCV-171)
+# -----------------------------------------------------------------------
+# Detects ATX headings produced by pymupdf4llm + PTCV-176 normalizer.
+# Heading text is a stronger classification signal than body text because
+# headings are unambiguous structural markers in the document.
+
+_MD_HEADING_RE = re.compile(
+    r"^(#{1,6})\s+(.+)$", re.MULTILINE,
+)
+
+# Additive score boost per heading level when heading text matches
+# ICH section synonyms.  Level 1-2 headings (## / ###) are major
+# section titles; deeper levels are sub-sections with weaker signal.
+_HEADING_LEVEL_BOOST: dict[int, float] = {
+    1: 0.12,
+    2: 0.10,
+    3: 0.07,
+    4: 0.05,
+    5: 0.03,
+    6: 0.02,
+}
+
+# -----------------------------------------------------------------------
 # B.1 exclusion terms (PTCV-155, Tier 2)
 # -----------------------------------------------------------------------
 # Headers containing these terms should never fall through to B.1.
@@ -374,6 +408,18 @@ _SHORT_KW_THRESHOLD = 5
 # -----------------------------------------------------------------------
 _CONTENT_HINT_LEN = 200  # chars from content_spans to append
 
+# -----------------------------------------------------------------------
+# TOC order disambiguation (PTCV-160)
+# -----------------------------------------------------------------------
+# When the top-2 boosted scores for a header are within this delta,
+# the header is considered "ambiguous" and TOC ordering can act as a
+# tiebreaker.
+_TOC_AMBIGUITY_DELTA = 0.10
+
+# Additive boost applied to the candidate whose ICH section fits the
+# sequential TOC ordering relative to its neighbors.
+_TOC_ORDER_BOOST = 0.06
+
 
 # -----------------------------------------------------------------------
 # SectionMatcher
@@ -469,11 +515,9 @@ class SectionMatcher:
         )
         method = "keyword_fallback"
 
-        # Apply synonym boosts and classify
-        mappings: list[SectionMapping] = []
-        auto_count = 0
-        review_count = 0
-        unmapped_count = 0
+        # --- Pass 1: compute boosted scores for all headers ----------
+        all_raw: list[list[float]] = []
+        all_boosted: list[list[float]] = []
 
         for idx, (number, title) in enumerate(headers):
             raw_scores = scores[idx]
@@ -483,11 +527,35 @@ class SectionMatcher:
             if _is_garbage_header(title):
                 raw_scores = [0.0] * len(raw_scores)
 
-            boosted = self._apply_synonym_boost(
-                title, raw_scores
+            # PTCV-171: Boost scores from markdown headings in
+            # content_spans before applying synonym boost.
+            content = protocol_index.content_spans.get(
+                number, ""
             )
+            heading_scores = self._apply_heading_boost(
+                content, raw_scores
+            )
+            boosted = self._apply_synonym_boost(
+                title, heading_scores
+            )
+            all_raw.append(raw_scores)
+            all_boosted.append(boosted)
+
+        # PTCV-160: Apply TOC order hints for ambiguous REVIEW cases
+        all_boosted = self._apply_toc_order_hints(
+            headers, all_boosted, protocol_index
+        )
+
+        # --- Pass 2: classify with potentially adjusted scores --------
+        mappings: list[SectionMapping] = []
+        auto_count = 0
+        review_count = 0
+        unmapped_count = 0
+
+        for idx, (number, title) in enumerate(headers):
             mapping = self._classify_header(
-                number, title, raw_scores, boosted, method
+                number, title, all_raw[idx],
+                all_boosted[idx], method,
             )
             mappings.append(mapping)
 
@@ -611,6 +679,59 @@ class SectionMatcher:
         )
 
     # ------------------------------------------------------------------
+    # Markdown heading boost (PTCV-171)
+    # ------------------------------------------------------------------
+
+    def _apply_heading_boost(
+        self,
+        content: str,
+        raw_scores: list[float],
+    ) -> list[float]:
+        """Boost scores from markdown headings in content (PTCV-171).
+
+        Markdown headings (``## Title``) are unambiguous structural
+        signals from pymupdf4llm output.  When heading text matches
+        ICH section synonyms, the corresponding section gets a
+        confidence boost proportional to heading level.
+
+        Args:
+            content: Section content text (may contain Markdown).
+            raw_scores: Per-ICH-section keyword scores.
+
+        Returns:
+            Boosted score list (new list; input not mutated).
+        """
+        headings = _MD_HEADING_RE.findall(content[:3000])
+        if not headings:
+            return raw_scores
+
+        boosted = list(raw_scores)
+
+        for hashes, heading_text in headings:
+            level = len(hashes)
+            boost_value = _HEADING_LEVEL_BOOST.get(level, 0.02)
+            heading_lower = heading_text.strip().lower()
+            # Strip section numbers from heading text so
+            # "## 5.1 Inclusion Criteria" becomes "inclusion criteria"
+            heading_lower = re.sub(
+                r"^\d+(?:\.\d+)*\.?\s+", "", heading_lower
+            )
+            # Also strip bold markers from un-normalized headings
+            heading_lower = heading_lower.replace("**", "")
+
+            for synonym, ich_code in _SYNONYM_BOOSTS.items():
+                if (
+                    synonym in heading_lower
+                    and ich_code in self._ref_codes
+                ):
+                    idx = self._ref_codes.index(ich_code)
+                    boosted[idx] = min(
+                        1.0, boosted[idx] + boost_value
+                    )
+
+        return boosted
+
+    # ------------------------------------------------------------------
     # Synonym boost
     # ------------------------------------------------------------------
 
@@ -641,6 +762,129 @@ class SectionMatcher:
                     break
 
         return boosted
+
+    # ------------------------------------------------------------------
+    # TOC order disambiguation (PTCV-160)
+    # ------------------------------------------------------------------
+
+    def _apply_toc_order_hints(
+        self,
+        headers: list[tuple[str, str]],
+        all_boosted: list[list[float]],
+        protocol_index: ProtocolIndex,
+    ) -> list[list[float]]:
+        """Boost correctly-ordered sections for ambiguous headers.
+
+        When PTCV-171's heading classification produces close REVIEW-tier
+        scores (top-2 within ``_TOC_AMBIGUITY_DELTA``), the TOC entry
+        ordering disambiguates by checking which candidate fits the
+        sequential ICH section order relative to neighboring headers.
+
+        Args:
+            headers: ``(number, title)`` pairs for all protocol headers.
+            all_boosted: Per-header boosted score lists from pass 1.
+            protocol_index: Source protocol index (checked for TOC).
+
+        Returns:
+            Possibly-adjusted boosted score lists (new outer list;
+            inner lists copied only when modified).
+        """
+        if (
+            not protocol_index.toc_found
+            or not protocol_index.toc_entries
+        ):
+            return all_boosted
+
+        code_order: dict[str, int] = {
+            code: i for i, code in enumerate(self._ref_codes)
+        }
+        n_codes = len(self._ref_codes)
+        result = list(all_boosted)  # shallow copy; inner lists shared
+
+        def _top_order(boosted: list[float]) -> int:
+            """Return ICH ordinal of the top-scoring section."""
+            best_idx = max(range(n_codes), key=lambda j: boosted[j])
+            return code_order.get(
+                self._ref_codes[best_idx], -1
+            )
+
+        hints_applied = 0
+        total_ambiguous = 0
+
+        for i, boosted in enumerate(result):
+            ranked = sorted(
+                range(n_codes),
+                key=lambda j: boosted[j],
+                reverse=True,
+            )
+            top_score = boosted[ranked[0]]
+
+            # Only REVIEW tier is eligible for disambiguation
+            if (
+                top_score >= self._auto_threshold
+                or top_score < self._review_threshold
+            ):
+                continue
+            if len(ranked) < 2:
+                continue
+
+            second_score = boosted[ranked[1]]
+            if top_score - second_score > _TOC_AMBIGUITY_DELTA:
+                continue  # Clear winner — no hint needed
+
+            total_ambiguous += 1
+
+            # Resolve neighbor ICH ordinals
+            prev_ord = _top_order(result[i - 1]) if i > 0 else -1
+            next_ord = (
+                _top_order(result[i + 1])
+                if i < len(result) - 1
+                else -1
+            )
+            if prev_ord < 0 and next_ord < 0:
+                continue
+
+            cand1_ord = code_order.get(
+                self._ref_codes[ranked[0]], -1
+            )
+            cand2_ord = code_order.get(
+                self._ref_codes[ranked[1]], -1
+            )
+
+            def _fits(section_ord: int) -> bool:
+                if prev_ord >= 0 and next_ord >= 0:
+                    return prev_ord < section_ord < next_ord
+                if prev_ord >= 0:
+                    return section_ord > prev_ord
+                return section_ord < next_ord
+
+            c1_fits = _fits(cand1_ord)
+            c2_fits = _fits(cand2_ord)
+
+            if c2_fits and not c1_fits:
+                # TOC ordering favours the second candidate — boost it
+                adjusted = list(boosted)
+                adjusted[ranked[1]] = min(
+                    1.0, adjusted[ranked[1]] + _TOC_ORDER_BOOST
+                )
+                result[i] = adjusted
+                hints_applied += 1
+                logger.debug(
+                    "TOC order hint: '%s' boosted %s over %s",
+                    headers[i][1],
+                    self._ref_codes[ranked[1]],
+                    self._ref_codes[ranked[0]],
+                )
+
+        if total_ambiguous > 0:
+            logger.info(
+                "TOC order disambiguation: %d/%d ambiguous "
+                "headers resolved",
+                hints_applied,
+                total_ambiguous,
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Classification

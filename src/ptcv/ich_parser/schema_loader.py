@@ -272,6 +272,32 @@ def get_review_threshold(section_code: str | None = None) -> float:
     return float(cfg.get("review_threshold_default", 0.70))
 
 
+def get_cascade_threshold(section_code: str | None = None) -> float:
+    """Return the cascade routing confidence threshold (PTCV-161).
+
+    Sections with local classifier confidence at or above this value
+    are accepted without Sonnet routing.  Falls back to
+    ``review_threshold_default`` when ``cascade_threshold_default``
+    is not configured.
+
+    Args:
+        section_code: Optional per-section override lookup.
+
+    Returns:
+        Confidence threshold (0.0–1.0).
+    """
+    cfg = load_ich_schema().configuration
+    if section_code:
+        overrides = cfg.get("section_thresholds", {})
+        if section_code in overrides:
+            return float(overrides[section_code])
+    default = cfg.get(
+        "cascade_threshold_default",
+        cfg.get("review_threshold_default", 0.70),
+    )
+    return float(default)
+
+
 def get_priority_sections() -> frozenset[str]:
     """Return the set of priority ICH sections.
 

@@ -10,6 +10,16 @@ import pytest
 # Ensure src/ is on the path for non-installed package
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
+# Mock fitz (PyMuPDF) if not installed — prevents ImportError when
+# ich_parser.__init__ imports toc_extractor which requires fitz.
+if "fitz" not in sys.modules:
+    try:
+        import fitz  # noqa: F401
+    except ImportError:
+        from unittest.mock import MagicMock
+
+        sys.modules["fitz"] = MagicMock()
+
 
 # A realistic protocol excerpt covering several ICH sections.
 # Each section must be >=500 chars to survive block merging (PTCV-48).

@@ -184,9 +184,9 @@ def get_queries_by_schema_section(
 ) -> list[AppendixBQuery]:
     """Return queries whose ``schema_section`` matches *schema_code*.
 
-    This maps to the existing ``ich_e6r3_schema.yaml`` section codes
-    (B.1 through B.14), which is useful when bridging the query schema
-    to the existing classifier pipeline.
+    This maps to the ``ich_e6r3_schema.yaml`` section codes
+    (B.1 through B.16), which is useful when bridging the query schema
+    to the classifier pipeline.
 
     Args:
         schema_code: Schema section code (e.g. ``"B.14"``).

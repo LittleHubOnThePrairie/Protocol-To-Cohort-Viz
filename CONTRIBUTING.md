@@ -102,6 +102,86 @@ https://littlehubonprairie.atlassian.net/wiki/spaces/PTCV/pages/31031298
 
 ---
 
+## Development Environment Setup
+
+PTCV requires its own virtual environment, separate from LittleHub. Python 3.13 is
+required for CUDA-enabled PyTorch wheels (Python 3.14 has no CUDA torch support).
+
+### Prerequisites
+
+- **Python 3.13** (Microsoft Store or python.org)
+- **NVIDIA GPU driver** ≥ 566.03 (for CUDA 12.4 torch)
+- **Git** for version control
+
+### Create and Activate Venv
+
+```powershell
+# Windows (PowerShell)
+cd C:\Dev\PTCV
+python3.13 -m venv .venv
+.venv\Scripts\activate
+```
+
+```bash
+# Linux / macOS
+cd ~/Dev/PTCV
+python3.13 -m venv .venv
+source .venv/bin/activate
+```
+
+### Install Dependencies
+
+```bash
+# Core runtime dependencies
+pip install -r requirements.txt
+
+# Development and testing tools (includes runtime deps)
+pip install -r requirements-dev.txt
+
+# ML/NeoBERT training (optional — only needed for PTCV-164 workflows)
+# Install CUDA-enabled torch first, then the rest:
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install -r requirements-ml.txt
+
+# spaCy language model
+python -m spacy download en_core_web_sm
+```
+
+### Verify Installation
+
+```bash
+# Check CUDA torch
+python -c "import torch; print(torch.cuda.is_available())"  # Should print True
+
+# Check PyMuPDF (fitz)
+python -c "import fitz; print(fitz.__version__)"
+
+# Run tests
+pytest tests/ich_parser/ -v
+```
+
+### Load Secrets
+
+```powershell
+# Windows
+. .\load-secrets.ps1
+```
+
+```bash
+# Linux / macOS
+source ./load-secrets.sh
+```
+
+### Requirements Files
+
+| File | Purpose | When to Install |
+|------|---------|----------------|
+| `requirements.txt` | Runtime dependencies (PDF, storage, NLP, UI) | Always |
+| `requirements-dev.txt` | Testing + linting (pytest, mypy, ruff) | Development |
+| `requirements-ml.txt` | ML training (torch, transformers, xformers) | NeoBERT workflows |
+
+---
+
 ## Contribution Workflow
 
 ### Step 1: Understand Before You Build

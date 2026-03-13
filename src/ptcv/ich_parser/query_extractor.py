@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Sequence
 
@@ -259,6 +260,14 @@ _NUMBERED_HEADING_RE = re.compile(
     re.MULTILINE,
 )
 
+# PTCV-171: Markdown heading pattern for subsection splitting.
+# Matches "## 5.1 Inclusion Criteria", "### 5.2.1 Exclusion", etc.
+# Captures heading level (hash count) and section number + title.
+_MD_SECTION_HEADING_RE = re.compile(
+    r"^#{1,6}\s+(\d+(?:\.\d+)*\.?)\s+([^\n]{3,})$",
+    re.MULTILINE,
+)
+
 
 def _match_heading_to_subsection(
     heading_title: str,
@@ -333,6 +342,56 @@ _MIN_PARAGRAPH_LEN = 40
 # fails.  Content is pre-filtered via _select_relevant_paragraphs to
 # keep only the most query-relevant chunks.
 _UNSCOPED_MAX_CHARS = 10000
+
+# PTCV-182: Route concatenation caps to prevent pathological merges.
+_MAX_SECTIONS_PER_ROUTE = 5
+_MAX_ROUTE_CHARS = 20000
+
+# PTCV-182: Ordinal ranking for MatchConfidence (higher = better).
+_CONFIDENCE_RANK: dict[MatchConfidence, int] = {
+    MatchConfidence.HIGH: 3,
+    MatchConfidence.REVIEW: 2,
+    MatchConfidence.LOW: 1,
+}
+
+# PTCV-183: Refusal detection patterns for LLM transform.
+# Lowercased prefixes/phrases that indicate a model refusal
+# rather than genuine transformed content.
+_REFUSAL_PATTERNS: tuple[str, ...] = (
+    "i cannot",
+    "i can't",
+    "i'm unable",
+    "i am unable",
+    "i apologize",
+    "i'm sorry",
+    "i am sorry",
+    "i'm not able",
+    "i am not able",
+    "as an ai",
+    "as a language model",
+    "i don't have access",
+    "i do not have access",
+    "unfortunately, i cannot",
+    "unfortunately, i can't",
+    "i cannot provide",
+    "i can't provide",
+    "i cannot process",
+    "i can't process",
+    "content not available",
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """Return *True* if *text* looks like an LLM refusal.
+
+    Checks whether the text begins with or contains common
+    refusal phrases.  Only the first 200 characters are
+    inspected to avoid false positives on long legitimate
+    content that coincidentally mentions these phrases.
+    """
+    prefix = text[:200].lower().strip()
+    return any(prefix.startswith(p) for p in _REFUSAL_PATTERNS)
+
 
 _STOP_WORDS = frozenset({
     "the", "and", "for", "are", "what", "that", "this",
@@ -849,10 +908,14 @@ class QueryExtractor:
         anthropic_api_key: str | None = None,
     ) -> None:
         self._threshold = confidence_threshold
+        # PTCV-188: Primary model with graceful degradation.
         self._llm_model = "claude-sonnet-4-6"
+        self._fallback_model = "claude-sonnet-4-20250514"
         self._client: Any = None
         self._use_llm = False
         self._transform_calls = 0
+        self._refusal_count = 0
+        self._fallback_count = 0
         self._transform_lock = threading.Lock()
 
         if enable_transformation:
@@ -891,6 +954,18 @@ class QueryExtractor:
     # LLM transformation (PTCV-98)
     # ------------------------------------------------------------------
 
+    # PTCV-186: System prompt for transform calls — establishes
+    # document-analysis context to reduce refusal risk on clinical
+    # content (defense-in-depth alongside the model pin).
+    _TRANSFORM_SYSTEM = (
+        "You are a regulatory document reformatting tool. You "
+        "reorganize text from publicly available clinical trial "
+        "protocol documents (sourced from ClinicalTrials.gov) into "
+        "ICH E6(R3) Appendix B structure. This is a read-only "
+        "document restructuring task — no medical advice is "
+        "generated."
+    )
+
     _TRANSFORM_PROMPT = (
         "You are an ICH E6(R3) regulatory writing specialist.\n\n"
         "TASK: Transform the source content below to directly "
@@ -916,6 +991,83 @@ class QueryExtractor:
         "material answers the query (0.0 = not at all, "
         "1.0 = perfectly)."
     )
+
+    def _retry_with_fallback(
+        self,
+        prompt: str,
+        query_id: str,
+        refusal_reason: str,
+    ) -> tuple[str, float] | None:
+        """Retry a refused LLM call with the fallback model.
+
+        Returns:
+            ``(transformed_text, confidence)`` on success, *None* if
+            the fallback also refuses or fails.
+        """
+        logger.info(
+            "PTCV-188: Retrying %s with fallback model %s "
+            "(reason=%s)",
+            query_id,
+            self._fallback_model,
+            refusal_reason,
+        )
+        try:
+            resp = self._client.messages.create(
+                model=self._fallback_model,
+                max_tokens=2048,
+                system=self._TRANSFORM_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            stop = getattr(resp, "stop_reason", None)
+            if isinstance(stop, str) and stop in (
+                "content_filtered",
+                "refusal",
+            ):
+                logger.warning(
+                    "PTCV-188: Fallback model also refused "
+                    "for %s (stop_reason=%s)",
+                    query_id,
+                    stop,
+                )
+                return None
+
+            first_block = resp.content[0]
+            if not hasattr(first_block, "text"):
+                return None
+            raw = first_block.text.strip()
+
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                cleaned = re.sub(
+                    r"```(?:json)?", "", raw
+                ).strip()
+                try:
+                    parsed = json.loads(cleaned)
+                except json.JSONDecodeError:
+                    return None
+
+            transformed = parsed.get("transformed", "")
+            llm_conf = float(parsed.get("confidence", 0.0))
+            if not transformed or _is_refusal(transformed):
+                return None
+
+            with self._transform_lock:
+                self._fallback_count += 1
+                self._transform_calls += 1
+            logger.info(
+                "PTCV-188: Fallback succeeded for %s",
+                query_id,
+            )
+            return transformed, min(1.0, max(0.0, llm_conf))
+
+        except Exception:
+            logger.warning(
+                "PTCV-188: Fallback model failed for %s",
+                query_id,
+                exc_info=True,
+            )
+            return None
 
     def _transform_content(
         self,
@@ -943,55 +1095,153 @@ class QueryExtractor:
             query_text=query.query_text,
             source=source_for_llm,
         )
-        try:
-            resp = self._client.messages.create(
-                model=self._llm_model,
-                max_tokens=2048,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
-            )
-            with self._transform_lock:
-                self._transform_calls += 1
+        # PTCV-183: Retry with exponential backoff for
+        # transient errors (rate limits, timeouts).
+        max_retries = 3
+        last_exc: Exception | None = None
 
-            first_block = resp.content[0]
-            if not hasattr(first_block, "text"):
-                return None
-            raw = first_block.text.strip()
-
-            # Parse JSON — strip markdown fences if present
+        for attempt in range(max_retries):
             try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                cleaned = re.sub(
-                    r"```(?:json)?", "", raw
-                ).strip()
-                try:
-                    parsed = json.loads(cleaned)
-                except json.JSONDecodeError:
+                resp = self._client.messages.create(
+                    model=self._llm_model,
+                    max_tokens=2048,
+                    system=self._TRANSFORM_SYSTEM,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                )
+                with self._transform_lock:
+                    self._transform_calls += 1
+
+                # PTCV-183: Check stop_reason for content
+                # filtering.
+                stop = getattr(resp, "stop_reason", None)
+                if isinstance(stop, str) and stop in (
+                    "content_filtered",
+                    "refusal",
+                ):
+                    # PTCV-188: Retry with fallback model
+                    # before giving up.
+                    fallback = self._retry_with_fallback(
+                        prompt, query.query_id, stop,
+                    )
+                    if fallback is not None:
+                        return fallback
+                    with self._transform_lock:
+                        self._refusal_count += 1
                     logger.warning(
-                        "LLM transform: failed to parse "
-                        "JSON for %s",
+                        "PTCV-183: LLM stop_reason=%s "
+                        "for %s — fallback also failed",
+                        stop,
                         query.query_id,
                     )
                     return None
 
-            transformed = parsed.get("transformed", "")
-            llm_conf = float(
-                parsed.get("confidence", 0.0)
-            )
-            if not transformed:
-                return None
-            return transformed, min(1.0, max(0.0, llm_conf))
+                first_block = resp.content[0]
+                if not hasattr(first_block, "text"):
+                    return None
+                raw = first_block.text.strip()
 
-        except Exception:
-            logger.warning(
-                "LLM transform failed for %s — "
-                "falling back to verbatim",
-                query.query_id,
-                exc_info=True,
-            )
-            return None
+                # Parse JSON — strip markdown fences if
+                # present.
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    cleaned = re.sub(
+                        r"```(?:json)?", "", raw
+                    ).strip()
+                    try:
+                        parsed = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "LLM transform: failed to parse "
+                            "JSON for %s (attempt %d/%d)",
+                            query.query_id,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)
+                            continue
+                        return None
+
+                transformed = parsed.get("transformed", "")
+                llm_conf = float(
+                    parsed.get("confidence", 0.0)
+                )
+                if not transformed:
+                    return None
+
+                # PTCV-183: Detect refusal language in the
+                # transformed text before accepting it.
+                if _is_refusal(transformed):
+                    # PTCV-188: Retry with fallback model.
+                    fallback = self._retry_with_fallback(
+                        prompt, query.query_id, "text_refusal",
+                    )
+                    if fallback is not None:
+                        return fallback
+                    with self._transform_lock:
+                        self._refusal_count += 1
+                    logger.warning(
+                        "PTCV-183: LLM refusal in text "
+                        "for %s — fallback also failed: "
+                        "%.100s",
+                        query.query_id,
+                        transformed,
+                    )
+                    return None
+
+                return transformed, min(
+                    1.0, max(0.0, llm_conf)
+                )
+
+            except Exception as exc:
+                last_exc = exc
+                # Retry on rate-limit (429) or server errors
+                # (5xx); bail on other errors.
+                retryable = False
+                status = getattr(exc, "status_code", None)
+                if status is not None:
+                    retryable = status in (429, 500, 502, 529)
+                elif "rate" in str(exc).lower():
+                    retryable = True
+                elif "timeout" in str(exc).lower():
+                    retryable = True
+                elif "overloaded" in str(exc).lower():
+                    retryable = True
+
+                if retryable and attempt < max_retries - 1:
+                    delay = (2 ** attempt) + 0.5
+                    logger.info(
+                        "LLM transform: retrying %s "
+                        "(attempt %d/%d, delay=%.1fs): %s",
+                        query.query_id,
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                        exc,
+                    )
+                    time.sleep(delay)
+                    continue
+
+                logger.warning(
+                    "LLM transform failed for %s after "
+                    "%d attempt(s) — falling back to "
+                    "verbatim: %s",
+                    query.query_id,
+                    attempt + 1,
+                    exc,
+                )
+                return None
+
+        # Should not reach here, but safety net.
+        logger.warning(
+            "LLM transform exhausted retries for %s: %s",
+            query.query_id,
+            last_exc,
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -1160,11 +1410,31 @@ class QueryExtractor:
         # PTCV-144: Try heading-based splitting first.
         # Numbered headings like "11.1 Inclusion Criteria" are
         # far more reliable than keyword scoring.
+        # PTCV-171: Also detect markdown headings (## 5.1 Title)
+        # which are even more reliable structural signals.
         headings = list(
             _NUMBERED_HEADING_RE.finditer(parent_content)
         )
+        # PTCV-171: Markdown headings from pymupdf4llm output
+        md_headings = list(
+            _MD_SECTION_HEADING_RE.finditer(parent_content)
+        )
+        # Merge both heading sources, deduplicating by position
+        seen_positions: set[int] = set()
         heading_assignments: list[tuple[int, str]] = []
+        for m in md_headings:
+            title = m.group(2).strip()
+            matched_code = _match_heading_to_subsection(
+                title, sub_defs
+            )
+            if matched_code:
+                heading_assignments.append(
+                    (m.start(), matched_code)
+                )
+                seen_positions.add(m.start())
         for m in headings:
+            if m.start() in seen_positions:
+                continue
             title = m.group(2).strip()
             matched_code = _match_heading_to_subsection(
                 title, sub_defs
@@ -1291,10 +1561,22 @@ class QueryExtractor:
                 continue
 
             if ich_code in routes:
-                # Concatenate with section marker
                 existing_content, existing_src, existing_conf = (
                     routes[ich_code]
                 )
+
+                # PTCV-182: Cap route concatenation to prevent
+                # pathological merges (defense in depth).
+                section_count = existing_src.count(",") + 1
+                if section_count >= _MAX_SECTIONS_PER_ROUTE:
+                    continue
+                if (
+                    len(existing_content) + len(content)
+                    > _MAX_ROUTE_CHARS
+                ):
+                    continue
+
+                # Concatenate with section marker
                 combined_content = (
                     f"{existing_content}\n\n"
                     f"--- [{mapping.protocol_section_number}] "
@@ -1305,10 +1587,14 @@ class QueryExtractor:
                     f"{existing_src}, "
                     f"{mapping.protocol_section_number}"
                 )
-                # Use worst confidence of merged sections
+                # PTCV-182: Use ordinal ranking for worst
+                # confidence (fixes alphabetical comparison bug).
                 worst_conf = (
                     existing_conf
-                    if existing_conf.value < confidence.value
+                    if _CONFIDENCE_RANK.get(
+                        existing_conf, 0
+                    )
+                    < _CONFIDENCE_RANK.get(confidence, 0)
                     else confidence
                 )
                 routes[ich_code] = (
@@ -1371,13 +1657,18 @@ class QueryExtractor:
 
         Skips injection if B.1 already has HIGH or REVIEW content.
         """
-        # Skip if B.1 already has good content
+        # Skip if B.1 already has genuine good content.
+        # PTCV-182: Detect contaminated B.1 routes — if the
+        # source string lists ≥3 sections it was built from
+        # concatenated unrelated content, so proceed with
+        # front-matter injection anyway.
         if "B.1" in routes:
-            _, _, conf = routes["B.1"]
+            _, src, conf = routes["B.1"]
+            section_count = src.count(",") + 1
             if conf in (
                 MatchConfidence.HIGH,
                 MatchConfidence.REVIEW,
-            ):
+            ) and section_count < 3:
                 return
 
         # Find the earliest section header's char offset

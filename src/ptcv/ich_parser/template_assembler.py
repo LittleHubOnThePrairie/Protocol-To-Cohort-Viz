@@ -17,16 +17,25 @@ Risk tier: LOW — read-only data assembly, no I/O beyond in-memory ops.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, TYPE_CHECKING
 
 from ptcv.ich_parser.query_schema import (
     AppendixBQuery,
     get_parent_sections,
     get_queries_for_section,
     load_query_schema,
+    section_sort_key,
 )
+
+if TYPE_CHECKING:
+    from ptcv.ich_parser.classification_router import (
+        CascadeResult,
+        RoutingDecision,
+    )
+    from ptcv.ich_parser.models import IchSection
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +61,11 @@ APPENDIX_B_SECTION_NAMES: dict[str, str] = {
     "B.9": "Assessment of Safety",
     "B.10": "Statistics",
     "B.11": "Direct Access to Source Data/Documents",
-    "B.12": "Ethics",
-    "B.13": "Data Handling and Record Keeping",
-    "B.14": "Financing, Insurance, and Publication Policy",
-    "B.15": "Supplements and Amendments",
-    "B.16": "Appendices",
+    "B.12": "Quality Control and Quality Assurance",
+    "B.13": "Ethics",
+    "B.14": "Data Handling and Record Keeping",
+    "B.15": "Financing and Insurance",
+    "B.16": "Publication Policy",
 }
 
 
@@ -81,6 +90,16 @@ class SourceReference:
     section_header: str = ""
     char_offset_start: int = -1
     char_offset_end: int = -1
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SourceReference":
+        """Reconstruct from a JSON-safe dict."""
+        return cls(
+            pdf_page=d.get("pdf_page", 0),
+            section_header=d.get("section_header", ""),
+            char_offset_start=d.get("char_offset_start", -1),
+            char_offset_end=d.get("char_offset_end", -1),
+        )
 
 
 @dataclasses.dataclass
@@ -111,6 +130,126 @@ class QueryExtractionHit:
         default_factory=SourceReference,
     )
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "QueryExtractionHit":
+        """Reconstruct from a JSON-safe dict."""
+        return cls(
+            query_id=d.get("query_id", ""),
+            section_id=d.get("section_id", ""),
+            parent_section=d.get("parent_section", ""),
+            query_text=d.get("query_text", ""),
+            extracted_content=d.get("extracted_content", ""),
+            confidence=float(d.get("confidence", 0.0)),
+            source=SourceReference.from_dict(d.get("source", {})),
+        )
+
+
+@dataclasses.dataclass
+class ClassifiedSection:
+    """Unified input model for document assembly from classified output.
+
+    Adapter between classification sources (cascade router, LLM
+    retemplater, NeoBERT) and the template assembler.  Markdown
+    formatting in ``content_text`` is preserved verbatim.
+
+    PTCV-165: ICH E6(R3) document assembly from classified pipeline.
+
+    Attributes:
+        section_code: ICH E6(R3) section code (e.g. ``"B.4"``).
+        section_name: Human-readable name.
+        content_text: Full section text.  Markdown formatting
+            (tables, headings, lists) is preserved verbatim.
+        confidence: Classification confidence 0.0-1.0.
+        extraction_method: Pipeline extraction method tag
+            (e.g. ``"E3:pdfplumber"``).
+        classification_method: Classification method tag
+            (e.g. ``"C2:neobert_sonnet"``).
+        source_page: 1-based PDF page where content starts.
+        source_header: Original protocol section header.
+        content_hash: SHA-256 of ``content_text`` for dedup.
+            Auto-computed if empty.
+    """
+
+    section_code: str
+    section_name: str
+    content_text: str
+    confidence: float
+    extraction_method: str = ""
+    classification_method: str = ""
+    source_page: int = 0
+    source_header: str = ""
+    content_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.content_hash and self.content_text:
+            self.content_hash = hashlib.sha256(
+                self.content_text.encode("utf-8"),
+            ).hexdigest()
+
+    @classmethod
+    def from_ich_section(
+        cls,
+        section: "IchSection",
+        extraction_method: str = "",
+        classification_method: str = "",
+    ) -> "ClassifiedSection":
+        """Convert a single :class:`IchSection` to ClassifiedSection.
+
+        Args:
+            section: Classified ICH section from any pipeline path.
+            extraction_method: E.g. ``"E3:pdfplumber"``.
+            classification_method: E.g. ``"C2:neobert_sonnet"``.
+        """
+        source_page = 0
+        try:
+            cj = json.loads(section.content_json)
+            page_range = cj.get("page_range", [])
+            if page_range:
+                source_page = page_range[0]
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+        return cls(
+            section_code=section.section_code,
+            section_name=section.section_name,
+            content_text=section.content_text,
+            confidence=section.confidence_score,
+            extraction_method=extraction_method,
+            classification_method=classification_method,
+            source_page=source_page,
+        )
+
+    @classmethod
+    def from_cascade_result(
+        cls,
+        cascade_result: "CascadeResult",
+        extraction_method: str = "",
+    ) -> list["ClassifiedSection"]:
+        """Bulk convert all sections from a :class:`CascadeResult`.
+
+        Extracts routing metadata (local vs sonnet) from the
+        ``RoutingDecision`` list to populate ``classification_method``.
+
+        Args:
+            cascade_result: Output from
+                :meth:`ClassificationRouter.classify`.
+            extraction_method: E.g. ``"E3:pdfplumber"``.
+        """
+        decisions_by_code: dict[str, Any] = {}
+        for d in cascade_result.decisions:
+            decisions_by_code[d.final_section_code] = d
+
+        result: list[ClassifiedSection] = []
+        for section in cascade_result.sections:
+            decision = decisions_by_code.get(section.section_code)
+            route = decision.route if decision else "local"
+            cls_method = f"cascade:{route}"
+            result.append(cls.from_ich_section(
+                section,
+                extraction_method=extraction_method,
+                classification_method=cls_method,
+            ))
+        return result
+
 
 @dataclasses.dataclass
 class AssembledSection:
@@ -127,6 +266,10 @@ class AssembledSection:
         has_low_confidence: ``True`` if any hit has confidence < 0.70.
         required_query_count: Number of required queries for this section.
         answered_required_count: Number of required queries with a hit.
+        extraction_method: Pipeline extraction method tag (PTCV-165).
+            Empty for query-pipeline path.
+        classification_method: Classification method tag (PTCV-165).
+            Empty for query-pipeline path.
     """
 
     section_code: str
@@ -138,6 +281,36 @@ class AssembledSection:
     has_low_confidence: bool
     required_query_count: int
     answered_required_count: int
+    extraction_method: str = ""
+    classification_method: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AssembledSection":
+        """Reconstruct from a JSON-safe dict."""
+        return cls(
+            section_code=d.get("section_code", ""),
+            section_name=d.get("section_name", ""),
+            populated=d.get("populated", False),
+            hits=[
+                QueryExtractionHit.from_dict(h)
+                for h in d.get("hits", [])
+            ],
+            average_confidence=float(
+                d.get("average_confidence", 0.0),
+            ),
+            is_gap=d.get("is_gap", True),
+            has_low_confidence=d.get("has_low_confidence", False),
+            required_query_count=int(
+                d.get("required_query_count", 0),
+            ),
+            answered_required_count=int(
+                d.get("answered_required_count", 0),
+            ),
+            extraction_method=d.get("extraction_method", ""),
+            classification_method=d.get(
+                "classification_method", "",
+            ),
+        )
 
 
 @dataclasses.dataclass
@@ -176,6 +349,37 @@ class CoverageReport:
     gap_sections: list[str]
     low_confidence_sections: list[str]
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "CoverageReport":
+        """Reconstruct from a JSON-safe dict."""
+        return cls(
+            total_sections=int(d.get("total_sections", 0)),
+            populated_count=int(d.get("populated_count", 0)),
+            gap_count=int(d.get("gap_count", 0)),
+            average_confidence=float(
+                d.get("average_confidence", 0.0),
+            ),
+            high_confidence_count=int(
+                d.get("high_confidence_count", 0),
+            ),
+            medium_confidence_count=int(
+                d.get("medium_confidence_count", 0),
+            ),
+            low_confidence_count=int(
+                d.get("low_confidence_count", 0),
+            ),
+            total_queries=int(d.get("total_queries", 0)),
+            answered_queries=int(d.get("answered_queries", 0)),
+            required_queries=int(d.get("required_queries", 0)),
+            answered_required=int(d.get("answered_required", 0)),
+            gap_sections=list(d.get("gap_sections", [])),
+            low_confidence_sections=list(
+                d.get("low_confidence_sections", []),
+            ),
+        )
+
+    review_confidence_count: int = 0
+
 
 @dataclasses.dataclass
 class AssembledProtocol:
@@ -199,6 +403,25 @@ class AssembledProtocol:
             if s.section_code == code:
                 return s
         return None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AssembledProtocol":
+        """Reconstruct from a JSON-safe dict (e.g. checkpoint)."""
+        sections = [
+            AssembledSection.from_dict(s)
+            for s in d.get("sections", [])
+        ]
+        coverage = CoverageReport.from_dict(d.get("coverage", {}))
+        traceability: dict[str, list[SourceReference]] = {}
+        for code, refs in d.get("source_traceability", {}).items():
+            traceability[code] = [
+                SourceReference.from_dict(r) for r in refs
+            ]
+        return cls(
+            sections=sections,
+            coverage=coverage,
+            source_traceability=traceability,
+        )
 
     def to_dict(self) -> dict:
         """Serialise to a JSON-compatible dictionary."""
@@ -363,6 +586,207 @@ def assemble_template(
 
 
 # ---------------------------------------------------------------------------
+# Classified section assembly (PTCV-165)
+# ---------------------------------------------------------------------------
+
+# Required sections for gap detection.
+_REQUIRED_SECTIONS: frozenset[str] = frozenset({"B.3", "B.4", "B.5"})
+
+
+def assemble_from_classified(
+    sections: Sequence[ClassifiedSection],
+) -> AssembledProtocol:
+    """Assemble classified sections into an ICH E6(R3) Appendix B template.
+
+    Accepts classified sections from the cascade router (PTCV-161) or
+    the legacy LLM retemplater, groups them by section code in canonical
+    B.1-B.16 order, detects gaps, and produces the same
+    :class:`AssembledProtocol` output as :func:`assemble_template`.
+
+    Markdown formatting (tables, headings, lists) in
+    ``ClassifiedSection.content_text`` is preserved verbatim.
+
+    Dedup: sections with the same ``content_hash`` are kept only once.
+
+    Args:
+        sections: Classified sections from any pipeline path.
+
+    Returns:
+        :class:`AssembledProtocol` with sections, coverage, and
+        traceability.
+    """
+    # Dedup by content_hash, group by section_code
+    by_code: dict[str, list[ClassifiedSection]] = {}
+    seen_hashes: set[str] = set()
+    for cs in sections:
+        if cs.content_hash in seen_hashes:
+            logger.debug(
+                "Dedup: skipping duplicate content for %s "
+                "(hash=%s...)",
+                cs.section_code,
+                cs.content_hash[:12],
+            )
+            continue
+        seen_hashes.add(cs.content_hash)
+        by_code.setdefault(cs.section_code, []).append(cs)
+
+    # Canonical B.1-B.16 order
+    all_codes = sorted(
+        APPENDIX_B_SECTION_NAMES.keys(),
+        key=section_sort_key,
+    )
+
+    assembled: list[AssembledSection] = []
+    traceability: dict[str, list[SourceReference]] = {}
+    all_confidences: list[float] = []
+
+    for code in all_codes:
+        name = APPENDIX_B_SECTION_NAMES.get(
+            code, f"Section {code}",
+        )
+        classified = by_code.get(code, [])
+
+        if not classified:
+            assembled.append(AssembledSection(
+                section_code=code,
+                section_name=name,
+                populated=False,
+                hits=[],
+                average_confidence=0.0,
+                is_gap=True,
+                has_low_confidence=False,
+                required_query_count=0,
+                answered_required_count=0,
+            ))
+            continue
+
+        # Primary = highest confidence for provenance
+        primary = max(classified, key=lambda c: c.confidence)
+
+        # Synthetic QueryExtractionHit for backward compat
+        synthetic_hits: list[QueryExtractionHit] = []
+        for cs in classified:
+            synthetic_hits.append(QueryExtractionHit(
+                query_id=f"{cs.section_code}.classified",
+                section_id=cs.section_code,
+                parent_section=cs.section_code,
+                query_text=f"Classified content for "
+                f"{cs.section_code}",
+                extracted_content=cs.content_text,
+                confidence=cs.confidence,
+                source=SourceReference(
+                    pdf_page=cs.source_page,
+                    section_header=cs.source_header,
+                ),
+            ))
+
+        confidences = [cs.confidence for cs in classified]
+        avg_conf = sum(confidences) / len(confidences)
+        has_low = any(c < LOW_CONFIDENCE for c in confidences)
+        all_confidences.extend(confidences)
+
+        # Traceability
+        refs = [
+            SourceReference(
+                pdf_page=cs.source_page,
+                section_header=cs.source_header,
+            )
+            for cs in classified if cs.source_page > 0
+        ]
+        if refs:
+            traceability[code] = refs
+
+        assembled.append(AssembledSection(
+            section_code=code,
+            section_name=name,
+            populated=True,
+            hits=synthetic_hits,
+            average_confidence=round(avg_conf, 3),
+            is_gap=False,
+            has_low_confidence=has_low,
+            required_query_count=0,
+            answered_required_count=0,
+            extraction_method=primary.extraction_method,
+            classification_method=primary.classification_method,
+        ))
+
+    # Coverage report
+    populated_count = sum(1 for s in assembled if s.populated)
+    gap_count = sum(1 for s in assembled if s.is_gap)
+    overall_avg = (
+        sum(all_confidences) / len(all_confidences)
+        if all_confidences else 0.0
+    )
+    high_count = sum(
+        1 for s in assembled
+        if s.populated and s.average_confidence >= HIGH_CONFIDENCE
+    )
+    medium_count = sum(
+        1 for s in assembled
+        if s.populated
+        and LOW_CONFIDENCE <= s.average_confidence < HIGH_CONFIDENCE
+    )
+    low_count = sum(
+        1 for s in assembled
+        if s.populated and s.average_confidence < LOW_CONFIDENCE
+    )
+    gap_sections = [s.section_code for s in assembled if s.is_gap]
+    low_sections = [
+        s.section_code for s in assembled
+        if s.populated and s.average_confidence < LOW_CONFIDENCE
+    ]
+
+    # Required section gaps
+    populated_codes = {
+        s.section_code for s in assembled if s.populated
+    }
+    missing_required = sorted(
+        _REQUIRED_SECTIONS - populated_codes,
+        key=section_sort_key,
+    )
+    if missing_required:
+        for code in missing_required:
+            name = APPENDIX_B_SECTION_NAMES.get(code, code)
+            logger.warning(
+                "%s (%s) is missing", code, name,
+            )
+
+    coverage = CoverageReport(
+        total_sections=len(all_codes),
+        populated_count=populated_count,
+        gap_count=gap_count,
+        average_confidence=round(overall_avg, 3),
+        high_confidence_count=high_count,
+        medium_confidence_count=medium_count,
+        low_confidence_count=low_count,
+        total_queries=0,
+        answered_queries=0,
+        required_queries=len(_REQUIRED_SECTIONS),
+        answered_required=len(
+            _REQUIRED_SECTIONS & populated_codes,
+        ),
+        gap_sections=gap_sections,
+        low_confidence_sections=low_sections,
+    )
+
+    logger.info(
+        "Assembled from classified: %d/%d sections populated, "
+        "%d gaps, avg confidence %.2f, missing required: %s",
+        populated_count,
+        len(all_codes),
+        gap_count,
+        overall_avg,
+        missing_required or "none",
+    )
+
+    return AssembledProtocol(
+        sections=assembled,
+        coverage=coverage,
+        source_traceability=traceability,
+    )
+
+
+# ---------------------------------------------------------------------------
 # JSON serialisation
 # ---------------------------------------------------------------------------
 
@@ -376,6 +800,7 @@ def _to_dict(protocol: AssembledProtocol) -> dict:
             hits.append({
                 "query_id": h.query_id,
                 "section_id": h.section_id,
+                "parent_section": h.parent_section,
                 "query_text": h.query_text,
                 "extracted_content": h.extracted_content,
                 "confidence": h.confidence,
@@ -386,7 +811,7 @@ def _to_dict(protocol: AssembledProtocol) -> dict:
                     "char_offset_end": h.source.char_offset_end,
                 },
             })
-        sections.append({
+        section_dict: dict[str, Any] = {
             "section_code": s.section_code,
             "section_name": s.section_name,
             "populated": s.populated,
@@ -396,7 +821,17 @@ def _to_dict(protocol: AssembledProtocol) -> dict:
             "required_query_count": s.required_query_count,
             "answered_required_count": s.answered_required_count,
             "hits": hits,
-        })
+        }
+        # PTCV-165: provenance metadata
+        if s.extraction_method:
+            section_dict["extraction_method"] = (
+                s.extraction_method
+            )
+        if s.classification_method:
+            section_dict["classification_method"] = (
+                s.classification_method
+            )
+        sections.append(section_dict)
 
     return {
         "format": "ICH E6(R3) Appendix B",
@@ -453,6 +888,28 @@ def _to_markdown(protocol: AssembledProtocol) -> str:
             f"## {section.section_code} {section.section_name}"
         )
         lines.append("")
+
+        # PTCV-165: provenance metadata
+        if (
+            section.extraction_method
+            or section.classification_method
+        ):
+            meta_parts: list[str] = []
+            if section.extraction_method:
+                meta_parts.append(
+                    f"Extraction: {section.extraction_method}"
+                )
+            if section.classification_method:
+                meta_parts.append(
+                    f"Classification: "
+                    f"{section.classification_method}"
+                )
+            meta_parts.append(
+                f"Confidence: "
+                f"{section.average_confidence:.2f}"
+            )
+            lines.append(f"*{' | '.join(meta_parts)}*")
+            lines.append("")
 
         if section.is_gap:
             lines.append(f"> {GAP_PLACEHOLDER}")

@@ -154,7 +154,9 @@ class TestCamelotFallback:
         self.extractor = PdfExtractor()
 
     def test_camelot_used_on_pdfplumber_empty(self, minimal_pdf_bytes):
-        """When pdfplumber finds no tables, camelot is attempted."""
+        """When pymupdf4llm fails and pdfplumber finds no tables,
+        camelot is attempted via the pdfplumber fallback path.
+        """
         import pandas as pd
 
         mock_camelot_table = MagicMock()
@@ -162,7 +164,18 @@ class TestCamelotFallback:
             [["Visit", "Day"], ["Screening", "-7"]]
         )
 
-        with patch("ptcv.extraction.pdf_extractor.PdfExtractor._fallback_extract") as mock_fb:
+        # Force pymupdf4llm to fail so pdfplumber fallback runs
+        with (
+            patch(
+                "ptcv.extraction.pdf_extractor.PdfExtractor"
+                "._extract_pymupdf4llm",
+                side_effect=RuntimeError("pymupdf4llm unavailable"),
+            ),
+            patch(
+                "ptcv.extraction.pdf_extractor.PdfExtractor"
+                "._fallback_extract",
+            ) as mock_fb,
+        ):
             mock_fb.return_value = [
                 type(
                     "E",
@@ -183,7 +196,7 @@ class TestCamelotFallback:
             _, tables, _, _ = self.extractor.extract(
                 minimal_pdf_bytes, _RUN, _REG, _SHA
             )
-            # fallback was called (pdfplumber found no tables in minimal PDF)
+            # fallback was called (pdfplumber found no tables)
             mock_fb.assert_called_once()
 
     def test_camelot_extract_returns_extractor_name(self, tmp_path):
@@ -371,16 +384,26 @@ class TestLandscapeRealProtocol:
 
     def test_soa_text_extracted_correctly(self, nct03045302_bytes):
         """SoA text on landscape pages reads forwards."""
-        blocks, _, _, _ = self.extractor.extract(
+        blocks, tables, _, _ = self.extractor.extract(
             nct03045302_bytes, _RUN, "NCT03045302", _SHA
         )
+        # Check both text blocks and table headers (pymupdf4llm may
+        # place SoA content in tables rather than text blocks)
         page67_texts = [
             b.text for b in blocks if b.page_number == 67
         ]
+        page67_table_text = [
+            json.loads(t.header_row)
+            for t in tables if t.page_number == 67
+        ]
         full = " ".join(page67_texts)
+        table_full = " ".join(
+            str(h) for headers in page67_table_text for h in headers
+        )
+        all_text = full + " " + table_full
         # Text should read "Study Schedule" not "ydutS eludehcS"
-        assert "ydutS" not in full
-        assert "Schedule" in full or "Study" in full
+        assert "ydutS" not in all_text
+        assert "Schedule" in all_text or "Study" in all_text
 
     def test_soa_table_headers_correct(self, nct03045302_bytes):
         """Table extracted from landscape page has correct headers."""

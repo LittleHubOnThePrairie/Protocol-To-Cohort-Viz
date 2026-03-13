@@ -49,6 +49,7 @@ from .review_queue import CtReviewQueue
 
 if TYPE_CHECKING:
     from ..ich_parser.models import IchSection
+    from ..ich_parser.template_assembler import AssembledProtocol, QueryExtractionHit
     from ..soa_extractor.models import UsdmTimepoint
 
 
@@ -166,11 +167,13 @@ class SdtmService:
             run_id = str(uuid.uuid4())
 
         studyid = registry_id[:20]
-        prefix = f"sdtm/{registry_id}/{run_id}"
-        timestamp = datetime.now(timezone.utc).isoformat()
 
         # --- Generate DataFrames ----------------------------------------
-        ts_df, unmapped_results = self._ts_gen.generate(sections, studyid, run_id)
+        ts_df, unmapped_results = self._ts_gen.generate(
+            sections, studyid, run_id,
+            timepoints=timepoints,
+            registry_id=registry_id,
+        )
         ta_df = self._ta_gen.generate(sections, studyid)
         te_df = self._te_gen.generate(sections, studyid)
         tv_df = self._tv_gen.generate(timepoints, studyid)
@@ -195,6 +198,114 @@ class SdtmService:
             len(tv_df),
             len(ti_df),
         )
+
+        return self._write_and_finalize(
+            datasets=datasets,
+            unmapped_results=unmapped_results,
+            registry_id=registry_id,
+            run_id=run_id,
+            source_sha256=source_sha256,
+            amendment_number=amendment_number,
+            source_type="ich_section",
+        )
+
+    def generate_from_assembled(
+        self,
+        assembled: "AssembledProtocol",
+        timepoints: list["UsdmTimepoint"],
+        registry_id: str,
+        amendment_number: str = "00",
+        source_sha256: str = "",
+        run_id: Optional[str] = None,
+    ) -> SdtmGenerationResult:
+        """Generate SDTM domains from query pipeline AssembledProtocol.
+
+        Uses typed QueryExtractionHit records for direct field mapping,
+        avoiding lossy IchSection bridge conversion (PTCV-140).
+
+        Args:
+            assembled: Completed AssembledProtocol from the query pipeline.
+            timepoints: UsdmTimepoint records from PTCV-21 SoA extractor.
+            registry_id: Trial registry identifier.
+            amendment_number: Protocol amendment version.
+            source_sha256: SHA-256 of the upstream artifact.
+            run_id: Optional explicit run_id for deterministic testing.
+
+        Returns:
+            SdtmGenerationResult with source_type="query_pipeline".
+        """
+        if run_id is None:
+            run_id = str(uuid.uuid4())
+
+        studyid = registry_id[:20]
+
+        # Collect all hits from assembled sections.
+        all_hits: list["QueryExtractionHit"] = []
+        for section in assembled.sections:
+            all_hits.extend(section.hits)
+
+        # --- Generate DataFrames ----------------------------------------
+        ts_df, unmapped_results = self._ts_gen.generate_from_hits(
+            all_hits, studyid, run_id,
+            timepoints=timepoints,
+            registry_id=registry_id,
+        )
+        ta_df = self._ta_gen.generate_from_hits(all_hits, studyid)
+        te_df = self._te_gen.generate_from_hits(all_hits, studyid)
+        tv_df = self._tv_gen.generate(timepoints, studyid)
+        ti_df = self._ti_gen.generate_from_hits(all_hits, studyid)
+
+        datasets: dict[str, pd.DataFrame] = {
+            "ts": ts_df,
+            "ta": ta_df,
+            "te": te_df,
+            "tv": tv_df,
+            "ti": ti_df,
+        }
+
+        logger.info(
+            "SDTM generation (query_pipeline): registry_id=%s run_id=%s "
+            "ts=%d ta=%d te=%d tv=%d ti=%d",
+            registry_id,
+            run_id,
+            len(ts_df),
+            len(ta_df),
+            len(te_df),
+            len(tv_df),
+            len(ti_df),
+        )
+
+        return self._write_and_finalize(
+            datasets=datasets,
+            unmapped_results=unmapped_results,
+            registry_id=registry_id,
+            run_id=run_id,
+            source_sha256=source_sha256,
+            amendment_number=amendment_number,
+            source_type="query_pipeline",
+        )
+
+    # -------------------------------------------------------------------
+    # Shared write + finalize tail (PTCV-140 refactor)
+    # -------------------------------------------------------------------
+
+    def _write_and_finalize(
+        self,
+        datasets: dict[str, pd.DataFrame],
+        unmapped_results: list,
+        registry_id: str,
+        run_id: str,
+        source_sha256: str,
+        amendment_number: str,
+        source_type: str = "ich_section",
+    ) -> SdtmGenerationResult:
+        """Write XPT artifacts, Define-XML, and route CT-unmapped terms.
+
+        Shared tail for both ``generate()`` and ``generate_from_assembled()``.
+        """
+        studyid = registry_id[:20]
+        prefix = f"sdtm/{registry_id}/{run_id}"
+        timestamp = datetime.now(timezone.utc).isoformat()
 
         # --- Route CT-unmapped terms to review queue --------------------
         ct_unmapped_count = 0
@@ -299,4 +410,5 @@ class SdtmService:
             domain_row_counts=domain_row_counts,
             ct_unmapped_count=ct_unmapped_count,
             generation_timestamp_utc=timestamp,
+            source_type=source_type,
         )

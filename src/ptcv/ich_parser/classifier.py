@@ -204,6 +204,49 @@ class RuleBasedClassifier(SectionClassifier):
         }
         return best_code, best_score, content
 
+    def _score_block_topk(
+        self, block: str, k: int = 3
+    ) -> list[tuple[str, float, dict[str, Any]]]:
+        """Score block against all ICH sections, return top-k (PTCV-161).
+
+        Same scoring logic as ``_score_block`` but returns the top *k*
+        results sorted by confidence descending.  Used by
+        ``ClassificationRouter`` to pass local candidates to Sonnet.
+
+        Returns:
+            List of ``(section_code, confidence_score, content_dict)``
+            tuples, length <= *k*, filtered to score > 0.
+        """
+        lower = block.lower()
+        scores: list[tuple[str, float]] = []
+
+        for code, defn in _ICH_SECTIONS.items():
+            pattern_hits = sum(
+                1 for p in defn["patterns"] if re.search(p, lower)
+            )
+            keyword_hits = sum(
+                1 for kw in defn["keywords"] if kw.lower() in lower
+            )
+            max_possible = (
+                len(defn["patterns"]) * 2 + len(defn["keywords"])
+            )
+            raw = pattern_hits * 2 + keyword_hits
+            score = raw / max_possible if max_possible > 0 else 0.0
+            scores.append((code, score))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        top_k = scores[:k]
+
+        content: dict[str, Any] = {
+            "text_excerpt": block[:2000].strip(),
+            "word_count": len(block.split()),
+        }
+        return [
+            (code, score, content)
+            for code, score in top_k
+            if score > 0
+        ]
+
     def _deduplicate(self, sections: list[IchSection]) -> list[IchSection]:
         """Keep one IchSection per section_code — highest confidence wins.
 

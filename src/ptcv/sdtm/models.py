@@ -64,6 +64,7 @@ class SdtmGenerationResult:
     domain_row_counts: dict[str, int]
     ct_unmapped_count: int
     generation_timestamp_utc: str
+    source_type: str = "ich_section"  # "ich_section" | "query_pipeline"
 
     def __repr__(self) -> str:
         domains = list(self.artifact_keys.keys())

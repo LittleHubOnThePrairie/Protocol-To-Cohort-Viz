@@ -55,7 +55,8 @@ class ExtractedTable:
         source_sha256: SHA-256 of the source protocol file.
         page_number: 1-based page where the table starts.
         extractor_used: Name of the extractor that produced this row:
-            "pdfplumber", "camelot", "tabula", or "llm_vision".
+            "pymupdf4llm", "pdfplumber", "camelot", "tabula", or
+            "claude_vision" (PTCV-172).
         table_index: 0-based position of this table in the document.
         header_row: Column header cells serialised as a JSON array string.
         data_rows: Table data rows serialised as a JSON array-of-arrays.

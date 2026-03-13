@@ -16,12 +16,14 @@ Risk tier: LOW — read-only enrichment, no mutations to source data.
 
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import hashlib
 import json
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from typing import Any, Sequence
 
@@ -149,6 +151,7 @@ class EnrichedMatchResult:
             with HIGH confidence.
         llm_calls_made: Number of LLM API calls performed.
         llm_fallback: ``True`` if LLM was unavailable.
+        elapsed_seconds: Wall-clock time for the enrichment stage.
     """
 
     mappings: list[SectionMapping]
@@ -160,6 +163,7 @@ class EnrichedMatchResult:
     sub_section_auto_map_rate: float
     llm_calls_made: int
     llm_fallback: bool
+    elapsed_seconds: float = 0.0
 
 
 # -----------------------------------------------------------------------
@@ -378,22 +382,28 @@ class SummarizationMatcher:
         review_threshold: Minimum composite score for REVIEW tier.
         weights: Custom composite scoring weights.
         max_content_chars: Maximum content chars sent to LLM.
+        max_concurrent: Maximum concurrent LLM calls.  Defaults to
+            ``10``.  Set to ``1`` for sequential execution.
     """
 
     def __init__(
         self,
         anthropic_api_key: str | None = None,
+        # PTCV-188: Primary model with graceful degradation.
         claude_model: str = "claude-sonnet-4-6",
         auto_threshold: float = 0.75,
         review_threshold: float = 0.50,
         weights: dict[str, float] | None = None,
         max_content_chars: int = _MAX_CONTENT_CHARS,
+        max_concurrent: int = 10,
     ) -> None:
         self._auto_threshold = auto_threshold
         self._review_threshold = review_threshold
         self._weights = weights
         self._max_chars = max_content_chars
         self._model = claude_model
+        self._fallback_model = "claude-sonnet-4-20250514"
+        self._max_concurrent = max(1, max_concurrent)
 
         api_key = anthropic_api_key or os.environ.get(
             "ANTHROPIC_API_KEY", ""
@@ -409,6 +419,8 @@ class SummarizationMatcher:
         self._cache_hits = 0
         self._cache_misses = 0
         self._llm_calls = 0
+        self._refusal_count = 0
+        self._fallback_count = 0
 
     def _init_client(self, api_key: str) -> None:
         """Lazy-import Anthropic SDK and create client."""
@@ -437,6 +449,7 @@ class SummarizationMatcher:
         self,
         match_result: MatchResult,
         protocol_index: ProtocolIndex,
+        progress_callback: Any = None,
     ) -> EnrichedMatchResult:
         """Enrich a :class:`MatchResult` with sub-section matches.
 
@@ -448,32 +461,50 @@ class SummarizationMatcher:
         3. Compute composite score and classify confidence.
         4. Build :class:`EnrichedSectionMapping`.
 
+        LLM calls are parallelized using a thread pool (PTCV-125).
+
         Args:
             match_result: Output from :meth:`SectionMatcher.match`.
             protocol_index: Document index for content access.
+            progress_callback: Optional ``(done, total)`` callback
+                invoked after each mapping is enriched (PTCV-126).
 
         Returns:
             :class:`EnrichedMatchResult` preserving all original
             fields plus sub-section enrichment.
         """
+        t0 = time.monotonic()
         registry = build_subsection_registry()
         enriched_mappings: list[EnrichedSectionMapping] = []
         total_sub_high = 0
         total_sub = 0
+        total_mappings = len(match_result.mappings)
 
-        for mapping in match_result.mappings:
+        for i, mapping in enumerate(match_result.mappings):
             enriched = self._enrich_mapping(
                 mapping, protocol_index, registry
             )
             enriched_mappings.append(enriched)
+            if progress_callback is not None:
+                progress_callback(i + 1, total_mappings)
 
             for sub in enriched.sub_section_matches:
                 total_sub += 1
                 if sub.confidence == MatchConfidence.HIGH:
                     total_sub_high += 1
 
+        elapsed = time.monotonic() - t0
         sub_auto_rate = (
             total_sub_high / total_sub if total_sub else 0.0
+        )
+
+        logger.info(
+            "SummarizationMatcher.refine completed in %.2fs "
+            "(%d LLM calls, %d cache hits, %d cache misses)",
+            elapsed,
+            self._llm_calls,
+            self._cache_hits,
+            self._cache_misses,
         )
 
         return EnrichedMatchResult(
@@ -486,6 +517,7 @@ class SummarizationMatcher:
             sub_section_auto_map_rate=round(sub_auto_rate, 4),
             llm_calls_made=self._llm_calls,
             llm_fallback=not self._use_llm,
+            elapsed_seconds=round(elapsed, 3),
         )
 
     # ------------------------------------------------------------------
@@ -517,15 +549,26 @@ class SummarizationMatcher:
             mapping.protocol_section_number, ""
         )
 
-        sub_matches: list[SubSectionMatch] = []
-        for sub_def in sub_defs:
-            sub_match = self._score_subsection(
+        # Parallelize LLM calls across sub-sections (PTCV-125).
+        # LLM calls are I/O-bound so threading provides near-linear
+        # speedup.  When LLM is disabled, the overhead is negligible.
+        if self._use_llm and len(sub_defs) > 1:
+            sub_matches = self._score_subsections_parallel(
+                sub_defs=sub_defs,
                 content=content,
                 protocol_title=mapping.protocol_section_title,
                 parent_score=parent_score,
-                sub_def=sub_def,
             )
-            sub_matches.append(sub_match)
+        else:
+            sub_matches = [
+                self._score_subsection(
+                    content=content,
+                    protocol_title=mapping.protocol_section_title,
+                    parent_score=parent_score,
+                    sub_def=sub_def,
+                )
+                for sub_def in sub_defs
+            ]
 
         # Sort by composite score descending
         sub_matches.sort(
@@ -546,6 +589,63 @@ class SummarizationMatcher:
             sub_section_matches=sub_matches,
             parent_coverage=coverage,
         )
+
+    # ------------------------------------------------------------------
+    # Parallel sub-section scoring (PTCV-125)
+    # ------------------------------------------------------------------
+
+    def _score_subsections_parallel(
+        self,
+        sub_defs: list[SubSectionDef],
+        content: str,
+        protocol_title: str,
+        parent_score: float,
+    ) -> list[SubSectionMatch]:
+        """Score multiple sub-sections concurrently via thread pool.
+
+        Each ``_score_subsection`` call is I/O-bound (LLM API), so
+        threading provides near-linear speedup.  The thread count is
+        capped by ``self._max_concurrent``.
+        """
+        workers = min(self._max_concurrent, len(sub_defs))
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers
+        ) as pool:
+            futures = {
+                pool.submit(
+                    self._score_subsection,
+                    content=content,
+                    protocol_title=protocol_title,
+                    parent_score=parent_score,
+                    sub_def=sub_def,
+                ): sub_def
+                for sub_def in sub_defs
+            }
+            results: list[SubSectionMatch] = []
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception:
+                    sub_def = futures[future]
+                    logger.warning(
+                        "Parallel scoring failed for %s",
+                        sub_def.code,
+                        exc_info=True,
+                    )
+                    # Return a zero-score fallback match.
+                    results.append(SubSectionMatch(
+                        sub_section_code=sub_def.code,
+                        parent_section_code=sub_def.parent_code,
+                        sub_section_name=sub_def.name,
+                        embedding_score=round(parent_score, 4),
+                        keyword_score=0.0,
+                        summarization_score=0.0,
+                        composite_score=0.0,
+                        confidence=MatchConfidence.LOW,
+                        match_method="parallel_error",
+                    ))
+        return results
 
     # ------------------------------------------------------------------
     # Sub-section scoring
@@ -662,33 +762,54 @@ class SummarizationMatcher:
             sub_description=sub_def.description,
         )
 
+        _SYSTEM = (
+            "You are a regulatory document analysis tool for "
+            "ICH E6(R3) GCP compliance. You classify sections "
+            "of clinical trial protocol documents against the "
+            "ICH Appendix B taxonomy. This is a read-only "
+            "document classification task on publicly available "
+            "clinical trial protocols from ClinicalTrials.gov. "
+            "No real patients are involved."
+        )
+
         try:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=200,
-                system=(
-                    "You are a regulatory document analysis tool for "
-                    "ICH E6(R3) GCP compliance. You classify sections "
-                    "of clinical trial protocol documents against the "
-                    "ICH Appendix B taxonomy. This is a read-only "
-                    "document classification task on publicly available "
-                    "clinical trial protocols from ClinicalTrials.gov. "
-                    "No real patients are involved."
-                ),
+                system=_SYSTEM,
                 messages=[{"role": "user", "content": prompt}],
             )
-            if not response.content:
-                logger.warning(
-                    "Empty response for %s: stop_reason=%s, "
-                    "usage=%s, model=%s",
+
+            # PTCV-188: Detect refusal and retry with fallback.
+            stop = getattr(response, "stop_reason", None)
+            is_refused = (
+                isinstance(stop, str)
+                and stop in ("content_filtered", "refusal")
+            ) or not response.content
+
+            if is_refused:
+                logger.info(
+                    "PTCV-188: Refusal for %s "
+                    "(stop_reason=%s), retrying with %s",
                     sub_def.code,
-                    response.stop_reason,
-                    response.usage,
-                    response.model,
+                    stop,
+                    self._fallback_model,
                 )
-                raise ValueError(
-                    f"Empty response.content for {sub_def.code}"
+                response = self._client.messages.create(
+                    model=self._fallback_model,
+                    max_tokens=200,
+                    system=_SYSTEM,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
                 )
+                if not response.content:
+                    self._refusal_count += 1
+                    raise ValueError(
+                        f"Fallback also empty for {sub_def.code}"
+                    )
+                self._fallback_count += 1
+
             text = response.content[0].text.strip()
             parsed = json.loads(text)
             score = float(parsed.get("score", 0.0))

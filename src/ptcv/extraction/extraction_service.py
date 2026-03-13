@@ -77,6 +77,7 @@ class ExtractionService:
         filename: str = "",
         source: str = "",
         run_id: Optional[str] = None,
+        ext_level: Optional[object] = None,
     ) -> ExtractionResult:
         """Detect format and extract text/tables from a protocol file.
 
@@ -92,6 +93,9 @@ class ExtractionService:
                 "ClinicalTrials.gov"). May be empty.
             run_id: Optional explicit run_id. If None, a UUID4 is
                 generated. Intended for deterministic testing only.
+            ext_level: ExtractionLevel from degradation chain. When set
+                to E1 (docling_vision), enables Claude vision
+                enhancement for sparse pages (PTCV-172).
 
         Returns:
             ExtractionResult with artifact keys, SHA-256 hashes, and
@@ -138,7 +142,9 @@ class ExtractionService:
                 )
             )
             # Determine the predominant extractor for metadata
-            extractor_used = _predominant_extractor(tables) or "pdfplumber"
+            extractor_used = (
+                _predominant_extractor(tables) or "pymupdf4llm"
+            )
 
         elif fmt == ProtocolFormat.CTR_XML:
             text_blocks, page_count = self._xml_extractor.extract(
@@ -165,6 +171,46 @@ class ExtractionService:
                 )
             )
             extractor_used = _predominant_extractor(tables) or "pdfplumber"
+
+        # PTCV-172: Vision enhancement for sparse pages (E1 only)
+        if (
+            ext_level is not None
+            and getattr(ext_level, "value", None) == "docling_vision"
+            and fmt == ProtocolFormat.PDF
+        ):
+            try:
+                from .vision_enhancer import VisionEnhancer
+
+                enhancer = VisionEnhancer()
+                v_result = enhancer.enhance(
+                    pdf_bytes=protocol_data,
+                    text_blocks=text_blocks,
+                    tables=tables,
+                    page_count=page_count,
+                    run_id=run_id,
+                    registry_id=registry_id,
+                    source_sha256=source_sha256,
+                )
+                text_blocks.extend(v_result.text_blocks)
+                tables.extend(v_result.tables)
+                if v_result.pages_processed > 0:
+                    extractor_used = extractor_used + "+claude_vision"
+                    logger.info(
+                        "Vision enhancement: +%d text blocks, +%d "
+                        "tables from %d pages (cost ~$%.4f) for %s",
+                        len(v_result.text_blocks),
+                        len(v_result.tables),
+                        v_result.pages_processed,
+                        v_result.estimated_cost_usd,
+                        registry_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Vision enhancement failed for %s; "
+                    "proceeding without",
+                    registry_id,
+                    exc_info=True,
+                )
 
         # Stamp contemporaneous timestamp on all rows
         for blk in text_blocks:

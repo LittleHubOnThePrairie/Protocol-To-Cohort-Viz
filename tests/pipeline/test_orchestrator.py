@@ -189,12 +189,12 @@ class TestStorageGatewayArtifacts:
 class TestLineageChain:
     """GHERKIN: Unbroken ALCOA++ lineage chain from download to validation report."""
 
-    def test_seven_stage_checkpoints_recorded(
+    def test_eight_stage_checkpoints_recorded(
         self, orchestrator, ctr_xml_bytes, registry_id
     ):
-        """Exactly 7 stage checkpoints (PTCV-60 pipeline)."""
+        """Exactly 8 stage checkpoints (PTCV-60/161 pipeline)."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
-        assert len(result.stage_checkpoints) == 7
+        assert len(result.stage_checkpoints) == 8
 
     def test_all_stage_names_present(
         self, orchestrator, ctr_xml_bytes, registry_id
@@ -217,16 +217,16 @@ class TestLineageChain:
     ):
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         verification = result.verify_lineage_chain()
-        assert verification.stages_verified == 7
+        assert verification.stages_verified == 8
 
-    def test_get_lineage_returns_seven_records(
+    def test_get_lineage_returns_eight_records(
         self, orchestrator, ctr_xml_bytes, registry_id, tmp_gateway
     ):
-        """get_lineage(pipeline_run_id) returns at least 7 records."""
+        """get_lineage(pipeline_run_id) returns at least 8 records."""
         result = run_pipeline(orchestrator, ctr_xml_bytes, registry_id)
         lineage = tmp_gateway.get_lineage(result.pipeline_run_id)
         # One checkpoint artifact per stage was written under pipeline_run_id
-        assert len(lineage) >= 7
+        assert len(lineage) >= 8
 
     def test_lineage_records_have_expected_stages(
         self, orchestrator, ctr_xml_bytes, registry_id, tmp_gateway

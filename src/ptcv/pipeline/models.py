@@ -19,6 +19,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..extraction.models import ExtractionResult
+    from ..ich_parser.classification_router import CascadeResult
     from ..ich_parser.coverage_reviewer import CoverageResult
     from ..ich_parser.llm_retemplater import RetemplatingResult
     from ..ich_parser.parser import ParseResult
@@ -28,11 +29,12 @@ if TYPE_CHECKING:
     from ..ich_parser.fidelity_checker import FidelityResult
 
 
-# Expected pipeline stage names (in order) — PTCV-60 reordering
+# Expected pipeline stage names (in order) — PTCV-60/PTCV-161 reordering
 PIPELINE_STAGES = [
     "download",
     "extraction",
     "soa_extraction",
+    "classification_cascade",
     "retemplating",
     "coverage_review",
     "sdtm_generation",
@@ -134,6 +136,13 @@ class PipelineResult:
 
     # PTCV-65: Optional fidelity check result (opt-in stage)
     fidelity_result: Optional["FidelityResult"] = None
+
+    # PTCV-161: Classification cascade result (enabled by default)
+    cascade_result: Optional["CascadeResult"] = None
+
+    # PTCV-163: Degradation chain metadata
+    extraction_method: str = ""      # e.g. "E3:pdfplumber"
+    classification_method: str = ""  # e.g. "C2:neobert_sonnet"
 
     def verify_lineage_chain(self) -> LineageChainVerification:
         """Verify that sha256 values form an unbroken chain across stages.

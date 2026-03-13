@@ -144,8 +144,8 @@ class PdfExtractor:
     ) -> tuple[list["TextBlock"], list["ExtractedTable"], int, list[int]]:
         """Extract text blocks and tables from a PDF.
 
-        Uses pdfplumber as the primary extractor; falls back to Camelot
-        Lattice and then tabula-py on a per-page basis for tables.
+        Uses pymupdf4llm as the primary extractor with PTCV-176
+        normalisation; falls back to the pdfplumber cascade on failure.
 
         Args:
             pdf_bytes: Raw PDF file contents.
@@ -158,14 +158,288 @@ class PdfExtractor:
             landscape_pages is a list of 1-based page numbers where
             rotated content was detected and normalised.
         """
-        import io
-
-        import pdfplumber
-
         # Pre-process: detect and fix landscape-content pages (PTCV-63).
         pdf_bytes, landscape_pages = self._normalize_page_rotation(
             pdf_bytes,
         )
+
+        # PTCV-170: Try pymupdf4llm first, fall back to pdfplumber
+        try:
+            return self._extract_pymupdf4llm(
+                pdf_bytes, run_id, registry_id, source_sha256,
+                landscape_pages,
+            )
+        except Exception as exc:
+            logger.warning(
+                "pymupdf4llm extraction failed (%s) — "
+                "falling back to pdfplumber cascade",
+                exc,
+            )
+            return self._extract_pdfplumber(
+                pdf_bytes, run_id, registry_id, source_sha256,
+                landscape_pages,
+            )
+
+    # ------------------------------------------------------------------
+    # pymupdf4llm extraction (PTCV-170)
+    # ------------------------------------------------------------------
+
+    def _extract_pymupdf4llm(
+        self,
+        pdf_bytes: bytes,
+        run_id: str,
+        registry_id: str,
+        source_sha256: str,
+        landscape_pages: list[int],
+    ) -> tuple[list["TextBlock"], list["ExtractedTable"], int, list[int]]:
+        """Extract text and tables using pymupdf4llm + PTCV-176 normaliser.
+
+        Args:
+            pdf_bytes: Rotation-normalised PDF bytes.
+            run_id: Extraction run UUID4.
+            registry_id: Trial identifier.
+            source_sha256: Source SHA-256.
+            landscape_pages: Pages with detected landscape rotation.
+
+        Returns:
+            Same tuple as :meth:`extract`.
+        """
+        import fitz
+        import pymupdf4llm
+
+        from .markdown_normalizer import normalize_markdown
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            page_count = len(doc)
+            chunks = pymupdf4llm.to_markdown(doc, page_chunks=True)
+        finally:
+            doc.close()
+
+        text_blocks: list["TextBlock"] = []
+        tables: list["ExtractedTable"] = []
+        table_index = 0
+
+        for page_num, chunk in enumerate(chunks, start=1):
+            raw_md = chunk["text"]
+            normalized = normalize_markdown(raw_md)
+            md_text = normalized.text
+
+            # Parse TextBlocks from normalised markdown
+            page_blocks = self._parse_markdown_blocks(
+                md_text, page_num, run_id, registry_id, source_sha256,
+            )
+            text_blocks.extend(page_blocks)
+
+            # Parse markdown tables into ExtractedTable objects
+            page_tables = self._parse_markdown_tables(
+                md_text, page_num, run_id, registry_id,
+                source_sha256, table_index,
+            )
+            tables.extend(page_tables)
+            table_index += len(page_tables)
+
+        # Quality gate: if pymupdf4llm produced very few text blocks
+        # relative to page count, the PDF likely has unusual structure
+        # (scanned, form-overlaid, etc.) and pdfplumber may do better.
+        pages_with_content = len({
+            b.page_number for b in text_blocks
+        } | {t.page_number for t in tables})
+        if page_count > 3 and pages_with_content < page_count * 0.3:
+            raise RuntimeError(
+                f"pymupdf4llm quality gate: only {pages_with_content}/"
+                f"{page_count} pages produced content"
+            )
+
+        logger.info(
+            "pymupdf4llm extraction: %d pages, %d text blocks, "
+            "%d tables for %s",
+            page_count, len(text_blocks), len(tables), registry_id,
+        )
+        return text_blocks, tables, page_count, landscape_pages
+
+    def _parse_markdown_blocks(
+        self,
+        md_text: str,
+        page_num: int,
+        run_id: str,
+        registry_id: str,
+        source_sha256: str,
+    ) -> list["TextBlock"]:
+        """Parse normalised markdown into TextBlock instances.
+
+        Strips markdown syntax so TextBlock.text contains plain text,
+        preserving backward compatibility with existing consumers.
+        Block type is inferred from markdown syntax (more accurate than
+        the heuristic classifier used by pdfplumber).
+
+        Args:
+            md_text: Normalised markdown for one page.
+            page_num: 1-based page number.
+            run_id: Extraction run UUID4.
+            registry_id: Trial identifier.
+            source_sha256: Source SHA-256.
+
+        Returns:
+            List of TextBlock instances.
+        """
+        import re
+
+        from .models import TextBlock
+
+        blocks: list[TextBlock] = []
+        block_index = 0
+
+        for line in md_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Skip table rows (handled by _parse_markdown_tables)
+            if stripped.startswith("|"):
+                continue
+            # Skip horizontal rules / page separators
+            if re.match(r"^-{3,}$", stripped):
+                continue
+
+            # Detect block type from markdown syntax
+            if stripped.startswith("#"):
+                block_type = "heading"
+                text = re.sub(r"^#+\s*", "", stripped)
+            elif re.match(r"^[-*+]\s", stripped):
+                block_type = "list_item"
+                text = stripped
+            elif re.match(r"^\d+[.)]\s", stripped):
+                block_type = "list_item"
+                text = stripped
+            else:
+                block_type = "paragraph"
+                text = stripped
+
+            # Strip markdown formatting for plain-text compatibility
+            text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+            text = re.sub(r"\*(.+?)\*", r"\1", text)
+            text = re.sub(r"_(.+?)_", r"\1", text)
+
+            word_count = len(text.split())
+            if word_count < self._min_words:
+                continue
+
+            blocks.append(
+                TextBlock(
+                    run_id=run_id,
+                    source_registry_id=registry_id,
+                    source_sha256=source_sha256,
+                    page_number=page_num,
+                    block_index=block_index,
+                    text=text,
+                    block_type=block_type,
+                )
+            )
+            block_index += 1
+
+        return blocks
+
+    def _parse_markdown_tables(
+        self,
+        md_text: str,
+        page_num: int,
+        run_id: str,
+        registry_id: str,
+        source_sha256: str,
+        table_index_start: int,
+    ) -> list["ExtractedTable"]:
+        """Parse markdown tables into ExtractedTable objects.
+
+        Detects contiguous blocks of ``|``-delimited rows, separates
+        the header row from the separator and data rows, and builds
+        ExtractedTable instances compatible with the pdfplumber schema.
+
+        Args:
+            md_text: Normalised markdown for one page.
+            page_num: 1-based page number.
+            run_id: Extraction run UUID4.
+            registry_id: Trial identifier.
+            source_sha256: Source SHA-256.
+            table_index_start: Starting table_index for numbering.
+
+        Returns:
+            List of ExtractedTable instances.
+        """
+        tables: list["ExtractedTable"] = []
+        table_index = table_index_start
+
+        lines = md_text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line.startswith("|"):
+                i += 1
+                continue
+
+            # Collect contiguous table rows
+            table_lines: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            # Need header + separator + at least 1 data row
+            if len(table_lines) < 3:
+                continue
+
+            # First row = header, second = separator (skip), rest = data
+            header = self._parse_table_row(table_lines[0])
+            data_rows = [
+                self._parse_table_row(r)
+                for r in table_lines[2:]
+                if not all(
+                    c.strip() in ("", "---", "---:")
+                    for c in r.strip("|").split("|")
+                )
+            ]
+
+            if header and data_rows:
+                extracted = self._build_table(
+                    header=header,
+                    rows=data_rows,
+                    page_num=page_num,
+                    table_index=table_index,
+                    run_id=run_id,
+                    registry_id=registry_id,
+                    source_sha256=source_sha256,
+                    extractor="pymupdf4llm",
+                )
+                tables.append(extracted)
+                table_index += 1
+
+        return tables
+
+    @staticmethod
+    def _parse_table_row(line: str) -> list[str]:
+        """Parse a markdown table row ``|a|b|c|`` into cell strings."""
+        cells = line.strip("|").split("|")
+        return [cell.strip() for cell in cells]
+
+    # ------------------------------------------------------------------
+    # pdfplumber fallback extraction
+    # ------------------------------------------------------------------
+
+    def _extract_pdfplumber(
+        self,
+        pdf_bytes: bytes,
+        run_id: str,
+        registry_id: str,
+        source_sha256: str,
+        landscape_pages: list[int],
+    ) -> tuple[list["TextBlock"], list["ExtractedTable"], int, list[int]]:
+        """Fallback extraction using pdfplumber + Camelot + tabula.
+
+        This is the original PTCV-19 cascade, retained as a fallback
+        when pymupdf4llm is unavailable or fails.
+        """
+        import io
+
+        import pdfplumber
 
         text_blocks: list[TextBlock] = []
         raw_tables_by_page: list[list[list[list[str]]]] = []
@@ -174,18 +448,16 @@ class PdfExtractor:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             page_count = len(pdf.pages)
             for page_num, page in enumerate(pdf.pages, start=1):
-                # ---- Text extraction --------------------------------
                 blocks = self._extract_text_blocks(
-                    page, page_num, run_id, registry_id, source_sha256
+                    page, page_num, run_id, registry_id, source_sha256,
                 )
                 text_blocks.extend(blocks)
-
-                # ---- Table extraction per page ----------------------
                 page_tables = self._extract_tables_pdfplumber(page)
                 raw_tables_by_page.append(page_tables)
 
-        # Reconstruct multi-page tables
-        merged_pages = self._reconstruct_multi_page_tables(raw_tables_by_page)
+        merged_pages = self._reconstruct_multi_page_tables(
+            raw_tables_by_page,
+        )
 
         tables: list[ExtractedTable] = []
         table_index = 0
@@ -195,7 +467,6 @@ class PdfExtractor:
                     continue
                 header = table_data[0]
                 rows = table_data[1:]
-                # Fallback to Camelot / tabula if pdfplumber gave 0 data rows
                 extracted = self._build_table(
                     header=header,
                     rows=rows,
@@ -209,7 +480,6 @@ class PdfExtractor:
                 tables.append(extracted)
                 table_index += 1
 
-        # For pages where pdfplumber found no tables, try Camelot then tabula
         tables_from_fallback = self._fallback_extract(
             pdf_bytes=pdf_bytes,
             pages_with_tables={t.page_number for t in tables},
@@ -221,6 +491,11 @@ class PdfExtractor:
         )
         tables.extend(tables_from_fallback)
 
+        logger.info(
+            "pdfplumber fallback extraction: %d pages, %d text blocks, "
+            "%d tables for %s",
+            page_count, len(text_blocks), len(tables), registry_id,
+        )
         return text_blocks, tables, page_count, landscape_pages
 
     # ------------------------------------------------------------------

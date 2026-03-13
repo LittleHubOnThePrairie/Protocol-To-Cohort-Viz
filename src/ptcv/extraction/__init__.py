@@ -18,6 +18,12 @@ Public API:
 from .ctr_xml_extractor import CtrXmlExtractor
 from .extraction_service import ExtractionService
 from .format_detector import FormatDetector, ProtocolFormat
+from .markdown_normalizer import (
+    NormalizedResult,
+    NormalizationStats,
+    TOCItem,
+    normalize_markdown,
+)
 from .models import ExtractionMetadata, ExtractionResult, ExtractedTable, TextBlock
 from .parquet_writer import (
     metadata_to_parquet,
@@ -29,6 +35,12 @@ from .parquet_writer import (
 )
 from .pdf_extractor import PdfExtractor
 
+# Optional vision enhancement (requires anthropic + fitz)
+try:
+    from .vision_enhancer import VisionEnhancer, VisionEnhancementResult
+except ImportError:
+    pass
+
 __all__ = [
     "ProtocolFormat",
     "FormatDetector",
@@ -39,10 +51,16 @@ __all__ = [
     "TextBlock",
     "ExtractedTable",
     "ExtractionMetadata",
+    "NormalizedResult",
+    "NormalizationStats",
+    "TOCItem",
+    "normalize_markdown",
     "text_blocks_to_parquet",
     "tables_to_parquet",
     "metadata_to_parquet",
     "parquet_to_text_blocks",
     "parquet_to_tables",
     "parquet_to_metadata",
+    "VisionEnhancer",
+    "VisionEnhancementResult",
 ]

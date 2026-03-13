@@ -1,4 +1,5 @@
 # PTCV runtime dependencies
+# Python 3.13 required (CUDA torch compatibility)
 # Install with: pip install -r requirements.txt
 
 # Storage (PTCV-29)
@@ -6,12 +7,17 @@ minio>=7.2.0
 pyarrow>=14.0.0
 duckdb>=0.10.0
 
-# PDF extraction (PTCV-19)
+# PDF extraction (PTCV-19, PTCV-170)
+PyMuPDF>=1.24.0
+pymupdf4llm>=0.0.17
 pdfplumber>=0.11.0
 camelot-py[base]>=0.11.0
 tabula-py>=2.9.0
 pandas>=2.0.0
 numpy>=1.24.0
+
+# NLP (PTCV-96 section matching)
+spacy>=3.8.0
 
 # XML parsing (PTCV-19 CTR-XML)
 lxml>=5.0.0

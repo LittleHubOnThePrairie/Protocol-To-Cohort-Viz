@@ -209,14 +209,22 @@ class TestAccessors:
         assert result == []
 
     def test_get_queries_by_schema_section(self):
-        # B.15 and B.16 in the query schema map to "B.14" in the
-        # existing ich_e6r3_schema.yaml
+        # B.14, B.15, B.16 each have their own schema_section (PTCV-135)
         b14_schema = get_queries_by_schema_section("B.14")
-        assert len(b14_schema) >= 3  # B.14 + B.15 + B.16 queries
-        parent_sections = {q.parent_section for q in b14_schema}
-        assert "B.14" in parent_sections
-        assert "B.15" in parent_sections
-        assert "B.16" in parent_sections
+        assert len(b14_schema) >= 1
+        assert all(q.schema_section == "B.14" for q in b14_schema)
+
+    def test_b15_has_own_schema_section(self):
+        """B.15 queries reference schema_section B.15 (PTCV-135)."""
+        b15_schema = get_queries_by_schema_section("B.15")
+        assert len(b15_schema) >= 1
+        assert all(q.schema_section == "B.15" for q in b15_schema)
+
+    def test_b16_has_own_schema_section(self):
+        """B.16 queries reference schema_section B.16 (PTCV-135)."""
+        b16_schema = get_queries_by_schema_section("B.16")
+        assert len(b16_schema) >= 1
+        assert all(q.schema_section == "B.16" for q in b16_schema)
 
     def test_get_parent_sections_sorted(self):
         parents = get_parent_sections()

@@ -523,4 +523,32 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Evaluate PTCV-60 pipeline on sample PDFs.",
+    )
+    parser.add_argument(
+        "--force-extraction-level",
+        choices=["E1", "E2", "E3"],
+        default=None,
+        help="Force extraction degradation level (PTCV-163).",
+    )
+    parser.add_argument(
+        "--force-classification-level",
+        choices=["C1", "C2", "C3", "C4", "C5"],
+        default=None,
+        help="Force classification degradation level (PTCV-163).",
+    )
+    args = parser.parse_args()
+
+    if args.force_extraction_level:
+        os.environ["PTCV_FORCE_EXTRACTION_LEVEL"] = (
+            args.force_extraction_level
+        )
+    if args.force_classification_level:
+        os.environ["PTCV_FORCE_CLASSIFICATION_LEVEL"] = (
+            args.force_classification_level
+        )
+
     main()

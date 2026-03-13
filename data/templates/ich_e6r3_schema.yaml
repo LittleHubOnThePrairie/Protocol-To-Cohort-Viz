@@ -421,6 +421,12 @@ configuration:
   # Replaces _REVIEW_THRESHOLD (llm_retemplater.py) and
   # REVIEW_THRESHOLD (classifier.py).
   review_threshold_default: 0.70
+
+  # Classification cascade threshold (PTCV-161).
+  # Sections with local confidence >= this are accepted without Sonnet.
+  # Falls back to review_threshold_default if not specified.
+  cascade_threshold_default: 0.70
+
   section_thresholds:
     B.4: 0.85   # SoA-critical — higher bar
     B.5: 0.80   # Eligibility criteria — important

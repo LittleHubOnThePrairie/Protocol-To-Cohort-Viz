@@ -152,6 +152,8 @@ _CYCLE_SHORT_RE = re.compile(r"C(\d+)D(\d+)", re.IGNORECASE)
 _YEAR_RE = re.compile(r"[Yy]ear\s*(\d+)")
 # "Month 3" / "Month 6"
 _MONTH_RE = re.compile(r"[Mm]onth\s*(\d+)")
+# "V2", "Visit 3", "Visit 4/ET" (PTCV-131)
+_VISIT_NUM_RE = re.compile(r"(?:[Vv]isit\s*|[Vv])(\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +544,28 @@ class SynonymResolver:
                 mandatory=True,
                 method="regex",
                 confidence=self._REGEX_CONFIDENCE,
+            )
+
+        # Visit number: "V2", "Visit 3", "V4/ET" (PTCV-131)
+        m = _VISIT_NUM_RE.search(text)
+        if m:
+            num = int(m.group(1))
+            if num == 0:
+                vtype = "Screening"
+            elif num == 1:
+                vtype = "Baseline"
+            else:
+                vtype = "Treatment"
+            return ResolvedVisit(
+                visit_type=vtype,
+                day_offset=num,
+                window_early=0,
+                window_late=0,
+                conditional_rule="",
+                repeat_cycle="",
+                mandatory=True,
+                method="regex",
+                confidence=0.70,
             )
 
         return None

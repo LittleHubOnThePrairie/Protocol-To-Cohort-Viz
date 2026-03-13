@@ -676,3 +676,111 @@ class TestEdgeCases:
         )
         expected_domains = {"TS", "TA", "TE", "TV", "TI"}
         assert set(result.domain_row_counts.keys()) == expected_domains
+
+    def test_source_type_default_is_ich_section(self, service, all_sections, timepoints):
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-run-srctype",
+        )
+        assert result.source_type == "ich_section"
+
+
+# ---------------------------------------------------------------------------
+# PTCV-140: generate_from_assembled() tests
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateFromAssembled:
+    """SDTM generation from query pipeline AssembledProtocol."""
+
+    def test_produces_all_domains(
+        self, service, assembled_protocol, timepoints,
+    ):
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-001",
+        )
+        expected = {"ts", "ta", "te", "tv", "ti", "define"}
+        assert set(result.artifact_keys.keys()) == expected
+
+    def test_source_type_is_query_pipeline(
+        self, service, assembled_protocol, timepoints,
+    ):
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-002",
+        )
+        assert result.source_type == "query_pipeline"
+
+    def test_xpt_artifacts_sha256_verified(
+        self, service, assembled_protocol, timepoints, tmp_gateway,
+    ):
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-003",
+        )
+        for domain in ["ts", "ta", "te", "tv", "ti"]:
+            stored_bytes = tmp_gateway.get_artifact(result.artifact_keys[domain])
+            computed = hashlib.sha256(stored_bytes).hexdigest()
+            assert computed == result.artifact_sha256s[domain]
+
+    def test_ts_has_title_and_pcntid(
+        self, service, assembled_protocol, timepoints,
+    ):
+        """Query pipeline should populate TITLE and PCNTID directly."""
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-004",
+        )
+        assert result.domain_row_counts["TS"] >= 2  # at least TITLE + PCNTID
+
+    def test_ti_has_inclusion_and_exclusion(
+        self, service, assembled_protocol, timepoints,
+    ):
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-005",
+        )
+        # 3 inclusion + 2 exclusion = 5 criteria
+        assert result.domain_row_counts["TI"] == 5
+
+    def test_tv_row_count_matches_timepoints(
+        self, service, assembled_protocol, timepoints,
+    ):
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-006",
+        )
+        assert result.domain_row_counts["TV"] == len(timepoints)
+
+    def test_worm_protection(
+        self, service, assembled_protocol, timepoints,
+    ):
+        """Same run_id raises FileExistsError (WORM)."""
+        service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-asm-worm",
+        )
+        with pytest.raises(FileExistsError):
+            service.generate_from_assembled(
+                assembled=assembled_protocol,
+                timepoints=timepoints,
+                registry_id="NCT00112827",
+                run_id="test-asm-worm",
+            )

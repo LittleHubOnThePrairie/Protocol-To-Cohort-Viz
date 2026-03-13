@@ -1,0 +1,19 @@
+# ML dependencies for NeoBERT fine-tuning (PTCV-164).
+# Install separately from runtime requirements:
+#   pip install -r requirements-ml.txt
+#
+# For CUDA support on RTX 3060 (compute 8.6):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+torch>=2.10.0
+torchvision>=0.25.0
+transformers>=4.38.0
+scikit-learn>=1.4.0
+datasets>=2.17.0
+accelerate>=0.27.0
+xformers>=0.0.25
+safetensors>=0.4.0
+
+# RAG index for section classification (PTCV-162)
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4

@@ -24,14 +24,18 @@ Regulatory references:
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 from ..ich_parser.models import IchSection, ReviewQueueEntry
 from ..ich_parser.review_queue import ReviewQueue
 from ..storage import FilesystemAdapter, StorageGateway
+from .llm_soa_builder import LlmSoaBuilder, MIN_ACTIVITIES_THRESHOLD
 from .mapper import UsdmMapper
 from .models import ExtractResult, SynonymMapping
 from .parser import SoaTableParser
@@ -79,6 +83,7 @@ class SoaExtractor:
         self._review_queue = review_queue
         self._parser = SoaTableParser()
         self._discovery = TableDiscovery()
+        self._llm_builder = LlmSoaBuilder()
         self._mapper = UsdmMapper(resolver=SynonymResolver())
         self._writer = UsdmParquetWriter()
 
@@ -143,10 +148,15 @@ class SoaExtractor:
         [PTCV-21 Scenario: Extract SoA to USDM Parquet with lineage]
         [PTCV-21 Scenario: Lineage chain verifiable from USDM back to download]
         """
-        if not sections and not extracted_tables and pdf_bytes is None:
+        if (
+            not sections
+            and not extracted_tables
+            and pdf_bytes is None
+            and not text_blocks
+        ):
             raise ValueError(
                 "At least one input source required: sections, "
-                "extracted_tables, or pdf_bytes"
+                "extracted_tables, pdf_bytes, or text_blocks"
             )
 
         run_id = str(uuid.uuid4())
@@ -171,6 +181,26 @@ class SoaExtractor:
         if not tables and sections:
             table = self._parser.parse(sections)
             tables = [table] if table is not None else []
+
+        # Level 3 (PTCV-166): LLM SoA construction from text
+        activity_count = sum(len(t.activities) for t in tables)
+        if activity_count < MIN_ACTIVITIES_THRESHOLD:
+            partial_tables = tables if tables else None
+            try:
+                llm_tables = self._llm_builder.build(
+                    sections=sections,
+                    text_blocks=text_blocks,
+                    partial_tables=partial_tables,
+                )
+                if llm_tables:
+                    tables = llm_tables
+            except Exception:
+                logger.warning(
+                    "Level 3 LLM SoA construction failed for %s; "
+                    "continuing with Level 1/2 results",
+                    registry_id,
+                    exc_info=True,
+                )
 
         # 2. Map to USDM entities (empty table list → zero entities)
         epochs, timepoints, activities, instances, synonyms = self._mapper.map(

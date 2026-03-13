@@ -5,13 +5,14 @@ SDTM package, using a single shared StorageGateway instance injected into
 every stage service.
 
 Pipeline sequence (PTCV-60 document-first reordering):
-  PTCV-18  Protocol download  (input: protocol bytes + sha256)
-  PTCV-19  ExtractionService  (PDF/XML → text_blocks + tables Parquet)
-  PTCV-21  SoaExtractor       (tables/PDF → USDM Parquet) — MOVED BEFORE ICH
-  PTCV-60  LlmRetemplater     (text → ICH sections Parquet via Claude)
-  PTCV-60  CoverageReviewer   (text overlap quality gate)
-  PTCV-22  SdtmService        (ICH sections + USDM timepoints → XPT + define.xml)
-  PTCV-23  ValidationService  (XPT + define.xml → P21/TCG/compliance reports)
+  PTCV-18  Protocol download    (input: protocol bytes + sha256)
+  PTCV-19  ExtractionService    (PDF/XML → text_blocks + tables Parquet)
+  PTCV-21  SoaExtractor         (tables/PDF → USDM Parquet) — MOVED BEFORE ICH
+  PTCV-161 ClassificationRouter (local/Sonnet cascade routing)
+  PTCV-60  LlmRetemplater       (text → ICH sections Parquet via Claude)
+  PTCV-60  CoverageReviewer     (text overlap quality gate)
+  PTCV-22  SdtmService          (ICH sections + USDM timepoints → XPT + define.xml)
+  PTCV-23  ValidationService    (XPT + define.xml → P21/TCG/compliance reports)
 
 After each stage, the orchestrator writes a lightweight JSON checkpoint
 artifact under the orchestrator's pipeline_run_id via StorageGateway, so
@@ -31,14 +32,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..extraction.models import ExtractionResult
 from ..extraction.extraction_service import ExtractionService
 from ..extraction.parquet_writer import parquet_to_tables, parquet_to_text_blocks
+from ..ich_parser.classification_router import (
+    CascadeResult,
+    ClassificationRouter,
+)
 from ..ich_parser.coverage_reviewer import CoverageReviewer, CoverageResult
 from ..ich_parser.fidelity_checker import FidelityChecker, FidelityResult
 from ..ich_parser.llm_retemplater import LlmRetemplater, RetemplatingResult
@@ -54,6 +60,14 @@ from ..sdtm.review_queue import CtReviewQueue
 from ..sdtm.validation.validation_service import ValidationService
 from ..sdtm.validation.models import ValidationResult
 from ..storage import FilesystemAdapter, StorageGateway
+from .degradation import (
+    ClassificationLevel,
+    ExtractionLevel,
+    detect_capabilities,
+    log_pipeline_strategy,
+    select_classification_level,
+    select_extraction_level,
+)
 from .models import LineageChainVerification, PipelineResult, StageCheckpoint
 
 logger = logging.getLogger(__name__)
@@ -88,6 +102,13 @@ class PipelineOrchestrator:
         ct_review_queue: Optional[CtReviewQueue] = None,
         retemplater: Optional[LlmRetemplater] = None,
         enable_fidelity_check: bool = False,
+        cascade_router: Optional[ClassificationRouter] = None,
+        enable_cascade: bool = True,
+        # PTCV-163: degradation chain overrides
+        extraction_level: Optional[ExtractionLevel] = None,
+        classification_level: Optional[ClassificationLevel] = None,
+        # PTCV-162: RAG index for classification context
+        rag_index: Any = None,
     ) -> None:
         if gateway is None:
             gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
@@ -101,6 +122,11 @@ class PipelineOrchestrator:
         self._ct_review_queue = ct_review_queue
         self._retemplater = retemplater
         self._enable_fidelity_check = enable_fidelity_check
+        self._cascade_router = cascade_router
+        self._enable_cascade = enable_cascade
+        self._extraction_level = extraction_level
+        self._classification_level = classification_level
+        self._rag_index = rag_index
 
     # ------------------------------------------------------------------
     # Public interface
@@ -156,6 +182,41 @@ class PipelineOrchestrator:
             import hashlib
             source_sha256 = hashlib.sha256(protocol_data).hexdigest()
 
+        # PTCV-163: Detect capabilities and select degradation levels
+        capabilities = detect_capabilities()
+        ext_level = self._extraction_level or select_extraction_level(
+            capabilities,
+        )
+        cls_level = self._classification_level or select_classification_level(
+            capabilities,
+        )
+        log_pipeline_strategy(ext_level, cls_level, capabilities)
+        extraction_method = f"{ext_level.name}:{ext_level.value}"
+        classification_method = f"{cls_level.name}:{cls_level.value}"
+
+        # PTCV-162: Auto-load RAG index for C1 classification level
+        if (
+            cls_level == ClassificationLevel.C1
+            and self._rag_index is None
+            and capabilities.has_rag_index
+        ):
+            try:
+                from ..ich_parser.rag_index import RagIndex
+
+                index_path = os.environ.get("PTCV_RAG_INDEX", "")
+                if index_path:
+                    self._rag_index = RagIndex.load(index_path)
+                    logger.info(
+                        "RAG index loaded: %d sections from %s",
+                        self._rag_index.stats.total_sections,
+                        index_path,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to load RAG index; proceeding at C2",
+                    exc_info=True,
+                )
+
         logger.info(
             "Pipeline started: pipeline_run_id=%s registry_id=%s",
             pipeline_run_id,
@@ -197,6 +258,7 @@ class PipelineOrchestrator:
             source_sha256=source_sha256,
             filename=filename,
             source=source,
+            ext_level=ext_level,  # PTCV-172: vision enhancement for E1
         )
 
         extraction_cp = self._write_checkpoint(
@@ -314,10 +376,119 @@ class PipelineOrchestrator:
         checkpoints.append(soa_cp)
 
         # ----------------------------------------------------------------
-        # Stage 3: LLM Retemplating (PTCV-60) — NEW
-        # Classify text into ICH sections using Claude, enriched with SoA.
+        # Stage 2a: Classification Cascade (PTCV-161)
+        # Route low-confidence classifications to Sonnet for judgement.
         # ----------------------------------------------------------------
-        logger.info("Stage retemplating: running LlmRetemplater")
+        cascade_result: Optional[CascadeResult] = None
+        cascade_source_sha = soa_cp.artifact_sha256
+        cascade_source_run_id = soa_result.run_id
+
+        if self._enable_cascade:
+            logger.info(
+                "Stage classification_cascade: "
+                "running ClassificationRouter"
+            )
+            cascade_run_id = str(uuid.uuid4())
+            router = self._cascade_router or ClassificationRouter(
+                gateway=self._gateway,
+                rag_index=self._rag_index,
+            )
+            cascade_result = router.classify(
+                text_blocks=text_block_dicts,
+                registry_id=registry_id,
+                run_id=cascade_run_id,
+                source_run_id=soa_result.run_id,
+                source_sha256=soa_cp.artifact_sha256,
+            )
+
+            import hashlib
+
+            cascade_payload = json.dumps({
+                "stage": "classification_cascade",
+                "stage_run_id": cascade_run_id,
+                "total_sections": (
+                    cascade_result.stats.total_sections
+                ),
+                "local_count": cascade_result.stats.local_count,
+                "sonnet_count": cascade_result.stats.sonnet_count,
+                "local_pct": cascade_result.stats.local_pct,
+                "sonnet_pct": cascade_result.stats.sonnet_pct,
+                "agreements": cascade_result.stats.agreements,
+                "disagreements": cascade_result.stats.disagreements,
+                "judgement_artifact_key": (
+                    cascade_result.judgement_artifact_key
+                ),
+                "judgement_artifact_sha256": (
+                    cascade_result.judgement_artifact_sha256
+                ),
+                "total_input_tokens": (
+                    cascade_result.stats.total_input_tokens
+                ),
+                "total_output_tokens": (
+                    cascade_result.stats.total_output_tokens
+                ),
+            }).encode("utf-8")
+            cascade_sha256 = hashlib.sha256(
+                cascade_payload
+            ).hexdigest()
+
+            cascade_cp = self._write_checkpoint(
+                pipeline_run_id=pipeline_run_id,
+                stage="classification_cascade",
+                stage_run_id=cascade_run_id,
+                artifact_key=(
+                    f"pipeline/{pipeline_run_id}/"
+                    "stage-03a-cascade.json"
+                ),
+                payload={
+                    "stage": "classification_cascade",
+                    "stage_run_id": cascade_run_id,
+                    "total_sections": (
+                        cascade_result.stats.total_sections
+                    ),
+                    "local_count": (
+                        cascade_result.stats.local_count
+                    ),
+                    "sonnet_count": (
+                        cascade_result.stats.sonnet_count
+                    ),
+                    "local_pct": cascade_result.stats.local_pct,
+                    "sonnet_pct": cascade_result.stats.sonnet_pct,
+                    "agreements": (
+                        cascade_result.stats.agreements
+                    ),
+                    "disagreements": (
+                        cascade_result.stats.disagreements
+                    ),
+                    "judgement_artifact_key": (
+                        cascade_result.judgement_artifact_key
+                    ),
+                    "judgement_artifact_sha256": (
+                        cascade_result.judgement_artifact_sha256
+                    ),
+                    "total_input_tokens": (
+                        cascade_result.stats.total_input_tokens
+                    ),
+                    "total_output_tokens": (
+                        cascade_result.stats.total_output_tokens
+                    ),
+                },
+                artifact_sha256=cascade_sha256,
+                source_sha256=soa_cp.artifact_sha256,
+            )
+            checkpoints.append(cascade_cp)
+            cascade_source_sha = cascade_cp.artifact_sha256
+            cascade_source_run_id = cascade_run_id
+
+        # ----------------------------------------------------------------
+        # Stage 3: Retemplating (PTCV-60, PTCV-163)
+        # Classify text into ICH sections. Method depends on
+        # classification level selected by the degradation chain.
+        # ----------------------------------------------------------------
+        logger.info(
+            "Stage retemplating: classification_level=%s",
+            cls_level.name,
+        )
 
         # Build SoA summary for B.4 enrichment
         soa_summary: Optional[dict] = None
@@ -327,17 +498,32 @@ class PipelineOrchestrator:
                 "activity_count": soa_result.activity_count,
             }
 
-        retemplater = self._retemplater or LlmRetemplater(
-            gateway=self._gateway,
-            review_queue=self._review_queue,
-        )
-        retemplating_result: RetemplatingResult = retemplater.retemplate(
-            text_blocks=text_block_dicts,
-            registry_id=registry_id,
-            source_run_id=soa_result.run_id,
-            source_sha256=soa_cp.artifact_sha256,
-            soa_summary=soa_summary,
-        )
+        if cls_level in (
+            ClassificationLevel.C1,
+            ClassificationLevel.C2,
+            ClassificationLevel.C3,
+        ):
+            # C1/C2/C3: LLM-based retemplating (current behavior)
+            retemplater = self._retemplater or LlmRetemplater(
+                gateway=self._gateway,
+                review_queue=self._review_queue,
+            )
+            retemplating_result: RetemplatingResult = retemplater.retemplate(
+                text_blocks=text_block_dicts,
+                registry_id=registry_id,
+                source_run_id=cascade_source_run_id,
+                source_sha256=cascade_source_sha,
+                soa_summary=soa_summary,
+            )
+        else:
+            # C4/C5: No LLM — use classifier directly
+            retemplating_result = self._classify_without_llm(
+                cls_level=cls_level,
+                text_block_dicts=text_block_dicts,
+                registry_id=registry_id,
+                source_run_id=cascade_source_run_id,
+                source_sha256=cascade_source_sha,
+            )
 
         retemplating_cp = self._write_checkpoint(
             pipeline_run_id=pipeline_run_id,
@@ -360,7 +546,7 @@ class PipelineOrchestrator:
                 "chunk_count": retemplating_result.chunk_count,
             },
             artifact_sha256=retemplating_result.artifact_sha256,
-            source_sha256=soa_cp.artifact_sha256,
+            source_sha256=cascade_source_sha,
         )
         checkpoints.append(retemplating_cp)
 
@@ -375,6 +561,23 @@ class PipelineOrchestrator:
             retemplating_result.artifact_key,
         )
         sections = parquet_to_sections(sections_bytes)
+
+        # PTCV-162: Incrementally update RAG index with new sections
+        if self._rag_index is not None and sections:
+            try:
+                added = self._rag_index.add_sections(sections)
+                if added > 0:
+                    self._rag_index.save()
+                    logger.info(
+                        "RAG index updated: +%d sections (total: %d)",
+                        added,
+                        self._rag_index.stats.total_sections,
+                    )
+            except Exception:
+                logger.debug(
+                    "RAG index update failed; non-blocking",
+                    exc_info=True,
+                )
 
         reviewer = CoverageReviewer()
         coverage_result: CoverageResult = reviewer.review(
@@ -613,11 +816,146 @@ class PipelineOrchestrator:
             stage_checkpoints=checkpoints,
             pipeline_timestamp_utc=timestamp,
             fidelity_result=fidelity_result,
+            cascade_result=cascade_result,
+            extraction_method=extraction_method,
+            classification_method=classification_method,
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _classify_without_llm(
+        self,
+        cls_level: ClassificationLevel,
+        text_block_dicts: list[dict],
+        registry_id: str,
+        source_run_id: str,
+        source_sha256: str,
+    ) -> RetemplatingResult:
+        """Run classification without LLM calls (C4/C5 degradation).
+
+        Follows the same artifact-writing pattern as MockLlmRetemplater
+        in tests/pipeline/conftest.py: build IchSections, write
+        sections.parquet, return RetemplatingResult.
+
+        Args:
+            cls_level: C4 (NeoBERT+RuleBased) or C5 (RuleBased only).
+            text_block_dicts: Extracted text blocks as list of dicts.
+            registry_id: Trial identifier.
+            source_run_id: Upstream stage run_id.
+            source_sha256: Upstream artifact sha256.
+
+        Returns:
+            RetemplatingResult with input_tokens=0, output_tokens=0.
+        """
+        import hashlib
+
+        from ..ich_parser.classifier import RuleBasedClassifier
+        from ..ich_parser.llm_retemplater import RetemplatingResult
+        from ..ich_parser.models import IchSection
+        from ..ich_parser.parquet_writer import sections_to_parquet
+        from ..ich_parser.parser import _compute_format_verdict
+
+        run_id = str(uuid.uuid4())
+        full_text = "\n".join(
+            b.get("text", "") for b in text_block_dicts
+        )
+
+        if cls_level == ClassificationLevel.C4:
+            # NeoBERT primary with RuleBased fallback
+            try:
+                from ..ich_parser.neobert_classifier import (
+                    NeoBERTClassifier,
+                )
+                import os
+                model_path = os.environ.get(
+                    "PTCV_NEOBERT_MODEL", "data/models/neobert",
+                )
+                classifier = NeoBERTClassifier(model_path=model_path)
+                sections = classifier.classify(
+                    text=full_text,
+                    registry_id=registry_id,
+                    run_id=run_id,
+                    source_run_id=source_run_id,
+                    source_sha256=source_sha256,
+                )
+                # Fallback: if NeoBERT produced nothing, use RuleBased
+                if not sections:
+                    logger.warning(
+                        "C4: NeoBERT produced no sections; "
+                        "falling back to RuleBasedClassifier",
+                    )
+                    fallback = RuleBasedClassifier()
+                    sections = fallback.classify(
+                        text=full_text,
+                        registry_id=registry_id,
+                        run_id=run_id,
+                        source_run_id=source_run_id,
+                        source_sha256=source_sha256,
+                    )
+            except (ImportError, FileNotFoundError) as exc:
+                logger.warning(
+                    "C4: NeoBERT unavailable (%s); "
+                    "falling back to RuleBasedClassifier",
+                    exc,
+                )
+                fallback = RuleBasedClassifier()
+                sections = fallback.classify(
+                    text=full_text,
+                    registry_id=registry_id,
+                    run_id=run_id,
+                    source_run_id=source_run_id,
+                    source_sha256=source_sha256,
+                )
+        else:
+            # C5: RuleBasedClassifier only
+            classifier_rb = RuleBasedClassifier()
+            sections = classifier_rb.classify(
+                text=full_text,
+                registry_id=registry_id,
+                run_id=run_id,
+                source_run_id=source_run_id,
+                source_sha256=source_sha256,
+            )
+
+        # Write sections.parquet to gateway (same as LlmRetemplater)
+        parquet_bytes = sections_to_parquet(sections)
+        artifact_key = f"ich-json/{run_id}/sections.parquet"
+        self._gateway.put_artifact(
+            key=artifact_key,
+            data=parquet_bytes,
+            content_type="application/vnd.apache.parquet",
+            run_id=run_id,
+            source_hash=source_sha256,
+            user=_USER,
+            immutable=False,
+            stage="retemplating",
+            registry_id=registry_id,
+        )
+
+        artifact_sha256 = hashlib.sha256(parquet_bytes).hexdigest()
+        verdict, confidence, missing = _compute_format_verdict(sections)
+
+        review_count = sum(
+            1 for s in sections if s.review_required
+        )
+
+        return RetemplatingResult(
+            run_id=run_id,
+            registry_id=registry_id,
+            artifact_key=artifact_key,
+            artifact_sha256=artifact_sha256,
+            section_count=len(sections),
+            review_count=review_count,
+            source_sha256=source_sha256,
+            format_verdict=verdict,
+            format_confidence=confidence,
+            missing_required_sections=missing,
+            input_tokens=0,
+            output_tokens=0,
+            chunk_count=0,
+        )
 
     def _write_checkpoint(
         self,

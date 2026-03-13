@@ -14,6 +14,14 @@ Public API:
     VersionAncestry       — chronological version chain
 """
 
+from .degradation import (
+    ClassificationLevel,
+    ExtractionLevel,
+    PipelineCapabilities,
+    detect_capabilities,
+    select_classification_level,
+    select_extraction_level,
+)
 from .amendment_diff import (
     AmendmentChange,
     AmendmentDiff,
@@ -34,12 +42,18 @@ __all__ = [
     "AmendmentChange",
     "AmendmentDiff",
     "AmendmentDiffEngine",
+    "ClassificationLevel",
+    "ExtractionLevel",
     "LineageChainVerification",
     "PIPELINE_STAGES",
+    "PipelineCapabilities",
     "PipelineOrchestrator",
     "PipelineResult",
     "ProtocolVersion",
     "StageCheckpoint",
     "VersionAncestry",
     "create_gateway",
+    "detect_capabilities",
+    "select_classification_level",
+    "select_extraction_level",
 ]

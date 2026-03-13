@@ -20,7 +20,6 @@ import csv
 import dataclasses
 import io
 import re
-from collections import defaultdict
 from typing import Any, NamedTuple, Sequence, Union
 
 from ptcv.soa_extractor.models import (
@@ -129,7 +128,7 @@ _TYPE_TO_SWIMLANE: dict[str, str] = {
     "Treatment": "Intervention",
     "Assessment": "Clinical Encounter",
     "Vital Signs": "Clinical Encounter",
-    "ECG": "Clinical Encounter",
+    "ECG": "Other",
     "Safety": "Clinical Encounter",
     "Consent": "Clinical Encounter",
     "Lab": "Specimens",
@@ -154,6 +153,12 @@ _SPECIMEN_RE = re.compile(
     r"|\bchemistry\b|\bcoagulation\b|\burinalysis\b"
     r"|\bHep\s*[A-C]\b|\bhepatitis\b|\bblood\s+sample"
     r"|\bspecimen\b|\bserum\b|\bplasma\b",
+    re.IGNORECASE,
+)
+# PTCV-131: eDiary and ECG should be "Other", not "Clinical Encounter".
+_OTHER_RE = re.compile(
+    r"\be[-.]?diary\b|\belectronic\s+diary\b|\bpatient\s+diary\b"
+    r"|\b[Ee][Cc][Gg]\b|\belectrocardiogram\b",
     re.IGNORECASE,
 )
 
@@ -188,6 +193,11 @@ def classify_swimlane(
             activity_name
         ):
             return "Specimens"
+        # eDiary/ECG keywords override Clinical Encounter (PTCV-131)
+        if lane == "Clinical Encounter" and _OTHER_RE.search(
+            activity_name
+        ):
+            return "Other"
 
     return lane
 
@@ -217,7 +227,50 @@ def _dedup_timepoints(
 
 
 # ---------------------------------------------------------------------------
-# Grid builder (pure Python)
+# Visit sort key (PTCV-131)
+# ---------------------------------------------------------------------------
+
+_VISIT_NUM_SORT_RE = re.compile(r"[Vv](?:isit\s*)?(\d+)")
+
+
+def _visit_sort_key(tp: Any) -> tuple[int, int, str]:
+    """Sort key: (day_offset, visit_number, visit_name).
+
+    Primary sort by day_offset; visit number tiebreaks when
+    multiple visits share the same day_offset.
+    """
+    m = _VISIT_NUM_SORT_RE.search(tp.visit_name)
+    num = int(m.group(1)) if m else 0
+    return (tp.day_offset, num, tp.visit_name)
+
+
+# ---------------------------------------------------------------------------
+# Screening-anchored day rebasing (PTCV-151)
+# ---------------------------------------------------------------------------
+
+def _rebase_to_screening(
+    sorted_tps: Sequence[_TP],
+) -> dict[str, int]:
+    """Map timepoint_id to display day with screening anchored at day 0.
+
+    Finds the minimum day_offset (the screening visit) and subtracts it
+    from all offsets so that screening becomes day 0 and all subsequent
+    visits have positive offsets.
+
+    Args:
+        sorted_tps: Timepoints (need not be sorted; min is computed).
+
+    Returns:
+        Dict mapping timepoint_id to rebased display day.
+    """
+    if not sorted_tps:
+        return {}
+    min_day = min(tp.day_offset for tp in sorted_tps)
+    return {tp.timepoint_id: tp.day_offset - min_day for tp in sorted_tps}
+
+
+# ---------------------------------------------------------------------------
+# Grid builder (pure Python) — PTCV-151: assessment × visit matrix
 # ---------------------------------------------------------------------------
 
 def build_sov_grid(
@@ -225,13 +278,15 @@ def build_sov_grid(
     activities: Sequence[_ACT],
     instances: Sequence[_INST],
 ) -> list[dict[str, Any]]:
-    """Build a flat list of records for the swimlane chart.
+    """Build a flat assessment × visit matrix.
 
-    Each record represents one filled cell (visit x swimlane row)
-    with a tooltip listing the specific activities at that intersection.
+    Each record represents one scheduled (assessment, visit) pair.
+    No assessments are concatenated — each gets its own row.
 
     Duplicate timepoints (same visit_name + day_offset) are merged so
     their activities appear in a single column (PTCV-73).
+
+    Day offsets are rebased so Screening = day 0 (PTCV-151).
 
     Args:
         timepoints: USDM timepoints (visits) in protocol order.
@@ -239,8 +294,8 @@ def build_sov_grid(
         instances: Scheduled instances linking activities to timepoints.
 
     Returns:
-        List of dicts with keys: visit_name, day_offset, swimlane,
-        activities (comma-joined names), activity_count, visit_index.
+        List of dicts with keys: assessment, assessment_type, visit_label,
+        day, visit_index, activity_id.
     """
     # Deduplicate timepoints (PTCV-73)
     unique_tps, tp_id_map = _dedup_timepoints(timepoints)
@@ -250,44 +305,50 @@ def build_sov_grid(
     act_by_id = {a.activity_id: a for a in activities}
 
     # Sort unique timepoints by day_offset for x-axis ordering
-    sorted_tps = sorted(unique_tps, key=lambda t: t.day_offset)
+    sorted_tps = sorted(unique_tps, key=_visit_sort_key)
     tp_order = {tp.timepoint_id: idx for idx, tp in enumerate(sorted_tps)}
 
-    # Group: (canonical_timepoint_id, swimlane) -> list[activity_name]
-    cell_activities: dict[tuple[str, str], list[str]] = defaultdict(list)
+    # Rebase days so Screening = day 0 (PTCV-151)
+    rebased_days = _rebase_to_screening(unique_tps)
+
+    # Build one record per scheduled (assessment, visit) pair
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()  # (activity_id, canonical_tp_id)
 
     for inst in instances:
         if not inst.scheduled:
             continue
         act = act_by_id.get(inst.activity_id)
-        # Map to canonical timepoint id
         canonical_tp_id = tp_id_map.get(inst.timepoint_id)
         if act is None or canonical_tp_id is None:
             continue
         tp = tp_by_id.get(canonical_tp_id)
         if tp is None:
             continue
-        swimlane = classify_swimlane(act.activity_type, act.activity_name)
-        cell_activities[(canonical_tp_id, swimlane)].append(
-            act.activity_name
-        )
+        # Deduplicate: same activity at same canonical timepoint
+        key = (act.activity_id, canonical_tp_id)
+        if key in seen:
+            continue
+        seen.add(key)
 
-    # Build flat records
-    records: list[dict[str, Any]] = []
-    for (tp_id, swimlane), names in cell_activities.items():
-        tp = tp_by_id[tp_id]
         records.append({
-            "visit_name": tp.visit_name,
-            "day_offset": tp.day_offset,
-            "swimlane": swimlane,
-            "activities": ", ".join(sorted(set(names))),
-            "activity_count": len(set(names)),
-            "visit_index": tp_order.get(tp_id, 0),
+            "assessment": act.activity_name,
+            "assessment_type": classify_swimlane(
+                act.activity_type, act.activity_name,
+            ),
+            "visit_label": tp.visit_name,
+            "day": rebased_days.get(canonical_tp_id, tp.day_offset),
+            "visit_index": tp_order.get(canonical_tp_id, 0),
+            "activity_id": act.activity_id,
         })
 
-    # Sort by visit order then swimlane order
+    # Sort by visit order, then assessment type, then assessment name
     lane_order = {lane: i for i, lane in enumerate(SWIMLANE_ROWS)}
-    records.sort(key=lambda r: (r["visit_index"], lane_order.get(r["swimlane"], 99)))
+    records.sort(key=lambda r: (
+        r["visit_index"],
+        lane_order.get(r["assessment_type"], 99),
+        r["assessment"],
+    ))
     return records
 
 
@@ -296,9 +357,9 @@ def build_sov_csv(
     activities: Sequence[_ACT],
     instances: Sequence[_INST],
 ) -> str:
-    """Build a CSV string from the SoA grid data.
+    """Build a CSV string from the SoA assessment × visit matrix.
 
-    Columns: Visit, Day, Category, Activities
+    Columns: Assessment, Assessment Type, Visit, Day
 
     Args:
         timepoints: USDM timepoints.
@@ -311,13 +372,13 @@ def build_sov_csv(
     grid = build_sov_grid(timepoints, activities, instances)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Visit", "Day", "Category", "Activities"])
+    writer.writerow(["Assessment", "Assessment Type", "Visit", "Day"])
     for row in grid:
         writer.writerow([
-            row["visit_name"],
-            row["day_offset"],
-            row["swimlane"],
-            row["activities"],
+            row["assessment"],
+            row["assessment_type"],
+            row["visit_label"],
+            row["day"],
         ])
     return buf.getvalue()
 
@@ -333,10 +394,11 @@ def build_sov_figure(
     registry_id: str = "",
     low_confidence: bool = False,
 ) -> Any:
-    """Build a Plotly Figure for the schedule of visits swimlane chart.
+    """Build a Plotly Figure for the assessment × visit schedule chart.
 
-    Uses go.Scatter with markers to create a heatmap-like grid.
-    Each filled cell is a marker whose hover text lists the activities.
+    Y-axis shows individual assessments grouped by assessment type.
+    X-axis shows visits ordered by day offset (screening = day 0).
+    Markers indicate which assessments are scheduled at which visits.
 
     Args:
         timepoints: USDM timepoints.
@@ -365,21 +427,55 @@ def build_sov_figure(
         )
         return fig
 
-    # Deduplicate timepoints for x-axis (PTCV-73) and add day offset (PTCV-72)
-    unique_tps, _ = _dedup_timepoints(timepoints)
-    sorted_tps = sorted(unique_tps, key=lambda t: t.day_offset)
+    # Build x-axis: unique visits ordered by visit_index
+    visit_map: dict[int, tuple[str, int]] = {}  # index -> (label, day)
+    for rec in grid:
+        vi = rec["visit_index"]
+        if vi not in visit_map:
+            visit_map[vi] = (rec["visit_label"], rec["day"])
+    sorted_visits = sorted(visit_map.items())
+    visit_indices = [vi for vi, _ in sorted_visits]
     visit_labels = [
-        f"{tp.visit_name}<br><sub>Day {tp.day_offset}</sub>"
-        for tp in sorted_tps
+        f"{label}<br><sub>Day {day}</sub>"
+        for _, (label, day) in sorted_visits
     ]
-    visit_indices = list(range(len(visit_labels)))
 
-    # Swimlane row positions (bottom to top: Other=0, Imaging=1, Specimens=2, Clinical=3)
-    lane_y = {lane: i for i, lane in enumerate(reversed(SWIMLANE_ROWS))}
+    # Build y-axis: individual assessments grouped by assessment_type
+    type_assessments: dict[str, list[str]] = {}
+    for rec in grid:
+        atype = rec["assessment_type"]
+        aname = rec["assessment"]
+        if atype not in type_assessments:
+            type_assessments[atype] = []
+        if aname not in type_assessments[atype]:
+            type_assessments[atype].append(aname)
 
-    # Colour per swimlane
+    for atype in type_assessments:
+        type_assessments[atype].sort()
+
+    # Assign y-positions with gaps between type groups
+    assessment_y: dict[str, float] = {}
+    y_labels: list[str] = []
+    y_vals: list[float] = []
+    y_pos = 0.0
+    separator_ys: list[float] = []
+
+    for lane in SWIMLANE_ROWS:
+        names = type_assessments.get(lane, [])
+        if not names:
+            continue
+        if y_pos > 0:
+            separator_ys.append(y_pos - 0.5)
+        for name in names:
+            assessment_y[name] = y_pos
+            y_labels.append(name)
+            y_vals.append(y_pos)
+            y_pos += 1
+        y_pos += 0.5
+
+    # Colour per assessment type
     if low_confidence:
-        lane_colors = {
+        lane_colors: dict[str, str] = {
             "Intervention": "rgba(200,180,160,0.6)",
             "Clinical Encounter": "rgba(180,180,200,0.6)",
             "Specimens": "rgba(180,200,180,0.6)",
@@ -395,24 +491,26 @@ def build_sov_figure(
             "Other": "#AB63FA",
         }
 
-    # Build traces per swimlane for legend grouping
-    traces_by_lane: dict[str, dict[str, list]] = {
-        lane: {"x": [], "y": [], "text": [], "size": []}
+    # Build traces per assessment_type for legend grouping
+    traces_by_type: dict[str, dict[str, list]] = {
+        lane: {"x": [], "y": [], "text": []}
         for lane in SWIMLANE_ROWS
     }
 
     for rec in grid:
-        lane = rec["swimlane"]
-        traces_by_lane[lane]["x"].append(rec["visit_index"])
-        traces_by_lane[lane]["y"].append(lane_y[lane])
-        traces_by_lane[lane]["text"].append(rec["activities"])
-        traces_by_lane[lane]["size"].append(
-            min(12 + rec["activity_count"] * 4, 30)
+        atype = rec["assessment_type"]
+        y = assessment_y.get(rec["assessment"])
+        if y is None:
+            continue
+        traces_by_type[atype]["x"].append(rec["visit_index"])
+        traces_by_type[atype]["y"].append(y)
+        traces_by_type[atype]["text"].append(
+            f"{rec['assessment']}<br>{rec['visit_label']} (Day {rec['day']})"
         )
 
     fig = go.Figure()
     for lane in SWIMLANE_ROWS:
-        data = traces_by_lane[lane]
+        data = traces_by_type[lane]
         if not data["x"]:
             continue
         fig.add_trace(go.Scatter(
@@ -421,28 +519,22 @@ def build_sov_figure(
             mode="markers",
             name=lane,
             marker=dict(
-                size=data["size"],
+                size=12,
                 color=lane_colors.get(lane, "#888"),
                 symbol="circle",
                 line=dict(width=1, color="white"),
             ),
             hovertext=data["text"],
             hoverinfo="text",
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "%{customdata[1]}<br>"
-                "<i>%{hovertext}</i>"
-                "<extra></extra>"
-            ),
-            customdata=[
-                [visit_labels[x] if x < len(visit_labels) else "", lane]
-                for x in data["x"]
-            ],
+            hovertemplate="%{hovertext}<extra></extra>",
         ))
 
     title = "Schedule of Visits"
     if registry_id:
         title = f"Schedule of Visits — {registry_id}"
+
+    num_assessments = len(y_labels)
+    chart_height = max(400, 30 * num_assessments)
 
     fig.update_layout(
         title=title,
@@ -455,25 +547,219 @@ def build_sov_figure(
         ),
         yaxis=dict(
             tickmode="array",
-            tickvals=list(range(len(SWIMLANE_ROWS))),
-            ticktext=list(reversed(SWIMLANE_ROWS)),
+            tickvals=y_vals,
+            ticktext=y_labels,
             title="",
+            autorange="reversed",
         ),
-        height=350,
-        margin=dict(l=140, r=20, t=50, b=100),
+        height=chart_height,
+        margin=dict(l=200, r=20, t=50, b=100),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
         plot_bgcolor="white",
     )
 
-    # Add gridlines
-    for i in range(len(SWIMLANE_ROWS)):
+    # Separator lines between assessment type groups
+    for sy in separator_ys:
         fig.add_hline(
-            y=i - 0.5, line_dash="dot",
+            y=sy, line_dash="dot",
+            line_color="lightgrey", line_width=1,
+        )
+
+    # Vertical gridlines
+    for vi in visit_indices:
+        fig.add_vline(
+            x=vi - 0.5, line_dash="dot",
             line_color="lightgrey", line_width=0.5,
         )
-    for i in range(len(visit_labels)):
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Matrix-based chart builder (PTCV-151)
+# ---------------------------------------------------------------------------
+
+def build_sov_figure_from_matrix(
+    timepoints: Sequence[_TP],
+    activities: Sequence[_ACT],
+    instances: Sequence[_INST],
+    registry_id: str = "",
+    low_confidence: bool = False,
+) -> Any:
+    """Build assessment x visit Plotly chart via matrix_builder.
+
+    Uses matrix_builder to produce assessment-level rows, then renders
+    each (assessment, visit) as a scatter marker.  Falls back to
+    :func:`build_sov_figure` if the matrix is empty.
+    """
+    import plotly.graph_objects as go
+
+    # Lazy import to avoid circular dependency
+    from ptcv.soa_extractor.matrix_builder import (
+        build_assessment_matrix_from_usdm,
+    )
+
+    df = build_assessment_matrix_from_usdm(
+        timepoints,  # type: ignore[arg-type]
+        activities,  # type: ignore[arg-type]
+        instances,  # type: ignore[arg-type]
+        anchor_screening=True,
+    )
+
+    if df.empty:
+        return build_sov_figure(
+            timepoints, activities, instances,
+            registry_id=registry_id,
+            low_confidence=low_confidence,
+        )
+
+    # Determine type ordering: SWIMLANE_ROWS first, extras after
+    all_types = list(df["assessment_type"].unique())
+    ordered_types: list[str] = [
+        t for t in SWIMLANE_ROWS if t in all_types
+    ]
+    for t in all_types:
+        if t not in ordered_types:
+            ordered_types.append(t)
+
+    # Y-axis: assessments grouped by type
+    assessment_y: dict[str, float] = {}
+    y_labels: list[str] = []
+    y_vals: list[float] = []
+    separator_ys: list[float] = []
+    y_pos = 0.0
+
+    for atype in ordered_types:
+        names = sorted(
+            df.loc[
+                df["assessment_type"] == atype, "assessment_name"
+            ].unique(),
+        )
+        if not names:
+            continue
+        if y_pos > 0:
+            separator_ys.append(y_pos - 0.5)
+        for name in names:
+            assessment_y[name] = y_pos
+            y_labels.append(name)
+            y_vals.append(y_pos)
+            y_pos += 1
+        y_pos += 0.5
+
+    # X-axis: visits sorted by day_offset
+    visit_info = (
+        df[["visit_label", "day_offset"]]
+        .drop_duplicates()
+        .sort_values("day_offset")
+    )
+    visit_labels_list: list[str] = []
+    visit_x_map: dict[str, int] = {}
+    for i, (_, row) in enumerate(visit_info.iterrows()):
+        label = row["visit_label"]
+        day = int(row["day_offset"])
+        visit_labels_list.append(f"{label}<br><sub>Day {day}</sub>")
+        visit_x_map[label] = i
+    visit_x_vals = list(range(len(visit_labels_list)))
+
+    # Colour palette
+    if low_confidence:
+        lane_colors: dict[str, str] = {
+            "Intervention": "rgba(200,180,160,0.6)",
+            "Clinical Encounter": "rgba(180,180,200,0.6)",
+            "Specimens": "rgba(180,200,180,0.6)",
+            "Imaging": "rgba(200,180,180,0.6)",
+            "At-home": "rgba(160,200,200,0.6)",
+            "Other": "rgba(190,190,190,0.6)",
+        }
+    else:
+        lane_colors = {
+            "Intervention": "#FFA15A",
+            "Clinical Encounter": "#636EFA",
+            "Specimens": "#EF553B",
+            "Imaging": "#00CC96",
+            "At-home": "#19D3F3",
+            "Other": "#AB63FA",
+        }
+
+    # Build traces per type
+    traces_by_type: dict[str, dict[str, list]] = {
+        t: {"x": [], "y": [], "text": []} for t in ordered_types
+    }
+
+    scheduled = df[df["scheduled"]] if "scheduled" in df.columns else df
+    for _, row in scheduled.iterrows():
+        atype = row["assessment_type"]
+        aname = row["assessment_name"]
+        vlabel = row["visit_label"]
+        day = int(row["day_offset"])
+        y = assessment_y.get(aname)
+        x = visit_x_map.get(vlabel)
+        if y is None or x is None:
+            continue
+        traces_by_type[atype]["x"].append(x)
+        traces_by_type[atype]["y"].append(y)
+        traces_by_type[atype]["text"].append(
+            f"{aname}<br>{vlabel} (Day {day})",
+        )
+
+    fig = go.Figure()
+    for atype in ordered_types:
+        data = traces_by_type[atype]
+        if not data["x"]:
+            continue
+        fig.add_trace(go.Scatter(
+            x=data["x"],
+            y=data["y"],
+            mode="markers",
+            name=atype,
+            marker=dict(
+                size=14,
+                color=lane_colors.get(atype, "#888"),
+                symbol="circle",
+                line=dict(width=1, color="white"),
+            ),
+            hovertext=data["text"],
+            hoverinfo="text",
+            hovertemplate="%{hovertext}<extra></extra>",
+        ))
+
+    title = "Schedule of Visits"
+    if registry_id:
+        title = f"Schedule of Visits — {registry_id}"
+
+    n_assessments = len(y_labels)
+    chart_height = max(350, 50 + n_assessments * 22)
+
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            tickmode="array",
+            tickvals=visit_x_vals,
+            ticktext=visit_labels_list,
+            title="Visit",
+            tickangle=-45,
+        ),
+        yaxis=dict(
+            tickmode="array",
+            tickvals=y_vals,
+            ticktext=y_labels,
+            title="",
+            autorange="reversed",
+        ),
+        height=chart_height,
+        margin=dict(l=200, r=20, t=50, b=100),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        plot_bgcolor="white",
+    )
+
+    for sy in separator_ys:
+        fig.add_hline(
+            y=sy, line_dash="dot",
+            line_color="lightgrey", line_width=1,
+        )
+    for vi in visit_x_vals:
         fig.add_vline(
-            x=i - 0.5, line_dash="dot",
+            x=vi - 0.5, line_dash="dot",
             line_color="lightgrey", line_width=0.5,
         )
 
@@ -518,7 +804,7 @@ def render_schedule_of_visits(
         st.info("No schedule of visits data was extracted from this protocol.")
         return
 
-    fig = build_sov_figure(
+    fig = build_sov_figure_from_matrix(
         timepoints, activities, instances,
         registry_id=registry_id,
         low_confidence=low_confidence,

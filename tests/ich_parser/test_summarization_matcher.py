@@ -408,8 +408,11 @@ class TestEnrichedMatchResult:
 class TestSummarizationMatcherFallback:
     """SummarizationMatcher without API key (keyword-only fallback)."""
 
-    def test_no_api_key_sets_fallback(self) -> None:
+    def test_no_api_key_sets_fallback(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """No API key means LLM is disabled."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         matcher = SummarizationMatcher(anthropic_api_key=None)
         assert matcher._use_llm is False
 
@@ -417,8 +420,10 @@ class TestSummarizationMatcherFallback:
         self,
         sample_queries: list[AppendixBQuery],
         sample_protocol_index: ProtocolIndex,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Enriched result reports llm_fallback=True."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         matcher = SummarizationMatcher(anthropic_api_key=None)
         mr = _make_match_result()
         with patch(
@@ -434,8 +439,10 @@ class TestSummarizationMatcherFallback:
         self,
         sample_queries: list[AppendixBQuery],
         sample_protocol_index: ProtocolIndex,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Summarization scores are -1.0 in fallback mode."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         matcher = SummarizationMatcher(anthropic_api_key=None)
         mr = _make_match_result()
         with patch(
@@ -455,8 +462,10 @@ class TestSummarizationMatcherFallback:
         self,
         sample_queries: list[AppendixBQuery],
         sample_protocol_index: ProtocolIndex,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """All sub-matches use keyword_fallback method."""
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         matcher = SummarizationMatcher(anthropic_api_key=None)
         mr = _make_match_result()
         with patch(

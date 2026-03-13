@@ -23,6 +23,7 @@ Typical usage::
 """
 
 from .extractor import SoaExtractor
+from .llm_soa_builder import LlmSoaBuilder
 from .mapper import UsdmMapper
 from .matrix_builder import (
     build_assessment_matrix,
@@ -44,6 +45,7 @@ from .writer import UsdmParquetWriter
 
 __all__ = [
     "SoaExtractor",
+    "LlmSoaBuilder",
     "UsdmMapper",
     "SoaTableParser",
     "SynonymResolver",

@@ -139,6 +139,49 @@ class TestResolveToMapping:
         assert mapping.review_required is False
 
 
+class TestVisitNumberRegex:
+    """PTCV-131: Visit number patterns (V2, Visit 3, V4/ET)."""
+
+    def test_v2_maps_to_day_2(self, resolver):
+        r = resolver.resolve("V2")
+        assert r.visit_type == "Treatment"
+        assert r.day_offset == 2
+        assert r.method == "regex"
+
+    def test_v3_maps_to_day_3(self, resolver):
+        r = resolver.resolve("V3")
+        assert r.day_offset == 3
+
+    def test_visit_4_full_word(self, resolver):
+        r = resolver.resolve("Visit 4")
+        assert r.day_offset == 4
+        assert r.visit_type == "Treatment"
+
+    def test_v1_still_baseline_via_lookup(self, resolver):
+        """V1 should match lookup first (Baseline, day 1)."""
+        r = resolver.resolve("V1")
+        assert r.visit_type == "Baseline"
+        assert r.day_offset == 1
+
+    def test_v0_screening_via_lookup(self, resolver):
+        r = resolver.resolve("V0")
+        assert r.visit_type == "Screening"
+
+    def test_v4_et_compound_header(self, resolver):
+        """'V4/ET' should extract visit number 4."""
+        r = resolver.resolve("V4/ET")
+        assert r.day_offset == 4
+
+    def test_visit_5_day_5(self, resolver):
+        r = resolver.resolve("Visit 5")
+        assert r.day_offset == 5
+
+    def test_confidence_lower_than_full_regex(self, resolver):
+        """Visit number regex has lower confidence (synthetic offset)."""
+        r = resolver.resolve("V3")
+        assert r.confidence < 0.85
+
+
 class TestDefaultFallback:
     def test_unknown_header_returns_treatment(self, resolver):
         r = resolver.resolve("ZZZ completely unknown")

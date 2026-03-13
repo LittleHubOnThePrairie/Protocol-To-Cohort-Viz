@@ -162,6 +162,36 @@ class TestActivityBuilding:
         _, _, acts, _, _ = mapper.map([table], RUN, "", SRC_SHA, REG, TS)
         assert acts[0].activity_type == "Vital Signs"
 
+    def test_ediary_classified_as_other(self, mapper):
+        """PTCV-131: eDiary should be 'Other', not 'Assessment'."""
+        table = make_table(
+            ["Baseline"], activities=[("eDiary", [True])],
+        )
+        _, _, acts, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert acts[0].activity_type == "Other"
+
+    def test_electronic_diary_classified_as_other(self, mapper):
+        table = make_table(
+            ["Baseline"],
+            activities=[("Electronic diary", [True])],
+        )
+        _, _, acts, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert acts[0].activity_type == "Other"
+
+    def test_patient_diary_classified_as_other(self, mapper):
+        table = make_table(
+            ["Baseline"],
+            activities=[("Patient diary", [True])],
+        )
+        _, _, acts, _, _ = mapper.map(
+            [table], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert acts[0].activity_type == "Other"
+
     def test_no_duplicate_activities_across_tables(self, mapper):
         table1 = make_table(["Baseline"], activities=[("ECG", [True])])
         table2 = make_table(["Week 2"], activities=[("ECG", [True])])
@@ -411,3 +441,112 @@ class TestBoilerplateFilteringInMapper:
         assert len(tps) == 0
         assert len(insts) == 0
         assert len(syns) == 0
+
+
+# -------------------------------------------------------------------
+# Visit name canonicalization (PTCV-180)
+# -------------------------------------------------------------------
+
+
+class TestVisitNameCanonicalization:
+    """PTCV-180: Parenthetical unit suffixes stripped from visit names."""
+
+    def test_cgy_suffix_stripped(self, mapper):
+        table = make_table(
+            ["Day 2 (cGy)", "Day 3 (cGy)", "Day 4 (cGy)",
+             "Day 5 (cGy)", "Total Dose (cGy)"],
+        )
+        _, tps, _, _, _ = mapper.map([table], RUN, "", SRC_SHA, REG, TS)
+        names = [tp.visit_name for tp in tps]
+        assert all("cGy" not in n for n in names)
+        assert "Day 2" in names
+        assert "Total Dose" in names
+
+    def test_mg_suffix_stripped(self, mapper):
+        table = make_table(["Week 4 (mg/kg)", "Week 8 (mg)"])
+        _, tps, _, _, _ = mapper.map([table], RUN, "", SRC_SHA, REG, TS)
+        names = [tp.visit_name for tp in tps]
+        assert all("mg" not in n for n in names)
+        assert "Week 4" in names
+        assert "Week 8" in names
+
+    def test_non_unit_parenthetical_preserved(self, mapper):
+        """Temporal parentheticals like '(Day -30 to -1)' are kept."""
+        table = make_table(["Screening (Day -30 to -1)", "Baseline"])
+        _, tps, _, _, _ = mapper.map([table], RUN, "", SRC_SHA, REG, TS)
+        names = [tp.visit_name for tp in tps]
+        assert "Screening (Day -30 to -1)" in names
+
+    def test_gy_suffix_stripped(self, mapper):
+        table = make_table(
+            ["Day 1 (Gy)", "Day 2 (Gy)", "Day 3 (Gy)",
+             "Week 2", "Follow-up"],
+        )
+        _, tps, _, _, _ = mapper.map([table], RUN, "", SRC_SHA, REG, TS)
+        names = [tp.visit_name for tp in tps]
+        assert all("Gy" not in n for n in names)
+        assert "Day 1" in names
+
+
+# -------------------------------------------------------------------
+# Timepoint deduplication across tables (PTCV-180)
+# -------------------------------------------------------------------
+
+
+class TestTimepointDeduplication:
+    """PTCV-180: Duplicate timepoints across tables merged."""
+
+    def test_same_visit_name_deduped_across_tables(self, mapper):
+        table1 = make_table(
+            ["Day 2", "Day 3"],
+            activities=[("Brain RT", [True, True])],
+        )
+        table2 = make_table(
+            ["Day 2", "Day 3"],
+            activities=[("Spine RT", [True, True])],
+        )
+        _, tps, _, _, _ = mapper.map(
+            [table1, table2], RUN, "", SRC_SHA, REG, TS,
+        )
+        names = [tp.visit_name for tp in tps]
+        assert names == ["Day 2", "Day 3"]
+
+    def test_instances_remapped_to_deduped_timepoint(self, mapper):
+        table1 = make_table(
+            ["Day 2"], activities=[("Brain RT", [True])],
+        )
+        table2 = make_table(
+            ["Day 2"], activities=[("Spine RT", [True])],
+        )
+        _, tps, _, insts, _ = mapper.map(
+            [table1, table2], RUN, "", SRC_SHA, REG, TS,
+        )
+        # Both instances should point to the same timepoint
+        tp_ids = {inst.timepoint_id for inst in insts}
+        assert len(tp_ids) == 1
+        assert tp_ids == {tps[0].timepoint_id}
+
+    def test_different_visits_not_deduped(self, mapper):
+        table1 = make_table(["Day 2", "Day 3"])
+        table2 = make_table(["Day 4", "Day 5"])
+        _, tps, _, _, _ = mapper.map(
+            [table1, table2], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert len(tps) == 4
+
+    def test_canonicalized_names_dedup_with_plain(self, mapper):
+        """'Day 2 (cGy)' from dose table dedupes with 'Day 2' from SoA."""
+        table1 = make_table(
+            ["Day 2", "Day 3"],
+            activities=[("ECG", [True, True])],
+        )
+        table2 = make_table(
+            ["Day 2 (cGy)", "Day 3 (cGy)"],
+            activities=[("Radiation", [True, True])],
+        )
+        _, tps, _, _, _ = mapper.map(
+            [table1, table2], RUN, "", SRC_SHA, REG, TS,
+        )
+        assert len(tps) == 2
+        names = [tp.visit_name for tp in tps]
+        assert names == ["Day 2", "Day 3"]

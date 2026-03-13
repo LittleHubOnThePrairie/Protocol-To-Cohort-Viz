@@ -194,8 +194,14 @@ def tmp_ct_review_queue(tmp_path: Path):
 
 @pytest.fixture
 def orchestrator(tmp_gateway, tmp_review_queue, tmp_ct_review_queue):
-    """PipelineOrchestrator backed by filesystem fixtures with mock retemplater."""
+    """PipelineOrchestrator backed by filesystem fixtures with mock retemplater.
+
+    Explicitly sets classification_level=C3 (RuleBased+Sonnet) since the
+    MockLlmRetemplater simulates the LLM path.  This ensures the
+    PTCV-163 degradation dispatch routes to the LLM code path.
+    """
     from ptcv.pipeline import PipelineOrchestrator
+    from ptcv.pipeline.degradation import ClassificationLevel
 
     mock_retemplater = MockLlmRetemplater(
         gateway=tmp_gateway,
@@ -207,6 +213,7 @@ def orchestrator(tmp_gateway, tmp_review_queue, tmp_ct_review_queue):
         review_queue=tmp_review_queue,
         ct_review_queue=tmp_ct_review_queue,
         retemplater=mock_retemplater,
+        classification_level=ClassificationLevel.C3,
     )
 
 

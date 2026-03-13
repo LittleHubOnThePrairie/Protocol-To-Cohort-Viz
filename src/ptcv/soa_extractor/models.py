@@ -186,6 +186,7 @@ class RawSoaTable:
     day_headers: list[str]
     activities: list[tuple[str, list[bool]]]
     section_code: str
+    construction_method: str = ""  # "llm_text" (PTCV-166), "llm_vision", or "" (table-based)
 
 
 @dataclasses.dataclass

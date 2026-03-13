@@ -42,6 +42,26 @@ from ptcv.ich_parser.toc_extractor import (
 
 
 # -----------------------------------------------------------------------
+# Helper functions
+# -----------------------------------------------------------------------
+
+
+def _make_mock_fitz_doc(page_texts: list[str]) -> MagicMock:
+    """Create a mock fitz.Document from a list of page text strings."""
+    pages = []
+    for text in page_texts:
+        page = MagicMock()
+        page.get_text.return_value = text
+        pages.append(page)
+
+    doc = MagicMock()
+    doc.__len__ = MagicMock(return_value=len(pages))
+    doc.__getitem__ = MagicMock(side_effect=lambda i: pages[i])
+    doc.close = MagicMock()
+    return doc
+
+
+# -----------------------------------------------------------------------
 # Helper fixtures
 # -----------------------------------------------------------------------
 
@@ -395,17 +415,14 @@ class TestNoTOCFallback:
 
     def test_no_toc_synthesises_entries(self, body_page_text: str):
         """Simulate a PDF with no TOC but with body headers."""
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = body_page_text
-        mock_pdf = MagicMock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
-        mock_pdf.__exit__ = MagicMock(return_value=False)
+        mock_doc = _make_mock_fitz_doc([body_page_text])
 
-        with patch("ptcv.ich_parser.toc_extractor.pdfplumber") as mock_plumber:
-            mock_plumber.open.return_value = mock_pdf
-            with patch("pathlib.Path.exists", return_value=True):
-                idx = extract_protocol_index("/fake/protocol.pdf")
+        with (
+            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
+            patch("pathlib.Path.exists", return_value=True),
+        ):
+            mock_fitz.open.return_value = mock_doc
+            idx = extract_protocol_index("/fake/protocol.pdf")
 
         assert idx.toc_found is False
         assert len(idx.toc_entries) > 0
@@ -413,19 +430,16 @@ class TestNoTOCFallback:
 
     def test_no_toc_logs_warning(self, body_page_text: str, caplog):
         """A warning should be logged when no TOC is found."""
-        mock_page = MagicMock()
-        mock_page.extract_text.return_value = body_page_text
-        mock_pdf = MagicMock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.__enter__ = MagicMock(return_value=mock_pdf)
-        mock_pdf.__exit__ = MagicMock(return_value=False)
+        mock_doc = _make_mock_fitz_doc([body_page_text])
 
-        with patch("ptcv.ich_parser.toc_extractor.pdfplumber") as mock_plumber:
-            mock_plumber.open.return_value = mock_pdf
-            with patch("pathlib.Path.exists", return_value=True):
-                import logging
-                with caplog.at_level(logging.WARNING):
-                    extract_protocol_index("/fake/protocol.pdf")
+        with (
+            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
+            patch("pathlib.Path.exists", return_value=True),
+        ):
+            mock_fitz.open.return_value = mock_doc
+            import logging
+            with caplog.at_level(logging.WARNING):
+                extract_protocol_index("/fake/protocol.pdf")
 
         assert any("No Table of Contents" in r.message for r in caplog.records)
 
@@ -1250,15 +1264,16 @@ class TestFullTextTocStripping:
             )
             mock_pages.append(p)
 
-        mock_pdf = MagicMock()
-        mock_pdf.pages = mock_pages
-        mock_pdf.__enter__ = lambda s: s
-        mock_pdf.__exit__ = MagicMock(return_value=False)
+        page_texts = [
+            p.extract_text.return_value for p in mock_pages
+        ]
+        mock_doc = _make_mock_fitz_doc(page_texts)
 
         with (
-            patch("pdfplumber.open", return_value=mock_pdf),
+            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
             patch("pathlib.Path.exists", return_value=True),
         ):
+            mock_fitz.open.return_value = mock_doc
             idx = extract_protocol_index("/fake/test.pdf")
 
         # full_text should NOT contain TOC entries

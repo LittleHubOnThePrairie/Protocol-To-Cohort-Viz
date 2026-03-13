@@ -14,10 +14,13 @@ from ptcv.ui.components.query_pipeline import (
     PIPELINE_STAGES,
     _CONTENT_PREVIEW_LEN,
     count_extraction_methods,
+    format_comparison_rows,
     format_coverage_metrics,
     format_extraction_table,
     format_gap_table,
     format_match_table,
+    format_pipeline_comparison_rows,
+    format_provenance_badge,
     format_subsection_match_table,
     format_toc_tree,
     run_query_pipeline,
@@ -651,32 +654,32 @@ class TestProgressCallback:
             )
 
     def test_callback_called_for_all_stages(self) -> None:
-        calls: list[tuple[str, float]] = []
-        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
 
         stage_names = {c[0] for c in calls}
         for stage in PIPELINE_STAGES:
             assert stage in stage_names, f"{stage} missing"
 
     def test_each_stage_starts_at_zero(self) -> None:
-        calls: list[tuple[str, float]] = []
-        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
 
         for stage in PIPELINE_STAGES:
             stage_calls = [c for c in calls if c[0] == stage]
             assert stage_calls[0][1] == 0.0
 
     def test_each_stage_ends_at_one(self) -> None:
-        calls: list[tuple[str, float]] = []
-        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
 
         for stage in PIPELINE_STAGES:
             stage_calls = [c for c in calls if c[0] == stage]
             assert stage_calls[-1][1] == 1.0
 
     def test_callback_order(self) -> None:
-        calls: list[tuple[str, float]] = []
-        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
 
         # Extract stage order from start events (progress=0.0).
         start_order = [
@@ -690,13 +693,471 @@ class TestProgressCallback:
 
     def test_callback_receives_eight_events(self) -> None:
         """4 stages x 2 events (start + end) = 8 calls."""
-        calls: list[tuple[str, float]] = []
-        self._mock_run(callback=lambda s, p: calls.append((s, p)))
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
         assert len(calls) == 8
 
     def test_pipeline_result_unchanged_with_callback(self) -> None:
         result_with = self._mock_run(
-            callback=lambda s, p: None,
+            callback=lambda s, p, d=0, t=0: None,
         )
         result_without = self._mock_run(callback=None)
         assert result_with.keys() == result_without.keys()
+
+
+class TestProgressMetadata:
+    """Tests for N/M metadata in progress callbacks (PTCV-124)."""
+
+    def _mock_run(
+        self,
+        callback: object | None = None,
+        enable_summarization: bool = False,
+    ) -> dict:
+        """Run pipeline with mocked backends and an optional callback."""
+        mock_index = SimpleNamespace(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=[],
+            content_spans={},
+            full_text="test protocol text",
+            toc_found=False,
+            toc_pages=[],
+        )
+        mock_match = _match_result(auto_mapped_count=0)
+        mock_ext = _extraction_result(
+            extractions=[], gaps=[], coverage=0.0,
+        )
+        mock_assembled = SimpleNamespace(
+            sections=[],
+            coverage=_coverage(
+                total_sections=0, populated_count=0,
+                gap_count=0, avg_confidence=0.0,
+                high_confidence_count=0,
+                review_confidence_count=0,
+                low_confidence_count=0,
+            ),
+            to_markdown=lambda: "",
+            to_dict=lambda: {},
+        )
+
+        with (
+            patch(
+                "ptcv.ich_parser.toc_extractor.extract_protocol_index",
+                return_value=mock_index,
+            ),
+            patch(
+                "ptcv.ich_parser.section_matcher.SectionMatcher.match",
+                return_value=mock_match,
+            ),
+            patch(
+                "ptcv.ich_parser.query_extractor.QueryExtractor.extract",
+                return_value=mock_ext,
+            ),
+            patch(
+                "ptcv.ich_parser.template_assembler.assemble_template",
+                return_value=mock_assembled,
+            ),
+        ):
+            return run_query_pipeline(
+                "test.pdf",
+                enable_summarization=enable_summarization,
+                progress_callback=callback,
+            )
+
+    def test_start_events_have_zero_counts(self) -> None:
+        """Start events (progress=0.0) pass done=0, total=0."""
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(
+            callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)),
+        )
+        starts = [c for c in calls if c[1] == 0.0]
+        assert len(starts) == 4
+        for c in starts:
+            assert c[2] == 0 and c[3] == 0, (
+                f"start event {c[0]} should have d=0, t=0"
+            )
+
+    def test_end_events_have_zero_counts(self) -> None:
+        """End events (progress=1.0) pass done=0, total=0."""
+        calls: list[tuple[str, float, int, int]] = []
+        self._mock_run(
+            callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)),
+        )
+        ends = [c for c in calls if c[1] == 1.0]
+        assert len(ends) == 4
+        for c in ends:
+            assert c[2] == 0 and c[3] == 0, (
+                f"end event {c[0]} should have d=0, t=0"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Content Comparison (PTCV-141)
+# ---------------------------------------------------------------------------
+
+
+def _assembled_section(
+    code: str = "B.5",
+    name: str = "Selection of Subjects",
+    populated: bool = True,
+    hits: list | None = None,
+    average_confidence: float = 0.85,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        section_code=code,
+        section_name=name,
+        populated=populated,
+        hits=hits or [],
+        average_confidence=average_confidence,
+    )
+
+
+def _hit(
+    query_id: str = "B.5.1.q1",
+    extracted_content: str = "Adults aged 18-65",
+    confidence: float = 0.90,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        query_id=query_id,
+        extracted_content=extracted_content,
+        confidence=confidence,
+    )
+
+
+def _protocol_index(
+    content_spans: dict[str, str] | None = None,
+) -> SimpleNamespace:
+    spans = content_spans or {}
+
+    class _Index:
+        def __init__(self, spans: dict[str, str]) -> None:
+            self._spans = spans
+
+        def get_section_text(
+            self, section_number: str,
+        ) -> str | None:
+            return self._spans.get(section_number)
+
+    return _Index(spans)
+
+
+def _assembled(
+    sections: list | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(sections=sections or [])
+
+
+class TestFormatComparisonRows:
+    """Tests for format_comparison_rows() (PTCV-141)."""
+
+    def test_empty_sections(self) -> None:
+        """No populated sections → empty rows."""
+        result = format_comparison_rows(
+            _assembled(), _protocol_index(), _match_result(),
+        )
+        assert result == []
+
+    def test_single_section_with_original(self) -> None:
+        """One section maps original and extracted text."""
+        assembled = _assembled([
+            _assembled_section("B.5", "Selection", hits=[
+                _hit("B.5.1.q1", "Adults aged 18-65"),
+            ]),
+        ])
+        proto_idx = _protocol_index({"5.1": "Eligible subjects"})
+        mr = _match_result([
+            _mapping("5.1", "Eligibility", [
+                _match("B.5", "Selection"),
+            ]),
+        ])
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert len(rows) == 1
+        assert rows[0]["ich_code"] == "B.5"
+        assert "Eligible subjects" in rows[0]["original_text"]
+        assert "Adults aged 18-65" in rows[0]["extracted_text"]
+
+    def test_no_original_text_mapped(self) -> None:
+        """Section with no matching protocol section → empty original."""
+        assembled = _assembled([
+            _assembled_section("B.12", "Ethics", hits=[
+                _hit("B.12.q1", "IRB approved"),
+            ]),
+        ])
+        proto_idx = _protocol_index()
+        mr = _match_result()
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert len(rows) == 1
+        assert rows[0]["original_text"] == ""
+        assert rows[0]["protocol_section"] == "(none)"
+        assert "IRB approved" in rows[0]["extracted_text"]
+
+    def test_multiple_protocol_sections_merged(self) -> None:
+        """Multiple protocol sections mapping to same ICH code."""
+        assembled = _assembled([
+            _assembled_section("B.5", "Selection", hits=[
+                _hit("B.5.1.q1", "Inclusion criteria"),
+            ]),
+        ])
+        proto_idx = _protocol_index({
+            "5.1": "Inclusion text",
+            "5.2": "Exclusion text",
+        })
+        mr = _match_result([
+            _mapping("5.1", "Inclusion", [
+                _match("B.5", "Selection"),
+            ]),
+            _mapping("5.2", "Exclusion", [
+                _match("B.5", "Selection"),
+            ]),
+        ])
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert len(rows) == 1
+        assert "Inclusion text" in rows[0]["original_text"]
+        assert "Exclusion text" in rows[0]["original_text"]
+        assert "5.1" in rows[0]["protocol_section"]
+        assert "5.2" in rows[0]["protocol_section"]
+
+    def test_unpopulated_sections_excluded(self) -> None:
+        """Unpopulated sections are not included."""
+        assembled = _assembled([
+            _assembled_section("B.1", "General", populated=False),
+            _assembled_section("B.4", "Design", hits=[
+                _hit("B.4.q1", "Phase 3"),
+            ]),
+        ])
+        proto_idx = _protocol_index()
+        mr = _match_result()
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert len(rows) == 1
+        assert rows[0]["ich_code"] == "B.4"
+
+    def test_confidence_and_query_count(self) -> None:
+        """Row includes confidence and query count."""
+        assembled = _assembled([
+            _assembled_section("B.9", "Safety", hits=[
+                _hit("B.9.1.q1", "AE monitoring"),
+                _hit("B.9.2.q1", "SAE reporting"),
+            ], average_confidence=0.78),
+        ])
+        proto_idx = _protocol_index()
+        mr = _match_result()
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert rows[0]["confidence"] == 0.78
+        assert rows[0]["query_count"] == 2
+
+    def test_multiple_hits_concatenated(self) -> None:
+        """Multiple hits are joined in extracted text."""
+        assembled = _assembled([
+            _assembled_section("B.7", "Treatment", hits=[
+                _hit("B.7.q1", "Drug A 100mg"),
+                _hit("B.7.q2", "Administered IV"),
+            ]),
+        ])
+        proto_idx = _protocol_index()
+        mr = _match_result()
+
+        rows = format_comparison_rows(assembled, proto_idx, mr)
+        assert "Drug A 100mg" in rows[0]["extracted_text"]
+        assert "Administered IV" in rows[0]["extracted_text"]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Comparison helpers (PTCV-179)
+# ---------------------------------------------------------------------------
+
+
+def _assembled_section_with_provenance(
+    code: str = "B.5",
+    name: str = "Selection of Subjects",
+    populated: bool = True,
+    hits: list | None = None,
+    average_confidence: float = 0.85,
+    extraction_method: str = "",
+    classification_method: str = "",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        section_code=code,
+        section_name=name,
+        populated=populated,
+        hits=hits or [],
+        average_confidence=average_confidence,
+        extraction_method=extraction_method,
+        classification_method=classification_method,
+    )
+
+
+def _assembled_with_get(
+    sections: list,
+) -> SimpleNamespace:
+    """Build assembled mock with get_section() method."""
+    lookup = {
+        getattr(s, "section_code", ""): s for s in sections
+    }
+
+    class _Asm:
+        def __init__(self, secs: list, lkp: dict) -> None:
+            self.sections = secs
+            self._lookup = lkp
+
+        def get_section(self, code: str):  # noqa: ANN201
+            return self._lookup.get(code)
+
+    return _Asm(sections, lookup)  # type: ignore[return-value]
+
+
+class TestFormatPipelineComparisonRows:
+    """Tests for format_pipeline_comparison_rows() (PTCV-179)."""
+
+    def test_both_populated(self) -> None:
+        """Sections populated in both pipelines show in comparison."""
+        q = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.5", hits=[_hit("B.5.q1", "Query inclusion")],
+            ),
+        ])
+        c = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.5", hits=[_hit("B.5.q1", "Classified inclusion")],
+                extraction_method="E3:pdfplumber",
+                classification_method="C2:neobert_sonnet",
+            ),
+        ])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert len(rows) == 1
+        assert "Query inclusion" in rows[0]["query_text"]
+        assert "Classified inclusion" in rows[0]["classified_text"]
+
+    def test_query_only(self) -> None:
+        """Section populated only in query shows empty classified."""
+        q = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.3", hits=[_hit("B.3.q1", "Objectives")],
+            ),
+        ])
+        c = _assembled_with_get([])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert len(rows) == 1
+        assert rows[0]["query_text"]
+        assert rows[0]["classified_text"] == ""
+
+    def test_classified_only(self) -> None:
+        """Section populated only in classified shows empty query."""
+        q = _assembled_with_get([])
+        c = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.4", hits=[_hit("B.4.q1", "Design")],
+            ),
+        ])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert len(rows) == 1
+        assert rows[0]["query_text"] == ""
+        assert rows[0]["classified_text"]
+
+    def test_confidence_delta_computed(self) -> None:
+        """Confidence delta = classified - query."""
+        q = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.5", average_confidence=0.80,
+                hits=[_hit("B.5.q1", "Q")],
+            ),
+        ])
+        c = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.5", average_confidence=0.90,
+                hits=[_hit("B.5.q1", "C")],
+            ),
+        ])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert rows[0]["confidence_delta"] == 0.10
+
+    def test_provenance_method_included(self) -> None:
+        """classified_method includes extraction + classification."""
+        q = _assembled_with_get([])
+        c = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.5", hits=[_hit("B.5.q1", "Content")],
+                extraction_method="E3:pdfplumber",
+                classification_method="C2:neobert_sonnet",
+            ),
+        ])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert "E3:pdfplumber" in rows[0]["classified_method"]
+        assert "C2:neobert_sonnet" in rows[0]["classified_method"]
+
+    def test_empty_both(self) -> None:
+        """No populated sections returns empty list."""
+        q = _assembled_with_get([])
+        c = _assembled_with_get([])
+        rows = format_pipeline_comparison_rows(q, c)
+        assert rows == []
+
+    def test_none_assembled(self) -> None:
+        """None assembled protocols handled gracefully."""
+        rows = format_pipeline_comparison_rows(None, None)
+        assert rows == []
+
+    def test_canonical_order(self) -> None:
+        """Sections are ordered canonically B.1 < B.5 < B.10."""
+        q = _assembled_with_get([
+            _assembled_section_with_provenance(
+                "B.10", "Statistics",
+                hits=[_hit("B.10.q1", "Stats")],
+            ),
+            _assembled_section_with_provenance(
+                "B.1", "General Info",
+                hits=[_hit("B.1.q1", "Info")],
+            ),
+        ])
+        rows = format_pipeline_comparison_rows(q, None)
+        assert rows[0]["ich_code"] == "B.1"
+        assert rows[1]["ich_code"] == "B.10"
+
+
+class TestFormatProvenanceBadge:
+    """Tests for format_provenance_badge() (PTCV-179)."""
+
+    def test_high_confidence(self) -> None:
+        section = _assembled_section_with_provenance(
+            average_confidence=0.90,
+            extraction_method="E3:pdfplumber",
+        )
+        badge = format_provenance_badge(section)
+        assert badge["confidence_label"] == "HIGH"
+        assert badge["confidence_color"] == "green"
+
+    def test_review_confidence(self) -> None:
+        section = _assembled_section_with_provenance(
+            average_confidence=0.75,
+        )
+        badge = format_provenance_badge(section)
+        assert badge["confidence_label"] == "REVIEW"
+        assert badge["confidence_color"] == "orange"
+
+    def test_low_confidence(self) -> None:
+        section = _assembled_section_with_provenance(
+            average_confidence=0.50,
+        )
+        badge = format_provenance_badge(section)
+        assert badge["confidence_label"] == "LOW"
+        assert badge["confidence_color"] == "red"
+
+    def test_methods_included(self) -> None:
+        section = _assembled_section_with_provenance(
+            extraction_method="E3:pdfplumber",
+            classification_method="C2:neobert_sonnet",
+        )
+        badge = format_provenance_badge(section)
+        assert badge["extraction_method"] == "E3:pdfplumber"
+        assert badge["classification_method"] == "C2:neobert_sonnet"
+
+    def test_empty_methods(self) -> None:
+        section = _assembled_section_with_provenance()
+        badge = format_provenance_badge(section)
+        assert badge["extraction_method"] == ""
+        assert badge["classification_method"] == ""

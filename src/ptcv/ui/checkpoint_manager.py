@@ -18,10 +18,23 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Stage keys that produce cacheable results in app.py
-_CACHE_STAGES = ("parse_cache", "soa_cache", "fidelity_cache", "sdtm_cache")
+# Order matters: process pipeline stages first (in pipeline order),
+# then query pipeline. get_resume_label() uses the last completed
+# stage to determine the resume point.
+_CACHE_STAGES = (
+    "query_cache",
+    "parse_cache", "soa_cache", "fidelity_cache", "sdtm_cache",
+)
 
 # Keys in parse_cache that reference storage artifacts (not serialisable)
 _SKIP_KEYS = ("extracted_tables", "text_block_dicts")
+
+# Keys in query_cache that hold non-JSON-serialisable objects.
+# These are live Python objects (ProtocolIndex, MatchResult, etc.).
+_QUERY_SKIP_KEYS = (
+    "protocol_index", "match_result", "enriched_match_result",
+    "extraction_result",
+)
 
 
 def _checkpoint_dir(data_root: Path, file_sha: str) -> Path:
@@ -29,11 +42,14 @@ def _checkpoint_dir(data_root: Path, file_sha: str) -> Path:
     return data_root / "checkpoints" / file_sha
 
 
-def _sanitise_for_json(data: dict[str, Any]) -> dict[str, Any]:
+def _sanitise_for_json(
+    data: dict[str, Any],
+    skip_keys: tuple[str, ...] = _SKIP_KEYS,
+) -> dict[str, Any]:
     """Remove non-serialisable keys from a cache dict."""
     return {
         k: v for k, v in data.items()
-        if k not in _SKIP_KEYS
+        if k not in skip_keys
     }
 
 
@@ -57,7 +73,24 @@ def save_checkpoint(
     cp_dir = _checkpoint_dir(data_root, file_sha)
     cp_dir.mkdir(parents=True, exist_ok=True)
     cp_path = cp_dir / f"{cache_key}.json"
-    serialisable = _sanitise_for_json(cache_data)
+
+    if cache_key == "query_cache":
+        # query_cache holds live Python objects; convert to dicts.
+        serialisable = _sanitise_for_json(
+            cache_data, skip_keys=_QUERY_SKIP_KEYS,
+        )
+        # AssembledProtocol → dict
+        assembled = serialisable.get("assembled")
+        if assembled is not None and hasattr(assembled, "to_dict"):
+            serialisable["assembled"] = assembled.to_dict()
+        # CoverageReport → dict
+        import dataclasses as _dc
+        cov = serialisable.get("coverage")
+        if cov is not None and _dc.is_dataclass(cov):
+            serialisable["coverage"] = _dc.asdict(cov)
+    else:
+        serialisable = _sanitise_for_json(cache_data)
+
     cp_path.write_text(
         json.dumps(serialisable, ensure_ascii=False, default=str),
         encoding="utf-8",
@@ -92,6 +125,9 @@ def load_checkpoints(
                 data = json.loads(
                     cp_path.read_text(encoding="utf-8"),
                 )
+                # Reconstruct live objects for query_cache.
+                if cache_key == "query_cache":
+                    data = _rehydrate_query_cache(data)
                 result[cache_key] = data
             except (json.JSONDecodeError, OSError) as exc:
                 logger.warning(
@@ -99,6 +135,39 @@ def load_checkpoints(
                     cp_path, exc,
                 )
     return result
+
+
+def _rehydrate_query_cache(
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Reconstruct AssembledProtocol/CoverageReport from checkpoint.
+
+    The checkpoint stores these as plain dicts; this rebuilds them
+    into the dataclass instances that downstream code expects.
+    """
+    from ptcv.ich_parser.template_assembler import (
+        AssembledProtocol,
+        CoverageReport,
+    )
+    if "assembled" in data and isinstance(data["assembled"], dict):
+        try:
+            data["assembled"] = AssembledProtocol.from_dict(
+                data["assembled"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to rehydrate AssembledProtocol: %s", exc,
+            )
+    if "coverage" in data and isinstance(data["coverage"], dict):
+        try:
+            data["coverage"] = CoverageReport.from_dict(
+                data["coverage"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to rehydrate CoverageReport: %s", exc,
+            )
+    return data
 
 
 def get_checkpoint_summary(
@@ -165,6 +234,7 @@ _STAGE_LABELS = {
     "soa_cache": "SoA Extraction",
     "fidelity_cache": "Fidelity Check",
     "sdtm_cache": "SDTM Generation",
+    "query_cache": "Query Pipeline",
 }
 
 # Mapping from cache_key to the next stage label for resume
@@ -173,6 +243,7 @@ _NEXT_STAGE = {
     "soa_cache": "Fidelity Check",
     "fidelity_cache": "SDTM Generation",
     "sdtm_cache": "Validation (complete)",
+    "query_cache": "SoA Extraction (via Query Pipeline)",
 }
 
 

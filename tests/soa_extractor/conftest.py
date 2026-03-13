@@ -4,11 +4,39 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
+
+# ---------------------------------------------------------------------------
+# Stub fitz (PyMuPDF) and pymupdf4llm to prevent toc_extractor import chain
+# failure when these packages are not installed.
+# ---------------------------------------------------------------------------
+if "fitz" not in sys.modules:
+    _fitz = types.ModuleType("fitz")
+
+    class _StubFitzDoc:
+        """Minimal fitz.Document stand-in (zero pages)."""
+
+        def __init__(self, **kw: object) -> None:
+            pass
+
+        def __len__(self) -> int:
+            return 0
+
+        def close(self) -> None:
+            pass
+
+    _fitz.open = lambda **kw: _StubFitzDoc(**kw)  # type: ignore[attr-defined]
+    sys.modules["fitz"] = _fitz
+
+if "pymupdf4llm" not in sys.modules:
+    _pymupdf = types.ModuleType("pymupdf4llm")
+    _pymupdf.to_markdown = lambda doc, **kw: []  # type: ignore[attr-defined]
+    sys.modules["pymupdf4llm"] = _pymupdf
 
 
 # ---------------------------------------------------------------------------

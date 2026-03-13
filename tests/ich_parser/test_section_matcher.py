@@ -1317,3 +1317,499 @@ class TestGarbageHeaderFiltering:
         # All matches should be LOW confidence (zeroed scores)
         for m in result.mappings[0].matches:
             assert m.confidence == MatchConfidence.LOW
+
+
+# -------------------------------------------------------------------
+# TestMarkdownHeadingBoost (PTCV-171)
+# -------------------------------------------------------------------
+
+
+class TestMarkdownHeadingBoost:
+    """Markdown heading hierarchy used as classification signal."""
+
+    def test_heading_boosts_confidence_above_plain_text(self) -> None:
+        """Markdown headings should produce higher confidence than
+        plain text for the same content.
+
+        [PTCV-171 Scenario: Markdown headings used for section
+        classification]
+        """
+        matcher = SectionMatcher()
+
+        # Plain text content — no markdown headings
+        plain_protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(level=1, number="6", title="Study Procedures"),
+            ],
+            section_headers=[],
+            content_spans={
+                "6": (
+                    "6.1 Study Procedures\n"
+                    "Patients will attend clinic visits at weeks 4, 8, "
+                    "and 12. Study design includes randomization.\n"
+                    "The study treatment schedule follows."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        # Markdown content — same text but with ## headings
+        md_protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(level=1, number="6", title="Study Procedures"),
+            ],
+            section_headers=[],
+            content_spans={
+                "6": (
+                    "## 6.1 Study Procedures\n\n"
+                    "Patients will attend clinic visits at weeks 4, 8, "
+                    "and 12. Study design includes randomization.\n\n"
+                    "### 6.2 Schedule of Assessments\n\n"
+                    "The study treatment schedule follows."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        plain_result = matcher.match(plain_protocol)
+        md_result = matcher.match(md_protocol)
+
+        # Both should have exactly one mapping
+        assert len(plain_result.mappings) == 1
+        assert len(md_result.mappings) == 1
+
+        plain_top = plain_result.mappings[0].matches[0]
+        md_top = md_result.mappings[0].matches[0]
+
+        # Markdown version should have higher boosted score
+        assert md_top.boosted_score >= plain_top.boosted_score
+
+    def test_heading_level_scales_boost(self) -> None:
+        """Higher-level markdown headings (##) should boost more than
+        lower-level (####).
+        """
+        matcher = SectionMatcher()
+
+        # ## heading (level 2 → boost 0.10)
+        h2_protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(level=1, number="5", title="Selection"),
+            ],
+            section_headers=[],
+            content_spans={
+                "5": "## 5 Inclusion Criteria\nAdults aged 18+",
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        # #### heading (level 4 → boost 0.05)
+        h4_protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(level=1, number="5", title="Selection"),
+            ],
+            section_headers=[],
+            content_spans={
+                "5": "#### 5 Inclusion Criteria\nAdults aged 18+",
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        h2_result = matcher.match(h2_protocol)
+        h4_result = matcher.match(h4_protocol)
+
+        h2_top = h2_result.mappings[0].matches[0]
+        h4_top = h4_result.mappings[0].matches[0]
+
+        # h2 heading should produce higher boosted score than h4
+        assert h2_top.boosted_score >= h4_top.boosted_score
+
+    def test_no_headings_no_boost(self) -> None:
+        """When content has no markdown headings, heading boost is a
+        no-op (no regression on plain-text content).
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(
+                    level=1, number="1", title="General Information"
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "1": "Protocol Title: A Phase 2 Study of Drug X",
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+        # Should still match correctly (synonym boost on title)
+        assert len(result.mappings) == 1
+        top = result.mappings[0].matches[0]
+        assert top.ich_section_code == "B.1"
+
+    def test_b1_noise_reduction_with_markdown(self) -> None:
+        """Markdown headings for 'Definitions' should NOT map to B.1.
+
+        [PTCV-171 Scenario: B.1 noise reduction]
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(
+                    level=2,
+                    number="1.1",
+                    title="Definitions",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "1.1": (
+                    "## 1.1 Definitions\n\n"
+                    "The following terms apply to this protocol:\n"
+                    "- Investigator: The person responsible..."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+        assert len(result.mappings) == 1
+        top = result.mappings[0].matches[0]
+        # "Definitions" should NOT be auto-mapped to B.1
+        # (B.1 exclusion terms + heading signals)
+        assert not (
+            top.ich_section_code == "B.1"
+            and top.confidence == MatchConfidence.HIGH
+        )
+
+    def test_multiple_headings_cumulative_boost(self) -> None:
+        """Multiple markdown headings for the same ICH section should
+        accumulate boost.
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[
+                TOCEntry(level=1, number="5", title="Eligibility"),
+            ],
+            section_headers=[],
+            content_spans={
+                "5": (
+                    "## 5 Selection of Subjects\n\n"
+                    "### 5.1 Inclusion Criteria\n"
+                    "Adults aged 18+\n\n"
+                    "### 5.2 Exclusion Criteria\n"
+                    "Pregnant women excluded"
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+        top = result.mappings[0].matches[0]
+        # B.5 should be the top match with high confidence
+        assert top.ich_section_code == "B.5"
+        assert top.confidence == MatchConfidence.HIGH
+
+
+# -------------------------------------------------------------------
+# TOC order disambiguation (PTCV-160)
+# -------------------------------------------------------------------
+
+
+class TestTocOrderHints:
+    """TOC entry ordering as tiebreaker for ambiguous headings."""
+
+    def test_toc_resolves_ambiguous_heading(self) -> None:
+        """PTCV-160 Scenario 1: TOC ordering resolves B.2 vs B.3
+        when heading confidence is ambiguous.
+
+        Given: "Background" heading has close scores for B.2 and B.3
+        And: TOC shows Background between Synopsis (B.1) and
+             Objectives (B.3)
+        Then: B.2 is selected (fits TOC ordering).
+        """
+        matcher = SectionMatcher()
+
+        # Build a protocol where "Background" is ambiguous but
+        # TOC ordering (Synopsis → Background → Objectives) implies B.2
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=30,
+            toc_entries=[
+                TOCEntry(
+                    level=1, number="1",
+                    title="Protocol Summary",
+                ),
+                TOCEntry(
+                    level=1, number="2",
+                    title="Background",
+                ),
+                TOCEntry(
+                    level=1, number="3",
+                    title="Objectives and Endpoints",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "1": (
+                    "## 1 Protocol Summary\n\n"
+                    "This is a phase 2 study of Drug X. "
+                    "Protocol number XY-001. "
+                    "General information about the sponsor."
+                ),
+                "2": (
+                    "## 2 Background\n\n"
+                    "The rationale for this study is based on "
+                    "preclinical data showing efficacy."
+                ),
+                "3": (
+                    "## 3 Objectives and Endpoints\n\n"
+                    "Primary objective: assess efficacy. "
+                    "Secondary endpoints include safety."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+
+        # Find the mapping for "Background" (section 2)
+        bg_mapping = next(
+            m for m in result.mappings
+            if m.protocol_section_number == "2"
+        )
+
+        # B.2 should be the top match (TOC ordering tiebreak)
+        assert bg_mapping.matches[0].ich_section_code == "B.2"
+
+    def test_toc_hints_not_needed_for_clear_match(self) -> None:
+        """PTCV-160 Scenario 2: When confidence is high, TOC hints
+        are not applied.
+
+        Given: "Study Design" heading scores B.4 with 0.90+
+        Then: No disambiguation needed.
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=30,
+            toc_entries=[
+                TOCEntry(
+                    level=1, number="3",
+                    title="Objectives",
+                ),
+                TOCEntry(
+                    level=1, number="4",
+                    title="Study Design",
+                ),
+                TOCEntry(
+                    level=1, number="5",
+                    title="Inclusion Criteria",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "3": (
+                    "## 3 Objectives\n\n"
+                    "Primary objective: efficacy. "
+                    "Secondary endpoints."
+                ),
+                "4": (
+                    "## 4 Study Design\n\n"
+                    "This is a randomised, double-blind, "
+                    "placebo-controlled study. "
+                    "Schedule of activities. "
+                    "Blinding and randomisation."
+                ),
+                "5": (
+                    "## 5 Inclusion Criteria\n\n"
+                    "Adults aged 18+."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+
+        design_mapping = next(
+            m for m in result.mappings
+            if m.protocol_section_number == "4"
+        )
+
+        # B.4 should be HIGH confidence — no tiebreak needed
+        assert design_mapping.matches[0].ich_section_code == "B.4"
+        assert (
+            design_mapping.matches[0].confidence
+            == MatchConfidence.HIGH
+        )
+        assert design_mapping.auto_mapped is True
+
+    def test_no_toc_no_error(self) -> None:
+        """PTCV-160 Scenario 3: Protocols without TOC work fine.
+
+        Given: Protocol has no detectable Table of Contents
+        Then: Heading classification runs without error.
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=10,
+            toc_entries=[],
+            section_headers=[
+                SectionHeader(
+                    number="1", title="Background",
+                    level=1, page=1, char_offset=0,
+                ),
+                SectionHeader(
+                    number="2", title="Objectives",
+                    level=1, page=3, char_offset=500,
+                ),
+            ],
+            content_spans={
+                "1": "Background and rationale text.",
+                "2": "Primary objective and endpoints.",
+            },
+            full_text="",
+            toc_found=False,
+            toc_pages=[],
+        )
+
+        # Should not raise
+        result = matcher.match(protocol)
+        assert len(result.mappings) == 2
+
+    def test_first_entry_uses_next_neighbor_only(self) -> None:
+        """First TOC entry has no previous neighbor — uses next only."""
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=20,
+            toc_entries=[
+                TOCEntry(
+                    level=1, number="1",
+                    title="Protocol Summary",
+                ),
+                TOCEntry(
+                    level=1, number="2",
+                    title="Background and Rationale",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "1": (
+                    "## 1 Protocol Summary\n\n"
+                    "General information. Synopsis. "
+                    "Protocol title and number."
+                ),
+                "2": (
+                    "## 2 Background and Rationale\n\n"
+                    "Preclinical evidence supports this study."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+        # Should not error — first entry has no prev neighbor
+        assert len(result.mappings) == 2
+
+    def test_clear_gap_not_modified(self) -> None:
+        """When top-2 scores differ by more than the ambiguity delta,
+        TOC hints should NOT be applied.
+        """
+        matcher = SectionMatcher()
+
+        protocol = ProtocolIndex(
+            source_path="test.pdf",
+            page_count=30,
+            toc_entries=[
+                TOCEntry(
+                    level=1, number="1",
+                    title="Protocol Summary",
+                ),
+                TOCEntry(
+                    level=1, number="2",
+                    title="Study Design",
+                ),
+                TOCEntry(
+                    level=1, number="3",
+                    title="Inclusion Criteria",
+                ),
+            ],
+            section_headers=[],
+            content_spans={
+                "1": (
+                    "## 1 Protocol Summary\n\n"
+                    "Synopsis and sponsor information."
+                ),
+                "2": (
+                    "## 2 Study Design\n\n"
+                    "Randomised controlled trial design. "
+                    "Schedule of activities."
+                ),
+                "3": (
+                    "## 3 Inclusion Criteria\n\n"
+                    "Adults aged 18+ with confirmed diagnosis. "
+                    "Selection of subjects."
+                ),
+            },
+            full_text="",
+            toc_found=True,
+            toc_pages=[1],
+        )
+
+        result = matcher.match(protocol)
+
+        # Study Design → B.4, Inclusion Criteria → B.5
+        # Both should have clear top matches (not close)
+        design = next(
+            m for m in result.mappings
+            if m.protocol_section_number == "2"
+        )
+        assert design.matches[0].ich_section_code == "B.4"
+
+        inclusion = next(
+            m for m in result.mappings
+            if m.protocol_section_number == "3"
+        )
+        assert inclusion.matches[0].ich_section_code == "B.5"

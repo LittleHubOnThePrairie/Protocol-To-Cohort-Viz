@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
+# fitz/pymupdf4llm stubs are provided by conftest.py
 
 from ptcv.extraction.extraction_service import ExtractionService
 from ptcv.extraction.format_detector import ProtocolFormat
@@ -156,7 +157,15 @@ class TestScenario2CamelotCascade:
             [["Visit", "Day"], ["Screening", "-7"]]
         )
 
-        with patch("camelot.read_pdf", return_value=[camelot_table]):
+        # Force pymupdf4llm to fail so the pdfplumber→Camelot cascade runs
+        with (
+            patch(
+                "ptcv.extraction.pdf_extractor.PdfExtractor"
+                "._extract_pymupdf4llm",
+                side_effect=RuntimeError("pymupdf4llm unavailable"),
+            ),
+            patch("camelot.read_pdf", return_value=[camelot_table]),
+        ):
             svc = ExtractionService(gateway=tmp_gateway)
             result = svc.extract(
                 protocol_data=minimal_pdf_bytes,
@@ -438,3 +447,119 @@ class TestRealPdfIntegration:
         assert meta.page_count > 0
         assert meta.source_registry_id == "NCT00112827"
         assert meta.source_sha256 == source_sha
+
+
+# -----------------------------------------------------------------------
+# Vision integration (PTCV-172)
+# -----------------------------------------------------------------------
+
+class _FakeExtLevel:
+    """Minimal stand-in for ExtractionLevel enum value."""
+
+    def __init__(self, value: str):
+        self.value = value
+        self.name = value.upper()
+
+
+class TestVisionIntegration:
+    """PTCV-172: Vision enhancement wired into ExtractionService."""
+
+    def test_e1_triggers_vision(self, tmp_gateway, minimal_pdf_bytes):
+        """ext_level with value='docling_vision' invokes VisionEnhancer."""
+        from ptcv.extraction.vision_enhancer import VisionEnhancementResult
+
+        fake_result = VisionEnhancementResult(
+            text_blocks=[],
+            tables=[],
+            pages_processed=2,
+            total_input_tokens=3600,
+            total_output_tokens=1000,
+            cover_fields={},
+            estimated_cost_usd=0.026,
+        )
+        with patch(
+            "ptcv.extraction.vision_enhancer.VisionEnhancer",
+        ) as MockVE:
+            MockVE.return_value.enhance.return_value = fake_result
+            svc = ExtractionService(gateway=tmp_gateway)
+            result = svc.extract(
+                protocol_data=minimal_pdf_bytes,
+                registry_id="NCT00001",
+                amendment_number="1.0",
+                source_sha256=_SHA,
+                run_id="run-vision-e1",
+                ext_level=_FakeExtLevel("docling_vision"),
+            )
+            MockVE.return_value.enhance.assert_called_once()
+
+    def test_e2_skips_vision(self, tmp_gateway, minimal_pdf_bytes):
+        """ext_level with value='docling' should NOT trigger vision."""
+        with patch(
+            "ptcv.extraction.vision_enhancer.VisionEnhancer",
+        ) as MockVE:
+            svc = ExtractionService(gateway=tmp_gateway)
+            svc.extract(
+                protocol_data=minimal_pdf_bytes,
+                registry_id="NCT00001",
+                amendment_number="1.0",
+                source_sha256=_SHA,
+                run_id="run-vision-e2",
+                ext_level=_FakeExtLevel("docling"),
+            )
+            MockVE.assert_not_called()
+
+    def test_e3_skips_vision(self, tmp_gateway, minimal_pdf_bytes):
+        """ext_level with value='pdfplumber' should NOT trigger vision."""
+        with patch(
+            "ptcv.extraction.vision_enhancer.VisionEnhancer",
+        ) as MockVE:
+            svc = ExtractionService(gateway=tmp_gateway)
+            svc.extract(
+                protocol_data=minimal_pdf_bytes,
+                registry_id="NCT00001",
+                amendment_number="1.0",
+                source_sha256=_SHA,
+                run_id="run-vision-e3",
+                ext_level=_FakeExtLevel("pdfplumber"),
+            )
+            MockVE.assert_not_called()
+
+    def test_vision_failure_non_blocking(
+        self, tmp_gateway, minimal_pdf_bytes
+    ):
+        """Vision enhancement exception is caught; extraction continues."""
+        with patch(
+            "ptcv.extraction.vision_enhancer.VisionEnhancer",
+        ) as MockVE:
+            MockVE.return_value.enhance.side_effect = RuntimeError(
+                "API unavailable"
+            )
+            svc = ExtractionService(gateway=tmp_gateway)
+            result = svc.extract(
+                protocol_data=minimal_pdf_bytes,
+                registry_id="NCT00001",
+                amendment_number="1.0",
+                source_sha256=_SHA,
+                run_id="run-vision-fail",
+                ext_level=_FakeExtLevel("docling_vision"),
+            )
+            # Extraction still succeeds despite vision failure
+            assert result.format_detected == "pdf"
+            assert result.text_block_count >= 0
+
+    def test_none_ext_level_skips_vision(
+        self, tmp_gateway, minimal_pdf_bytes
+    ):
+        """Default ext_level=None should NOT trigger vision."""
+        with patch(
+            "ptcv.extraction.vision_enhancer.VisionEnhancer",
+        ) as MockVE:
+            svc = ExtractionService(gateway=tmp_gateway)
+            svc.extract(
+                protocol_data=minimal_pdf_bytes,
+                registry_id="NCT00001",
+                amendment_number="1.0",
+                source_sha256=_SHA,
+                run_id="run-vision-none",
+            )
+            MockVE.assert_not_called()

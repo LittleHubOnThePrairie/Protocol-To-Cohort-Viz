@@ -51,7 +51,7 @@ def run_query_pipeline(
     enable_summarization: bool = True,
     enable_transformation: bool = False,
     progress_callback: Optional[
-        Callable[[str, float], None]
+        Callable[[str, float, int, int], None]
     ] = None,
 ) -> dict[str, Any]:
     """Orchestrate the full query-driven pipeline.
@@ -88,17 +88,27 @@ def run_query_pipeline(
         assemble_template,
     )
 
-    def _notify(stage: str, progress: float) -> None:
+    def _notify(
+        stage: str, progress: float,
+        done: int = 0, total: int = 0,
+    ) -> None:
         if progress_callback is not None:
-            progress_callback(stage, progress)
+            progress_callback(stage, progress, done, total)
+
+    stage_timings: dict[str, float] = {}
 
     # Stage 1: Extract protocol index
     _notify("Document Assembly", 0.0)
+    t0 = time.monotonic()
     protocol_index = extract_protocol_index(pdf_path)
+    stage_timings["document_assembly"] = round(
+        time.monotonic() - t0, 3
+    )
     _notify("Document Assembly", 1.0)
 
     # Stage 2: Section matching (keyword-only, PTCV-102)
     _notify("Section Classification", 0.0)
+    t0 = time.monotonic()
     matcher = SectionMatcher()
     match_result = matcher.match(protocol_index)
 
@@ -107,21 +117,53 @@ def run_query_pipeline(
     if enable_summarization:
         api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
         summarizer = SummarizationMatcher(anthropic_api_key=api_key)
-        enriched_result = summarizer.refine(match_result, protocol_index)
+
+        def _on_classify(done: int, total: int) -> None:
+            if total > 0:
+                _notify(
+                    "Section Classification",
+                    done / total,
+                    done, total,
+                )
+
+        enriched_result = summarizer.refine(
+            match_result, protocol_index,
+            progress_callback=_on_classify,
+        )
+    stage_timings["section_classification"] = round(
+        time.monotonic() - t0, 3
+    )
     _notify("Section Classification", 1.0)
 
     # Stage 3: Query extraction (PTCV-103: optional LLM transform)
     _notify("Query Extraction", 0.0)
+    t0 = time.monotonic()
     api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
     extractor = QueryExtractor(
         enable_transformation=enable_transformation,
         anthropic_api_key=api_key,
     )
-    extraction_result = extractor.extract(protocol_index, match_result)
+
+    def _on_extract(done: int, total: int) -> None:
+        if total > 0:
+            _notify(
+                "Query Extraction",
+                done / total,
+                done, total,
+            )
+
+    extraction_result = extractor.extract(
+        protocol_index, match_result,
+        progress_callback=_on_extract,
+    )
+    stage_timings["query_extraction"] = round(
+        time.monotonic() - t0, 3
+    )
     _notify("Query Extraction", 1.0)
 
     # Stage 4: Template assembly
     _notify("Result Aggregation", 0.0)
+    t0 = time.monotonic()
     hits = []
     for ext in extraction_result.extractions:
         parent = ext.section_id.rsplit(".", 1)[0] if "." in ext.section_id else ext.section_id
@@ -138,7 +180,12 @@ def run_query_pipeline(
         ))
 
     assembled = assemble_template(hits)
+    stage_timings["result_aggregation"] = round(
+        time.monotonic() - t0, 3
+    )
     _notify("Result Aggregation", 1.0)
+
+    logger.info("Pipeline stage timings: %s", stage_timings)
 
     return {
         "protocol_index": protocol_index,
@@ -148,6 +195,7 @@ def run_query_pipeline(
         "assembled": assembled,
         "assembled_markdown": assembled.to_markdown(),
         "coverage": assembled.coverage,
+        "stage_timings": stage_timings,
     }
 
 
@@ -346,6 +394,118 @@ def count_extraction_methods(
     return counts
 
 
+def format_provenance_badge(section: Any) -> dict[str, str]:
+    """Format provenance metadata for a classified section (PTCV-179).
+
+    Args:
+        section: ``AssembledSection`` with provenance fields.
+
+    Returns:
+        Dict with keys: ``extraction_method``, ``classification_method``,
+        ``confidence_label``, ``confidence_color``.
+    """
+    ext = getattr(section, "extraction_method", "") or ""
+    cls = getattr(section, "classification_method", "") or ""
+    avg = getattr(section, "average_confidence", 0.0)
+    return {
+        "extraction_method": ext,
+        "classification_method": cls,
+        "confidence_label": confidence_label(avg),
+        "confidence_color": confidence_color(avg),
+    }
+
+
+def format_pipeline_comparison_rows(
+    query_assembled: Any,
+    classified_assembled: Any,
+) -> list[dict[str, Any]]:
+    """Build per-section query-vs-classified comparison rows (PTCV-179).
+
+    For each ICH section populated in either pipeline's output, pairs
+    the query pipeline extracted content with the classified pipeline
+    extracted content for side-by-side comparison.
+
+    Args:
+        query_assembled: ``AssembledProtocol`` from query pipeline.
+        classified_assembled: ``AssembledProtocol`` from classified
+            pipeline.
+
+    Returns:
+        List of dicts with keys: ``ich_code``, ``ich_name``,
+        ``query_text``, ``query_confidence``, ``classified_text``,
+        ``classified_confidence``, ``classified_method``,
+        ``confidence_delta``.
+    """
+    # Inline sort key to avoid ptcv.ich_parser __init__ import chain.
+    def _sort_key(code: str) -> list[int]:
+        return [int(p) if p.isdigit() else 0 for p in code.split(".")]
+
+    # Collect all section codes present in either assembled output.
+    codes: set[str] = set()
+    for src in (query_assembled, classified_assembled):
+        if src is None:
+            continue
+        for sec in getattr(src, "sections", []):
+            if getattr(sec, "populated", False):
+                codes.add(getattr(sec, "section_code", ""))
+
+    rows: list[dict[str, Any]] = []
+    for code in sorted(codes, key=_sort_key):
+        q_sec = (
+            query_assembled.get_section(code)
+            if query_assembled is not None else None
+        )
+        c_sec = (
+            classified_assembled.get_section(code)
+            if classified_assembled is not None else None
+        )
+
+        q_text = ""
+        q_conf = 0.0
+        if q_sec and getattr(q_sec, "populated", False):
+            parts = [
+                getattr(h, "extracted_content", "").strip()
+                for h in getattr(q_sec, "hits", [])
+                if getattr(h, "extracted_content", "")
+            ]
+            q_text = "\n\n".join(parts)
+            q_conf = getattr(q_sec, "average_confidence", 0.0)
+
+        c_text = ""
+        c_conf = 0.0
+        c_method = ""
+        if c_sec and getattr(c_sec, "populated", False):
+            parts = [
+                getattr(h, "extracted_content", "").strip()
+                for h in getattr(c_sec, "hits", [])
+                if getattr(h, "extracted_content", "")
+            ]
+            c_text = "\n\n".join(parts)
+            c_conf = getattr(c_sec, "average_confidence", 0.0)
+            ext = getattr(c_sec, "extraction_method", "") or ""
+            cls = getattr(c_sec, "classification_method", "") or ""
+            method_parts = [p for p in (ext, cls) if p]
+            c_method = " | ".join(method_parts)
+
+        if not q_text and not c_text:
+            continue
+
+        rows.append({
+            "ich_code": code,
+            "ich_name": getattr(
+                q_sec or c_sec, "section_name", code,
+            ),
+            "query_text": q_text,
+            "query_confidence": round(q_conf, 2),
+            "classified_text": c_text,
+            "classified_confidence": round(c_conf, 2),
+            "classified_method": c_method,
+            "confidence_delta": round(c_conf - q_conf, 2),
+        })
+
+    return rows
+
+
 def format_coverage_metrics(coverage: Any) -> dict[str, Any]:
     """Extract key coverage metrics from a CoverageReport.
 
@@ -373,6 +533,80 @@ def format_coverage_metrics(coverage: Any) -> dict[str, Any]:
         "review_pct": round(review / total * 100, 1) if total else 0.0,
         "low_pct": round(low / total * 100, 1) if total else 0.0,
     }
+
+
+def format_comparison_rows(
+    assembled: Any,
+    protocol_index: Any,
+    match_result: Any,
+) -> list[dict[str, Any]]:
+    """Build per-section original-vs-extracted comparison rows (PTCV-141).
+
+    For each populated section in the assembled template, looks up the
+    original protocol text via the section matching mappings and pairs
+    it with the extracted/transformed content.
+
+    Args:
+        assembled: ``AssembledProtocol`` with populated sections.
+        protocol_index: ``ProtocolIndex`` with ``content_spans``.
+        match_result: ``MatchResult`` with section mappings.
+
+    Returns:
+        List of dicts with keys: ``ich_code``, ``ich_name``,
+        ``protocol_section``, ``original_text``, ``extracted_text``,
+        ``confidence``, ``query_count``.
+    """
+    # Build ICH code → protocol section number lookup from mappings.
+    ich_to_proto: dict[str, list[str]] = {}
+    for mapping in getattr(match_result, "mappings", []):
+        matches = getattr(mapping, "matches", [])
+        if matches:
+            code = getattr(matches[0], "ich_section_code", "")
+            proto_num = getattr(
+                mapping, "protocol_section_number", "",
+            )
+            if code and proto_num:
+                ich_to_proto.setdefault(code, []).append(proto_num)
+
+    rows: list[dict[str, Any]] = []
+    for section in getattr(assembled, "sections", []):
+        code = getattr(section, "section_code", "")
+        name = getattr(section, "section_name", "")
+        if not getattr(section, "populated", False):
+            continue
+
+        # Gather original text from mapped protocol sections.
+        proto_nums = ich_to_proto.get(code, [])
+        original_parts: list[str] = []
+        for pn in proto_nums:
+            text = protocol_index.get_section_text(pn)
+            if text:
+                original_parts.append(text.strip())
+        original_text = "\n\n".join(original_parts)
+
+        # Gather extracted content from hits.
+        extracted_parts: list[str] = []
+        for hit in getattr(section, "hits", []):
+            content = getattr(hit, "extracted_content", "")
+            if content:
+                extracted_parts.append(content.strip())
+        extracted_text = "\n\n".join(extracted_parts)
+
+        rows.append({
+            "ich_code": code,
+            "ich_name": name,
+            "protocol_section": ", ".join(proto_nums) or "(none)",
+            "original_text": original_text,
+            "extracted_text": extracted_text,
+            "confidence": round(
+                getattr(section, "average_confidence", 0.0), 2,
+            ),
+            "query_count": len(
+                getattr(section, "hits", []),
+            ),
+        })
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -439,17 +673,49 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                     0, text=stage_name,
                 )
 
+            stage_start_times: dict[str, float] = {}
+
             def _on_stage(
                 stage: str, progress: float,
+                done: int = 0, total: int = 0,
             ) -> None:
                 if stage not in bars:
                     return
+                # Track stage start time (PTCV-124)
+                if progress == 0.0:
+                    stage_start_times[stage] = time.monotonic()
+                elapsed = time.monotonic() - stage_start_times.get(
+                    stage, time.monotonic()
+                )
+                elapsed_str = f"{elapsed:.1f}s"
                 pct = int(progress * 100)
                 if progress >= 1.0:
                     bars[stage].progress(
                         100,
-                        text=f":white_check_mark: {stage}",
+                        text=(
+                            f":white_check_mark: {stage}"
+                            f" \u2014 {elapsed_str}"
+                        ),
                     )
+                elif 0.0 < progress < 1.0:
+                    if total > 0:
+                        bars[stage].progress(
+                            max(pct, 3),
+                            text=(
+                                f":hourglass_flowing_sand: "
+                                f"{stage} \u2014 "
+                                f"{done}/{total} ({pct}%) "
+                                f"\u2014 {elapsed_str}"
+                            ),
+                        )
+                    else:
+                        bars[stage].progress(
+                            max(pct, 3),
+                            text=(
+                                f":hourglass_flowing_sand: "
+                                f"{stage}... {pct}%"
+                            ),
+                        )
                 else:
                     bars[stage].progress(
                         max(pct, 3),
@@ -469,9 +735,48 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                 elapsed = time.monotonic() - t0
                 st.session_state["query_cache"][cache_key] = result
                 cached = result
-                st.success(
-                    f"Query Pipeline: Complete ({elapsed:.1f}s)"
-                )
+
+                # Persist artifacts to disk (PTCV-126: ALCOA++)
+                try:
+                    from ptcv.ui.query_persistence import (
+                        save_query_artifacts,
+                    )
+                    _gw = st.session_state.get("gateway")
+                    if _gw is not None:
+                        _stem = Path(file_path).stem
+                        _reg_id = _stem.split("_", 1)[0]
+                        save_query_artifacts(
+                            _gw, file_sha, result,
+                            registry_id=_reg_id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist query artifacts",
+                        exc_info=True,
+                    )
+
+                # Session checkpoint (PTCV-126)
+                try:
+                    from ptcv.ui.checkpoint_manager import (
+                        save_checkpoint,
+                    )
+                    _cp_root = getattr(
+                        _gw, "root", Path("data"),
+                    ) if _gw else Path("data")
+                    save_checkpoint(
+                        _cp_root, file_sha,
+                        "query_cache", result,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to save query checkpoint",
+                        exc_info=True,
+                    )
+
+                # Force rerun so that tabs rendered earlier in
+                # the script (e.g. SoA & SDTM) pick up the
+                # freshly-cached query results (PTCV-130).
+                st.rerun()
             except Exception:
                 elapsed = time.monotonic() - t0
                 st.error(
@@ -642,3 +947,194 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
         mime="text/markdown",
         key="btn_dl_assembled",
     )
+
+    # --- Content Comparison (PTCV-141, PTCV-179) ---
+    st.divider()
+    st.subheader("Content Comparison")
+
+    # Pipeline comparison mode toggle (PTCV-179).
+    from ptcv.soa_extractor.query_bridge import (
+        get_classified_assembled_protocol,
+        has_classified_results,
+    )
+    _has_classified = has_classified_results(
+        st.session_state, file_sha,
+    )
+    comparison_mode = "Original vs Extracted"
+    if _has_classified:
+        comparison_mode = st.radio(
+            "Comparison mode",
+            ["Original vs Extracted", "Pipeline Comparison"],
+            key="radio_comparison_mode",
+            horizontal=True,
+        )
+    else:
+        st.caption(
+            "Pipeline Comparison mode available when classified "
+            "pipeline results exist."
+        )
+
+    if comparison_mode == "Pipeline Comparison":
+        classified_assembled = get_classified_assembled_protocol(
+            st.session_state, file_sha,
+        )
+        pipeline_rows = format_pipeline_comparison_rows(
+            assembled, classified_assembled,
+        )
+        if not pipeline_rows:
+            st.info("No sections to compare across pipelines.")
+        else:
+            pl_labels = [
+                f"{r['ich_code']} \u2014 {r['ich_name']}"
+                for r in pipeline_rows
+            ]
+            pl_selected = st.selectbox(
+                "Select section to compare",
+                options=range(len(pl_labels)),
+                format_func=lambda i: pl_labels[i],
+                key="sb_pipeline_compare_section",
+            )
+            pl_row = pipeline_rows[pl_selected]
+
+            delta = pl_row["confidence_delta"]
+            delta_label = f"{delta:+.2f}" if delta != 0 else "equal"
+            st.caption(
+                f"Confidence delta: **{delta_label}** "
+                f"(Query: {pl_row['query_confidence']:.2f} | "
+                f"Classified: "
+                f"{pl_row['classified_confidence']:.2f})"
+            )
+            if pl_row.get("classified_method"):
+                st.caption(
+                    f"Classified provenance: "
+                    f"**{pl_row['classified_method']}**"
+                )
+
+            col_q, col_c = st.columns(2)
+            with col_q:
+                st.markdown("**Query Pipeline**")
+                with st.container(height=400):
+                    if pl_row["query_text"]:
+                        st.markdown(pl_row["query_text"])
+                    else:
+                        st.info("No query pipeline content.")
+            with col_c:
+                st.markdown("**Classified Pipeline**")
+                with st.container(height=400):
+                    if pl_row["classified_text"]:
+                        st.markdown(pl_row["classified_text"])
+                    else:
+                        st.info(
+                            "No classified pipeline content."
+                        )
+    else:
+        # Original vs Extracted (existing PTCV-141 logic).
+        comparison_rows = format_comparison_rows(
+            assembled, protocol_index, match_result,
+        )
+        if not comparison_rows:
+            st.info("No populated sections for comparison.")
+        else:
+            section_labels = [
+                f"{r['ich_code']} \u2014 {r['ich_name']}"
+                for r in comparison_rows
+            ]
+            selected = st.selectbox(
+                "Select section to compare",
+                options=range(len(section_labels)),
+                format_func=lambda i: section_labels[i],
+                key="sb_compare_section",
+            )
+            row = comparison_rows[selected]
+
+            st.caption(
+                f"Protocol section(s): "
+                f"**{row['protocol_section']}** "
+                f"| Confidence: **{row['confidence']:.2f}** "
+                f"| Queries: **{row['query_count']}**"
+            )
+
+            # Provenance metadata (PTCV-179).
+            section_obj = assembled.get_section(
+                row["ich_code"],
+            )
+            if section_obj and (
+                getattr(section_obj, "extraction_method", "")
+                or getattr(
+                    section_obj, "classification_method", "",
+                )
+            ):
+                badge = format_provenance_badge(section_obj)
+                prov_parts = []
+                if badge["extraction_method"]:
+                    prov_parts.append(badge["extraction_method"])
+                if badge["classification_method"]:
+                    prov_parts.append(
+                        badge["classification_method"],
+                    )
+                st.caption(
+                    f"Provenance: {' | '.join(prov_parts)} | "
+                    f"Confidence: "
+                    f":{badge['confidence_color']}["
+                    f"{badge['confidence_label']}]"
+                )
+
+            col_orig, col_ext = st.columns(2)
+            with col_orig:
+                st.markdown("**Original (PDF)**")
+                with st.container(height=400):
+                    if row["original_text"]:
+                        st.text(row["original_text"])
+                    else:
+                        st.info(
+                            "No original text mapped for "
+                            "this section."
+                        )
+            with col_ext:
+                st.markdown("**Extracted**")
+                with st.container(height=400):
+                    if row["extracted_text"]:
+                        st.markdown(row["extracted_text"])
+                    else:
+                        st.info("No extracted content.")
+
+    # --- Unified Pipeline Progress Summary (PTCV-179) ---
+    st.divider()
+    st.subheader("Pipeline Stage Summary")
+
+    from ptcv.ui.components.progress_tracker import (
+        format_stage_display,
+        map_classified_stages_to_unified,
+        map_query_stages_to_unified,
+        merge_pipeline_stages,
+    )
+
+    query_stages = map_query_stages_to_unified(
+        cached.get("stage_timings", {}),
+    )
+    classified_stages = None
+    if _has_classified:
+        _cl_cache = st.session_state.get(
+            "classified_cache", {},
+        ).get(file_sha, {})
+        classified_stages = map_classified_stages_to_unified(
+            _cl_cache.get("cascade_stats"),
+            _cl_cache.get("stage_timings"),
+        )
+    merged = merge_pipeline_stages(query_stages, classified_stages)
+
+    # Render 8 stages as 4x2 grid.
+    for row_start in (0, 4):
+        cols = st.columns(4)
+        for i, col in enumerate(cols):
+            idx = row_start + i
+            if idx >= len(merged):
+                break
+            stage = merged[idx]
+            display = format_stage_display(stage)
+            with col:
+                st.markdown(
+                    f"{display['icon']} **{display['label']}**",
+                )
+                if display["detail_text"]:
+                    st.caption(display["detail_text"])

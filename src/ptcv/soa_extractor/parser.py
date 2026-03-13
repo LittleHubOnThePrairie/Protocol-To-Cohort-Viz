@@ -49,6 +49,17 @@ _SEPARATOR_LINE_RE = re.compile(r"^\|[-|:\s]+\|$")
 # Activity cell markers: "X", "x", "•", "✓", "Y", "yes", "1"
 _MARKED_RE = re.compile(r"^[Xx✓•Y1]$|^[Yy]es$", re.IGNORECASE)
 
+# Visit-header patterns — tokens that look like clinical visit/timepoint names.
+# Used to validate aligned-table headers are not just random English words.
+_VISIT_HEADER_RE = re.compile(
+    r"(?:V(?:isit)?\s*\d|D(?:ay)?\s*-?\d|W(?:eek|k)?\s*\d"
+    r"|Screen|Baseline|BL\b|EOT\b|EOS\b|Follow|FU\d"
+    r"|Rand|Month\s*\d|Cycle\s*\d|C\d+D\d+"
+    r"|Pre.?dose|Post.?dose|Early.?Term|ET\b"
+    r"|Dose\s*\d|Period\s*\d|Enrol|End.of)",
+    re.IGNORECASE,
+)
+
 
 class SoaTableParser:
     """Extract the first SoA table from a list of IchSection objects.
@@ -180,6 +191,11 @@ class SoaTableParser:
         if not activities:
             return None
 
+        # Reject tables with zero scheduled markers — prose text parsed
+        # as a table will have no X/✓ markers (PTCV-128).
+        if not any(any(sched) for _, sched in activities):
+            return None
+
         # Strip the first column header (typically "Activity" or "Assessment")
         visit_headers = header_row[1:]
         day_headers = day_row[1:] if day_row else []
@@ -194,23 +210,34 @@ class SoaTableParser:
     def _parse_aligned_table(
         self, text: str, section_code: str
     ) -> Optional[RawSoaTable]:
-        """Parse a whitespace-aligned SoA table (two-or-more column columns).
+        """Parse a whitespace-aligned SoA table (two-or-more columns).
 
-        Only attempted if the text contains SoA indicator keywords.
+        Only attempted if the text contains SoA indicator keywords *near*
+        candidate table lines. This prevents a keyword buried in a 30K
+        prose block from triggering table detection on unrelated text
+        (PTCV-128).
         """
-        if not _SOA_KEYWORDS.search(text):
+        kw_match = _SOA_KEYWORDS.search(text)
+        if not kw_match:
             return None
 
         lines = text.splitlines()
+
+        # Restrict search to a window around the keyword match to avoid
+        # treating distant prose as table rows (PTCV-128).
+        kw_line_idx = text[:kw_match.start()].count("\n")
+        window = 80  # lines above/below the keyword
+        start = max(0, kw_line_idx - window)
+        end = min(len(lines), kw_line_idx + window)
+        candidate_lines = lines[start:end]
+
         # Find lines with 3+ whitespace-separated tokens that look like
         # a table (first column non-numeric, subsequent columns look like
         # markers or visit labels).
         data_lines: list[list[str]] = []
-        for line in lines:
+        for line in candidate_lines:
             tokens = line.split()
             if len(tokens) >= 3:
-                # First token is activity name (possibly multi-word but
-                # in aligned tables row headers are often single words)
                 data_lines.append(tokens)
 
         if len(data_lines) < 2:
@@ -219,6 +246,20 @@ class SoaTableParser:
         # The first data line is treated as column headers
         header_row = data_lines[0]
         visit_headers = header_row[1:]  # everything after row-header column
+
+        # Validate that enough headers look like visit/timepoint names
+        # rather than random English words (PTCV-128, PTCV-151).
+        # Require at least 3 visit columns and at least 2 (or 50% of
+        # headers) matching visit patterns to prevent prose tokenisation.
+        if len(visit_headers) < 3:
+            return None
+        visit_like = sum(
+            1 for h in visit_headers if _VISIT_HEADER_RE.search(h)
+        )
+        min_required = max(2, len(visit_headers) // 2)
+        if visit_like < min_required:
+            return None
+
         activities: list[tuple[str, list[bool]]] = []
 
         for row in data_lines[1:]:
@@ -233,6 +274,10 @@ class SoaTableParser:
             activities.append((name, scheduled[:n]))
 
         if not activities:
+            return None
+
+        # Reject tables with zero scheduled markers (PTCV-128).
+        if not any(any(sched) for _, sched in activities):
             return None
 
         return RawSoaTable(
