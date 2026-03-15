@@ -24,11 +24,12 @@ Regulatory references:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ from .writer import UsdmParquetWriter
 
 
 _DEFAULT_REVIEW_DB = Path("C:/Dev/PTCV/data/sqlite/review_queue.db")
+_DEFAULT_REGISTRY_CACHE = Path(
+    "C:/Dev/PTCV/data/protocols/clinicaltrials/registry_cache"
+)
 _USER = "ptcv-soa-extractor"
 
 # Synonym mappings below this threshold are routed to the review queue
@@ -89,6 +93,33 @@ class SoaExtractor:
 
         self._gateway.initialise()
         self._review_queue.initialise()
+
+    # ------------------------------------------------------------------
+    # Registry metadata (PTCV-198)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_registry_metadata(registry_id: str) -> dict[str, Any] | None:
+        """Load cached ClinicalTrials.gov metadata for NCT IDs.
+
+        Reads from the same cache directory that
+        ``RegistryMetadataFetcher`` (PTCV-194) writes to.  Returns
+        None when the registry_id is not an NCT ID or the cache file
+        does not exist — in that case Level 3 proceeds without
+        registry context.
+        """
+        if not registry_id.startswith("NCT"):
+            return None
+        cache_path = _DEFAULT_REGISTRY_CACHE / f"{registry_id}.json"
+        if not cache_path.exists():
+            return None
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.debug(
+                "Could not load registry cache for %s", registry_id,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -186,11 +217,13 @@ class SoaExtractor:
         activity_count = sum(len(t.activities) for t in tables)
         if activity_count < MIN_ACTIVITIES_THRESHOLD:
             partial_tables = tables if tables else None
+            reg_meta = self._load_registry_metadata(registry_id)
             try:
                 llm_tables = self._llm_builder.build(
                     sections=sections,
                     text_blocks=text_blocks,
                     partial_tables=partial_tables,
+                    registry_metadata=reg_meta,
                 )
                 if llm_tables:
                     tables = llm_tables

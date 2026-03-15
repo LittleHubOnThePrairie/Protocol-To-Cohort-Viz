@@ -614,3 +614,158 @@ Schedule of Activities
             source_sha256="a" * 64,
         )
         assert result is not None
+
+
+# ------------------------------------------------------------------
+# TestRegistryContext — PTCV-198 GHERKIN scenarios
+# ------------------------------------------------------------------
+
+
+def _make_registry_metadata(
+    *,
+    primary_outcomes: list[dict] | None = None,
+    secondary_outcomes: list[dict] | None = None,
+    interventions: list[dict] | None = None,
+    eligibility: dict | None = None,
+    design_info: dict | None = None,
+    enrollment: dict | None = None,
+) -> dict:
+    """Build a CT.gov API v2-shaped metadata dict."""
+    protocol: dict = {}
+
+    outcomes: dict = {}
+    if primary_outcomes is not None:
+        outcomes["primaryOutcomes"] = primary_outcomes
+    if secondary_outcomes is not None:
+        outcomes["secondaryOutcomes"] = secondary_outcomes
+    if outcomes:
+        protocol["outcomesModule"] = outcomes
+
+    if interventions is not None:
+        protocol["armsInterventionsModule"] = {
+            "interventions": interventions,
+        }
+
+    if eligibility is not None:
+        protocol["eligibilityModule"] = eligibility
+
+    design: dict = {}
+    if design_info is not None:
+        design["designInfo"] = design_info
+    if enrollment is not None:
+        design["enrollmentInfo"] = enrollment
+    if design:
+        protocol["designModule"] = design
+
+    return {"protocolSection": protocol}
+
+
+class TestRegistryContext:
+    """PTCV-198: Registry-enriched SoA construction."""
+
+    def test_prompt_includes_registry_endpoints(self):
+        """Scenario 1: Sonnet prompt includes registry endpoints."""
+        meta = _make_registry_metadata(
+            primary_outcomes=[
+                {
+                    "measure": "Overall Survival",
+                    "timeFrame": "From randomization to death, up to 60 months",
+                },
+            ],
+            secondary_outcomes=[
+                {
+                    "measure": "Progression-Free Survival",
+                    "timeFrame": "Every 8 weeks until progression",
+                },
+            ],
+        )
+        result = LlmSoaBuilder._format_registry_context(meta)
+
+        assert "Registry Context" in result
+        assert "Overall Survival" in result
+        assert "60 months" in result
+        assert "Progression-Free Survival" in result
+        assert "Every 8 weeks" in result
+
+    def test_registry_context_improves_assessment_detection(self):
+        """Scenario 2: Registry context included in Sonnet prompt."""
+        meta = _make_registry_metadata(
+            primary_outcomes=[
+                {
+                    "measure": "Tumor response per RECIST v1.1",
+                    "timeFrame": "Every 8 weeks from baseline",
+                },
+            ],
+            interventions=[
+                {
+                    "type": "DRUG",
+                    "name": "Pembrolizumab",
+                    "description": "200 mg IV Q3W",
+                },
+            ],
+        )
+
+        builder = LlmSoaBuilder()
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _FakeResponse(
+            _make_soa_response()
+        )
+        builder._client = mock_client
+
+        sections = [_make_section("B.4", "Trial Design: parallel-group")]
+        builder.build(sections=sections, registry_metadata=meta)
+
+        call_kwargs = mock_client.messages.create.call_args
+        prompt = call_kwargs.kwargs["messages"][0]["content"]
+        assert "Tumor response per RECIST" in prompt
+        assert "Every 8 weeks" in prompt
+        assert "Pembrolizumab" in prompt
+
+    def test_graceful_without_registry_data(self):
+        """Scenario 3: Graceful operation without registry data."""
+        builder = LlmSoaBuilder()
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _FakeResponse(
+            _make_soa_response()
+        )
+        builder._client = mock_client
+
+        sections = [_make_section("B.4", "Trial Design: parallel-group")]
+        result = builder.build(sections=sections, registry_metadata=None)
+
+        assert result is not None
+        # Verify "Registry Context" is NOT in the prompt
+        call_kwargs = mock_client.messages.create.call_args
+        prompt = call_kwargs.kwargs["messages"][0]["content"]
+        assert "Registry Context" not in prompt
+
+    def test_registry_context_truncated(self):
+        """Scenario 4: Registry context bounded by token limit."""
+        from ptcv.soa_extractor.llm_soa_builder import (
+            _MAX_REGISTRY_CONTEXT_CHARS,
+        )
+
+        # Build oversized metadata with many outcomes
+        primary = [
+            {
+                "measure": f"Endpoint {i}: " + "x" * 200,
+                "timeFrame": f"Timeframe {i}: " + "y" * 100,
+            }
+            for i in range(30)
+        ]
+        meta = _make_registry_metadata(
+            primary_outcomes=primary,
+            interventions=[
+                {
+                    "type": "DRUG",
+                    "name": f"Drug{i}",
+                    "description": "z" * 120,
+                }
+                for i in range(20)
+            ],
+        )
+        result = LlmSoaBuilder._format_registry_context(meta)
+
+        assert len(result) <= _MAX_REGISTRY_CONTEXT_CHARS
+        # High-priority endpoints should be preserved
+        assert "Endpoint 0" in result

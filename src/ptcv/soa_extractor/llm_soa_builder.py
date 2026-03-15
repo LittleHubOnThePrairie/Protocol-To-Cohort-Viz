@@ -40,6 +40,7 @@ _DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 _MAX_SECTION_CHARS = 6000
 _MAX_TOTAL_CHARS = 20000
 _MAX_TOKENS = 4096
+_MAX_REGISTRY_CONTEXT_CHARS = 3000  # PTCV-198 Scenario 4
 MIN_ACTIVITIES_THRESHOLD = 3
 
 # Section heading patterns for heuristic detection from raw text_blocks
@@ -80,6 +81,8 @@ _SOA_SYSTEM_PROMPT = (
 _SOA_USER_PROMPT = """\
 Construct a Schedule of Activities (SoA) matrix from the following \
 clinical trial protocol sections.
+
+{registry_context}
 
 {section_texts}
 
@@ -303,6 +306,127 @@ class LlmSoaBuilder:
         return "\n".join(lines)
 
     # ----------------------------------------------------------
+    # Registry context formatting (PTCV-198)
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _format_registry_context(
+        registry_metadata: Optional[dict[str, Any]],
+    ) -> str:
+        """Format ClinicalTrials.gov registry metadata as Sonnet context.
+
+        Priority order (endpoints > interventions > eligibility > design)
+        ensures the most clinically relevant data survives truncation.
+
+        Args:
+            registry_metadata: Raw CT.gov API v2 JSON dict, or None.
+
+        Returns:
+            Formatted context string, empty if no metadata.
+
+        [PTCV-198 Scenario: Registry context bounded by token limit]
+        """
+        if not registry_metadata:
+            return ""
+
+        protocol = registry_metadata.get("protocolSection", {})
+        if not protocol:
+            return ""
+
+        sections: list[str] = []
+
+        # 1. Endpoints (highest priority)
+        outcomes = protocol.get("outcomesModule", {})
+        primary = outcomes.get("primaryOutcomes", [])
+        secondary = outcomes.get("secondaryOutcomes", [])
+        if primary or secondary:
+            lines = ["Endpoints:"]
+            for o in primary:
+                measure = o.get("measure", "")
+                tf = o.get("timeFrame", "")
+                if measure:
+                    entry = f"  Primary: {measure}"
+                    if tf:
+                        entry += f" (timeFrame: {tf})"
+                    lines.append(entry)
+            for o in secondary:
+                measure = o.get("measure", "")
+                tf = o.get("timeFrame", "")
+                if measure:
+                    entry = f"  Secondary: {measure}"
+                    if tf:
+                        entry += f" (timeFrame: {tf})"
+                    lines.append(entry)
+            sections.append("\n".join(lines))
+
+        # 2. Interventions
+        arms_mod = protocol.get("armsInterventionsModule", {})
+        interventions = arms_mod.get("interventions", [])
+        if interventions:
+            lines = ["Interventions:"]
+            for iv in interventions:
+                iv_type = iv.get("type", "")
+                iv_name = iv.get("name", "")
+                iv_desc = iv.get("description", "")
+                if iv_name:
+                    entry = f"  {iv_type}: {iv_name}"
+                    if iv_desc:
+                        entry += f" — {iv_desc[:120]}"
+                    lines.append(entry)
+            sections.append("\n".join(lines))
+
+        # 3. Eligibility
+        elig = protocol.get("eligibilityModule", {})
+        if elig:
+            lines = ["Eligibility:"]
+            age_min = elig.get("minimumAge", "")
+            age_max = elig.get("maximumAge", "")
+            sex = elig.get("sex", "")
+            if age_min or age_max:
+                lines.append(f"  Age: {age_min} – {age_max}")
+            if sex:
+                lines.append(f"  Sex: {sex}")
+            if len(lines) > 1:
+                sections.append("\n".join(lines))
+
+        # 4. Design
+        design = protocol.get("designModule", {})
+        design_info = design.get("designInfo", {})
+        enrollment = design.get("enrollmentInfo", {})
+        if design_info or enrollment:
+            lines = ["Design:"]
+            for field in ("allocation", "interventionModel",
+                          "primaryPurpose"):
+                val = design_info.get(field, "")
+                if val:
+                    lines.append(f"  {field}: {val}")
+            masking = design_info.get("maskingInfo", {})
+            if masking:
+                masking_val = masking.get("masking", "")
+                if masking_val:
+                    lines.append(f"  masking: {masking_val}")
+            count = enrollment.get("count")
+            if count:
+                lines.append(
+                    f"  enrollment: {count} ({enrollment.get('type', '')})"
+                )
+            if len(lines) > 1:
+                sections.append("\n".join(lines))
+
+        if not sections:
+            return ""
+
+        # Assemble with header, truncate to limit
+        header = "Registry Context (ClinicalTrials.gov):"
+        body = "\n\n".join(sections)
+        full = f"{header}\n{body}"
+
+        if len(full) > _MAX_REGISTRY_CONTEXT_CHARS:
+            full = full[:_MAX_REGISTRY_CONTEXT_CHARS].rsplit("\n", 1)[0]
+
+        return full
+
+    # ----------------------------------------------------------
     # Prompt construction
     # ----------------------------------------------------------
 
@@ -310,6 +434,7 @@ class LlmSoaBuilder:
         self,
         section_texts: dict[str, str],
         partial_context: str,
+        registry_context: str = "",
     ) -> str:
         """Construct the Sonnet user prompt."""
         parts: list[str] = []
@@ -329,6 +454,7 @@ class LlmSoaBuilder:
         return _SOA_USER_PROMPT.format(
             section_texts=section_block,
             partial_context=partial_context,
+            registry_context=registry_context,
         )
 
     # ----------------------------------------------------------
@@ -452,6 +578,7 @@ class LlmSoaBuilder:
         sections: Optional[list[Any]] = None,
         text_blocks: Optional[list[dict[str, Any]]] = None,
         partial_tables: Optional[list[RawSoaTable]] = None,
+        registry_metadata: Optional[dict[str, Any]] = None,
     ) -> list[RawSoaTable] | None:
         """Construct SoA tables from protocol text via Sonnet.
 
@@ -466,6 +593,8 @@ class LlmSoaBuilder:
                 ``page_number`` and ``text`` keys.
             partial_tables: Optional partial ``RawSoaTable``
                 results from Levels 1/2 as context.
+            registry_metadata: Optional CT.gov API v2 JSON dict
+                for prompt enrichment (PTCV-198).
 
         Returns:
             List of ``RawSoaTable`` with
@@ -473,6 +602,7 @@ class LlmSoaBuilder:
 
         [PTCV-166 Scenario: Sonnet constructs SoA when Docling
          and vision both fail]
+        [PTCV-198 Scenario: Registry-enriched SoA construction]
         """
         section_texts = self._gather_section_text(
             sections=sections,
@@ -487,7 +617,10 @@ class LlmSoaBuilder:
             return None
 
         partial_context = self._format_partial_context(partial_tables)
-        prompt = self._build_prompt(section_texts, partial_context)
+        registry_context = self._format_registry_context(registry_metadata)
+        prompt = self._build_prompt(
+            section_texts, partial_context, registry_context,
+        )
 
         raw_text, input_tokens, output_tokens = self._call_sonnet(
             prompt
