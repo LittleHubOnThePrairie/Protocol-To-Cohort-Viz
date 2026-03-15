@@ -18,6 +18,7 @@ from .fallback import (
 )
 from .gdelt_adapter import GdeltAdapter, GdeltSearchResult, NewswireArticle
 from .ich_mapper import MappedRegistrySection, MetadataToIchMapper
+from .newsdata_adapter import NewsdataAdapter, NewsdataSearchResult
 from .metadata_fetcher import RegistryMetadataFetcher
 from .rag_seeder import RegistryRagSeeder, SeedResult
 
@@ -28,6 +29,8 @@ __all__ = [
     "GdeltSearchResult",
     "MappedRegistrySection",
     "MetadataToIchMapper",
+    "NewsdataAdapter",
+    "NewsdataSearchResult",
     "NewswireArticle",
     "RegistryEnrichmentResult",
     "RegistryMetadataFetcher",
