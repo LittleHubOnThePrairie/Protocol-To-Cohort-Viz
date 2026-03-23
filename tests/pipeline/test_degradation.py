@@ -16,29 +16,20 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
-# Import directly from the module file to avoid heavy transitive deps
-# (fitz/PyMuPDF, torch, etc.) that ptcv.pipeline.__init__ pulls in.
-import importlib.util as _ilu
-import types as _types
-
-_DEG_PATH = (
-    Path(__file__).parents[2] / "src" / "ptcv" / "pipeline" / "degradation.py"
+# PTCV-213: Import normally instead of spec_from_file_location.
+# The old approach created a duplicate module instance whose enum
+# classes were distinct Python objects from the normally-imported
+# ones, causing KeyError when _CLASSIFICATION_LABELS was looked up
+# by orchestrator tests later in the same pytest session.
+from ptcv.pipeline.degradation import (
+    ClassificationLevel,
+    ExtractionLevel,
+    PipelineCapabilities,
+    detect_capabilities,
+    log_pipeline_strategy,
+    select_classification_level,
+    select_extraction_level,
 )
-_MOD_NAME = "ptcv.pipeline.degradation"
-_spec = _ilu.spec_from_file_location(_MOD_NAME, _DEG_PATH)
-assert _spec is not None
-_mod = _ilu.module_from_spec(_spec)
-# Register in sys.modules so dataclass introspection works
-sys.modules[_MOD_NAME] = _mod
-_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-
-ClassificationLevel = _mod.ClassificationLevel
-ExtractionLevel = _mod.ExtractionLevel
-PipelineCapabilities = _mod.PipelineCapabilities
-detect_capabilities = _mod.detect_capabilities
-log_pipeline_strategy = _mod.log_pipeline_strategy
-select_classification_level = _mod.select_classification_level
-select_extraction_level = _mod.select_extraction_level
 
 
 # ------------------------------------------------------------------

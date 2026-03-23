@@ -47,6 +47,7 @@ from ...storage import StorageGateway
 from .define_xml_validator import DefineXmlValidator
 from .models import P21Issue, ValidationResult
 from .p21_validator import P21Validator
+from .required_domain_checker import check_required_domains
 from .schedule_validator import ScheduleIssue, VisitScheduleValidator
 from .tcg_checker import TcgChecker
 
@@ -289,6 +290,7 @@ class ValidationService:
         format_confidence: float = 0.0,
         sections_detected: int = 0,
         missing_required_sections: Optional[list[str]] = None,
+        soa_assessments: Optional[list[str]] = None,
     ) -> ValidationResult:
         """Run the full validation pipeline for one SDTM generation run.
 
@@ -400,6 +402,38 @@ class ValidationService:
         ).validate()
 
         # ------------------------------------------------------------------
+        # Step 5c: Run required domain checker (PTCV-249)
+        # ------------------------------------------------------------------
+        domains_present = list(domains_df.keys())
+        domain_check_result = check_required_domains(
+            domains_present=domains_present,
+            soa_assessments=soa_assessments,
+        )
+
+        # Merge domain findings into compliance summary as P21-style issues
+        for finding in domain_check_result.findings:
+            p21_issues.append(
+                P21Issue(
+                    rule_id=f"P21-DOM-{finding.domain_code}",
+                    severity=finding.severity,
+                    domain=finding.domain_code,
+                    variable="",
+                    description=finding.message,
+                    remediation_guidance=(
+                        f"Add {finding.domain_code} ({finding.domain_name}) "
+                        f"domain to the SDTM package. "
+                        f"See SDTMIG v3.4 Section 3.2."
+                    ),
+                )
+            )
+
+        # Recalculate P21 counts after adding domain findings
+        p21_error_count = sum(1 for i in p21_issues if i.severity == "Error")
+        p21_warning_count = sum(
+            1 for i in p21_issues if i.severity == "Warning"
+        )
+
+        # ------------------------------------------------------------------
         # Step 6: Build report JSON bytes
         # ------------------------------------------------------------------
         p21_bytes = _build_p21_report(
@@ -485,4 +519,7 @@ class ValidationService:
             schedule_error_count=schedule_report.error_count,
             schedule_warning_count=schedule_report.warning_count,
             schedule_feasible=schedule_report.feasible,
+            domain_check=domain_check_result,
+            domain_findings=domain_check_result.findings,
+            domain_check_passed=domain_check_result.passed,
         )

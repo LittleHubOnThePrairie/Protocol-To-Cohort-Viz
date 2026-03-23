@@ -17,7 +17,7 @@ from ptcv.ich_parser.template_assembler import (
     QueryExtractionHit,
     SourceReference,
 )
-from ptcv.soa_extractor.models import UsdmTimepoint
+from ptcv.soa_extractor.models import RawSoaTable, UsdmTimepoint
 from ptcv.storage.filesystem_adapter import FilesystemAdapter
 
 
@@ -515,6 +515,26 @@ def all_hits(assembled_protocol: AssembledProtocol) -> list[QueryExtractionHit]:
 # ---------------------------------------------------------------------------
 # Storage fixture
 # ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def soa_table() -> RawSoaTable:
+    """Realistic SoA table with VS, LB, EG, PE, and unmapped assessments."""
+    return RawSoaTable(
+        visit_headers=["Screening", "Baseline", "Week 4", "End of Study"],
+        day_headers=["-14", "1", "22", "85"],
+        activities=[
+            ("Vital Signs", [True, True, True, True]),
+            ("Blood Pressure", [True, True, True, True]),
+            ("Heart Rate", [True, True, True, True]),
+            ("Hematology", [True, True, False, True]),
+            ("Chemistry", [True, True, False, True]),
+            ("12-lead ECG", [True, False, True, True]),
+            ("Physical Examination", [True, True, False, True]),
+            ("Genomic Sequencing", [False, True, False, False]),
+        ],
+        section_code="B.7",
+    )
+
 
 @pytest.fixture()
 def tmp_gateway(tmp_path) -> FilesystemAdapter:

@@ -11,6 +11,7 @@ import json
 import sys
 import types
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,29 +22,47 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 # Stub fitz (PyMuPDF) and pymupdf4llm for environments where they
 # are not installed.  This prevents the toc_extractor → fitz import
 # chain failure that blocks any import touching ich_parser.__init__.
-# The stub must include a functional `open` method because
-# pdf_extractor._normalize_page_rotation calls fitz.open() after
-# a try/except ImportError guard (not AttributeError).
+#
+# PTCV-213: Try importing the real package first.  Only install the
+# stub when the real package is genuinely unavailable, preventing
+# the stub from shadowing an installed fitz and leaking a broken
+# _StubFitzDoc into sys.modules for the rest of the test session.
 # ---------------------------------------------------------------------------
-if "fitz" not in sys.modules:
+try:
+    import fitz as _real_fitz  # noqa: F401 — trigger real import
+except ImportError:
     _fitz = types.ModuleType("fitz")
 
     class _StubFitzDoc:
         """Minimal fitz.Document stand-in (zero pages)."""
 
         def __init__(self, **kw: object) -> None:
-            pass
+            self._pages: list[object] = []
 
         def __len__(self) -> int:
-            return 0
+            return len(self._pages)
+
+        def new_page(self, **kw: object) -> MagicMock:
+            """Create a stub page (needed by landscape PDF tests)."""
+            page = MagicMock()
+            self._pages.append(page)
+            return page
 
         def close(self) -> None:
             pass
 
+        def save(self, *a: object, **kw: object) -> None:
+            pass
+
+        def tobytes(self) -> bytes:
+            return b"%PDF-1.4 stub"
+
     _fitz.open = lambda **kw: _StubFitzDoc(**kw)  # type: ignore[attr-defined]
     sys.modules["fitz"] = _fitz
 
-if "pymupdf4llm" not in sys.modules:
+try:
+    import pymupdf4llm as _real_pymupdf  # noqa: F401
+except ImportError:
     _pymupdf = types.ModuleType("pymupdf4llm")
     _pymupdf.to_markdown = lambda doc, **kw: []  # type: ignore[attr-defined]
     sys.modules["pymupdf4llm"] = _pymupdf

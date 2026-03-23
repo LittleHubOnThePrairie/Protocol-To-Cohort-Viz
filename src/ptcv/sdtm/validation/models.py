@@ -17,6 +17,7 @@ import dataclasses
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from .required_domain_checker import DomainCheckResult, DomainFinding
     from .schedule_validator import ScheduleIssue
 
 
@@ -126,6 +127,13 @@ class ValidationResult:
     schedule_error_count: int = 0
     schedule_warning_count: int = 0
     schedule_feasible: bool = True
+
+    # PTCV-249: Required domain completeness validation
+    domain_check: Optional["DomainCheckResult"] = None
+    domain_findings: list["DomainFinding"] = dataclasses.field(
+        default_factory=list,
+    )
+    domain_check_passed: bool = True
 
     def __repr__(self) -> str:
         return (

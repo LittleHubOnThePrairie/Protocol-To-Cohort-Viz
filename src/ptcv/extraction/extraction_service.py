@@ -62,10 +62,16 @@ class ExtractionService:
         gateway: StorageGateway implementation to use for writes.
     """
 
-    def __init__(self, gateway: StorageGateway) -> None:
+    def __init__(
+        self,
+        gateway: StorageGateway,
+        enable_universal_tables: bool = False,
+    ) -> None:
         self._gateway = gateway
         self._detector = FormatDetector()
-        self._pdf_extractor = PdfExtractor()
+        self._pdf_extractor = PdfExtractor(
+            enable_universal_tables=enable_universal_tables,
+        )
         self._xml_extractor = CtrXmlExtractor()
 
     def extract(

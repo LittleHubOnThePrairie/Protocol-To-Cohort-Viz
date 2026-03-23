@@ -23,8 +23,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Optional
 
-import fitz
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -190,6 +188,28 @@ class ProtocolIndex:
         full_text: Complete document text (page-concatenated).
         toc_found: Whether a TOC page was detected.
         toc_pages: 1-based page numbers of detected TOC pages.
+        tables: Structured tables extracted from all pages
+            (PTCV-237). Each dict has ``page_number``,
+            ``header_row`` (JSON string), ``data_rows`` (JSON string),
+            ``extractor_used``, and ``table_index``. Empty list when
+            table extraction is disabled or fails.
+        diagrams: Diagrams detected from PDF pages (PTCV-261).
+            Each dict is the serialized form of a
+            ``ptcv.extraction.diagram_finder.Diagram`` via
+            ``Diagram.to_dict()``, containing ``diagram_type``,
+            ``page_number``, ``nodes``, and ``edges``. Empty list when
+            no diagrams are found.
+        figures: Detected figures with Vision-generated captions
+            (PTCV-263). Each dict has ``page_number``, ``bbox``,
+            ``figure_type_hint``, ``caption``, and
+            ``detection_method``. Vision captioning is gated behind
+            ``PTCV_ENABLE_FIGURE_VISION=1``. Empty list when figure
+            detection is disabled or no figures found.
+        layout_graph: Spatial layout relationships between page
+            elements (PTCV-263). Dict with ``page_count``,
+            ``total_nodes``, ``total_edges``, and ``pages`` (list
+            of per-page graphs with nodes and edges). None when
+            layout graph construction fails or is skipped.
     """
 
     source_path: str
@@ -200,6 +220,10 @@ class ProtocolIndex:
     full_text: str
     toc_found: bool
     toc_pages: list[int]
+    tables: list[dict] = dataclasses.field(default_factory=list)
+    diagrams: list[dict] = dataclasses.field(default_factory=list)
+    figures: list[dict] = dataclasses.field(default_factory=list)
+    layout_graph: Optional[dict] = None
 
     def get_section_text(self, section_number: str) -> Optional[str]:
         """Return the text content for a section, or *None*."""
@@ -840,6 +864,8 @@ def extract_protocol_index(
     toc_entries: list[TOCEntry] = []
     _pymupdf4llm_text: Optional[str] = None
 
+    import fitz  # PTCV-208: lazy import to avoid requiring PyMuPDF at package level
+
     doc = fitz.open(str(pdf_path))
     try:
         page_count = len(doc)
@@ -995,6 +1021,228 @@ def extract_protocol_index(
         # normalizer already strips TOC dot-leaders).
         full_text = strip_toc_lines(full_text)
 
+    # PTCV-237: Universal table extraction for Query Pipeline.
+    # Run Camelot + pdfplumber on all pages to produce structured
+    # tables accessible to downstream QueryExtractor and SoA stages.
+    structured_tables: list[dict] = []
+    try:
+        from ptcv.extraction.table_extractor import extract_all_tables
+        import json as _json
+        import uuid as _uuid
+
+        pdf_bytes = pdf_path.read_bytes()
+        run_id = str(_uuid.uuid4())
+        extracted = extract_all_tables(
+            pdf_bytes=pdf_bytes,
+            page_count=page_count,
+            run_id=run_id,
+            registry_id=pdf_path.stem.split("_")[0],
+            source_sha256="",
+        )
+        for et in extracted:
+            structured_tables.append({
+                "page_number": et.page_number,
+                "header_row": et.header_row,
+                "data_rows": et.data_rows,
+                "extractor_used": et.extractor_used,
+                "table_index": et.table_index,
+            })
+        if structured_tables:
+            logger.info(
+                "Universal table extraction: %d tables for %s",
+                len(structured_tables), pdf_path.name,
+            )
+    except Exception as exc:
+        logger.debug(
+            "Universal table extraction failed: %s — "
+            "continuing without structured tables",
+            exc,
+        )
+
+    # PTCV-261: Diagram detection via DiagramFinder.
+    # Vector-based detection (rects/lines/curves) runs unconditionally
+    # (zero cost). Vision API fallback for rasterized diagrams is gated
+    # behind PTCV_ENABLE_DIAGRAM_VISION=1 to control API costs.
+    detected_diagrams: list[dict] = []
+    try:
+        import os as _os
+        import pdfplumber
+
+        from ptcv.extraction.diagram_finder import DiagramFinder
+
+        enable_vision = _os.environ.get(
+            "PTCV_ENABLE_DIAGRAM_VISION", ""
+        ) == "1"
+        finder = DiagramFinder(enable_vision_fallback=enable_vision)
+
+        with pdfplumber.open(str(pdf_path)) as plumber_pdf:
+            for plumber_page in plumber_pdf.pages:
+                page_diagrams = finder.find_diagrams(plumber_page)
+                for diag in page_diagrams:
+                    detected_diagrams.append(diag.to_dict())
+        if detected_diagrams:
+            logger.info(
+                "Diagram detection: %d diagram(s) for %s",
+                len(detected_diagrams), pdf_path.name,
+            )
+    except Exception as exc:
+        logger.debug(
+            "Diagram detection failed: %s — "
+            "continuing without diagrams",
+            exc,
+        )
+
+    # PTCV-263: Figure detection + Vision captioning.
+    # FigureDetector scans each page for embedded images and large
+    # drawing regions (zero cost). Vision captioning via FigureCaptioner
+    # is gated behind PTCV_ENABLE_FIGURE_VISION=1 to control API costs.
+    detected_figures: list[dict] = []
+    try:
+        import os as _os2
+
+        from ptcv.extraction.figure_detector import detect_figures
+
+        pdf_bytes_fig = pdf_path.read_bytes()
+        detection_result = detect_figures(pdf_bytes_fig)
+
+        if detection_result.figures:
+            enable_figure_vision = _os2.environ.get(
+                "PTCV_ENABLE_FIGURE_VISION", ""
+            ) == "1"
+
+            if enable_figure_vision:
+                from ptcv.extraction.figure_captioner import FigureCaptioner
+
+                captioner = FigureCaptioner()
+                caption_result = captioner.caption_figures(
+                    detection_result.figures, pdf_bytes_fig,
+                )
+                for fc in caption_result.captions:
+                    fig = fc.figure
+                    detected_figures.append({
+                        "page_number": fig.page_number,
+                        "bbox": {
+                            "x0": fig.bbox.x0,
+                            "y0": fig.bbox.y0,
+                            "x1": fig.bbox.x1,
+                            "y1": fig.bbox.y1,
+                        },
+                        "figure_type_hint": fig.figure_type_hint,
+                        "detection_method": fig.detection_method,
+                        "caption": fc.caption,
+                    })
+                if caption_result.api_calls_made:
+                    logger.info(
+                        "Figure captioning: %d figures, %d API calls, "
+                        "%d tokens for %s",
+                        caption_result.figures_captioned,
+                        caption_result.api_calls_made,
+                        caption_result.total_token_cost,
+                        pdf_path.name,
+                    )
+            else:
+                for fig in detection_result.figures:
+                    detected_figures.append({
+                        "page_number": fig.page_number,
+                        "bbox": {
+                            "x0": fig.bbox.x0,
+                            "y0": fig.bbox.y0,
+                            "x1": fig.bbox.x1,
+                            "y1": fig.bbox.y1,
+                        },
+                        "figure_type_hint": fig.figure_type_hint,
+                        "detection_method": fig.detection_method,
+                        "caption": fig.caption,
+                    })
+
+            logger.info(
+                "Figure detection: %d figure(s) for %s",
+                len(detected_figures), pdf_path.name,
+            )
+    except Exception as exc:
+        logger.debug(
+            "Figure detection failed: %s — "
+            "continuing without figures",
+            exc,
+        )
+
+    # PTCV-263: Layout graph — spatial relationships between text
+    # blocks, tables, figures, and footnotes on each page.
+    layout_graph_dict: Optional[dict] = None
+    try:
+        from ptcv.extraction.layout_graph import build_document_layout
+
+        pages_data: list[dict] = []
+        for page_num, text in page_texts:
+            # Build text blocks from page text (split by double newline)
+            blocks = [
+                {"text": block.strip(), "block_index": i}
+                for i, block in enumerate(text.split("\n\n"))
+                if block.strip()
+            ]
+            # Filter tables and figures for this page
+            page_tables = [
+                t for t in structured_tables
+                if t.get("page_number") == page_num
+            ]
+            page_figures = [
+                f for f in detected_figures
+                if f.get("page_number") == page_num
+            ]
+            pages_data.append({
+                "page_number": page_num,
+                "text_blocks": blocks,
+                "tables": page_tables,
+                "figures": page_figures,
+            })
+
+        doc_layout = build_document_layout(pages_data)
+
+        layout_graph_dict = {
+            "page_count": doc_layout.page_count,
+            "total_nodes": doc_layout.total_nodes,
+            "total_edges": doc_layout.total_edges,
+            "pages": [
+                {
+                    "page_number": pl.page_number,
+                    "nodes": [
+                        {
+                            "node_id": n.node_id,
+                            "element_type": n.element_type.value,
+                            "text_preview": n.text_preview,
+                            "metadata": n.metadata,
+                        }
+                        for n in pl.nodes
+                    ],
+                    "edges": [
+                        {
+                            "source_id": e.source_id,
+                            "target_id": e.target_id,
+                            "relationship": e.relationship.value,
+                            "confidence": e.confidence,
+                        }
+                        for e in pl.edges
+                    ],
+                }
+                for pl in doc_layout.pages
+            ],
+        }
+
+        if doc_layout.total_edges > 0:
+            logger.info(
+                "Layout graph: %d nodes, %d edges across %d pages for %s",
+                doc_layout.total_nodes,
+                doc_layout.total_edges,
+                doc_layout.page_count,
+                pdf_path.name,
+            )
+    except Exception as exc:
+        logger.debug(
+            "Layout graph construction failed: %s — "
+            "continuing without layout graph",
+            exc,
+        )
+
     return ProtocolIndex(
         source_path=str(pdf_path),
         page_count=page_count,
@@ -1004,4 +1252,8 @@ def extract_protocol_index(
         full_text=full_text,
         toc_found=toc_found,
         toc_pages=sorted(set(toc_page_nums)),
+        tables=structured_tables,
+        diagrams=detected_diagrams,
+        figures=detected_figures,
+        layout_graph=layout_graph_dict,
     )

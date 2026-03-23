@@ -1,8 +1,10 @@
-"""Sidebar file browser component (PTCV-33, PTCV-42).
+"""Sidebar file browser component (PTCV-33, PTCV-42, PTCV-207).
 
 Groups protocol PDFs by therapeutic area with title display
 and quality-based ordering.  Falls back to flat filename list
 when metadata is unavailable.
+
+PTCV-207: enriched with CT.gov sponsor/phase labels and search.
 """
 
 from __future__ import annotations
@@ -60,6 +62,8 @@ def _scan_pdfs(protocols_dir: Path) -> dict[str, list[str]]:
 def _format_radio_label(entry: ProtocolEntry) -> str:
     """Build a display label with optional verdict badge.
 
+    Includes sponsor and phase when available (PTCV-207).
+
     Args:
         entry: Protocol entry.
 
@@ -69,7 +73,41 @@ def _format_radio_label(entry: ProtocolEntry) -> str:
     badge = _VERDICT_BADGE.get(
         entry.quality.format_verdict, ""
     )
-    return f"{badge}{entry.display_label}"
+    label = f"{badge}{entry.display_label}"
+
+    # Append sponsor/phase subtitle if enriched
+    parts: list[str] = []
+    if entry.sponsor:
+        parts.append(entry.sponsor)
+    if entry.phase:
+        parts.append(entry.phase)
+    if parts:
+        label += f" — {' · '.join(parts)}"
+
+    return label
+
+
+def _matches_search(
+    entry: ProtocolEntry,
+    query: str,
+) -> bool:
+    """Check if a protocol entry matches a search query.
+
+    Matches against title, registry ID, condition, and sponsor.
+
+    Args:
+        entry: Protocol entry to check.
+        query: Lowercased search query.
+
+    Returns:
+        True if the entry matches.
+    """
+    return (
+        query in entry.title.lower()
+        or query in entry.registry_id.lower()
+        or query in entry.condition.lower()
+        or query in entry.sponsor.lower()
+    )
 
 
 def render_file_browser(
@@ -81,6 +119,8 @@ def render_file_browser(
     Nervous System, Diabetes/Metabolic, Other).  Within each group,
     protocols are ordered by quality score (best first).  Each entry
     shows a truncated title with NCT# parenthetical.
+
+    PTCV-207: Adds search box and enriched labels with sponsor/phase.
 
     Args:
         protocols_dir: Root protocols directory.
@@ -97,6 +137,14 @@ def render_file_browser(
         st.sidebar.info("No protocol PDFs found.")
         return None, None
 
+    # Search box (PTCV-207)
+    search_query = st.sidebar.text_input(
+        "Search protocols",
+        placeholder="Title, NCT ID, condition, sponsor...",
+        key="_fb_search",
+        label_visibility="collapsed",
+    ).strip().lower()
+
     # Build a global lookup so we can resolve selection
     entry_map: dict[str, ProtocolEntry] = {}
 
@@ -105,9 +153,18 @@ def render_file_browser(
         if not entries:
             continue
 
+        # Filter by search query if present
+        if search_query:
+            entries = [
+                e for e in entries
+                if _matches_search(e, search_query)
+            ]
+            if not entries:
+                continue
+
         with st.sidebar.expander(
             f"{area.value} ({len(entries)})",
-            expanded=False,
+            expanded=bool(search_query),
         ):
             labels: list[str] = []
             for entry in entries:

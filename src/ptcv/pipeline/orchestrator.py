@@ -79,6 +79,12 @@ _DEFAULT_ROOT = Path("C:/Dev/PTCV/data")
 class PipelineOrchestrator:
     """End-to-end pipeline from protocol bytes to validated SDTM package.
 
+    .. deprecated:: PTCV-242
+        The Process pipeline orchestrator is deprecated. Use the Query
+        Pipeline (``ptcv.ui.components.query_pipeline``) instead, which
+        provides equivalent functionality with lineage tracking
+        (PTCV-241) and native SoA extraction (PTCV-239).
+
     One StorageGateway instance is created at construction and shared
     across all seven stage services (PTCV-18 design requirement).
 
@@ -110,6 +116,14 @@ class PipelineOrchestrator:
         # PTCV-162: RAG index for classification context
         rag_index: Any = None,
     ) -> None:
+        import warnings
+        warnings.warn(
+            "PipelineOrchestrator is deprecated (PTCV-242). "
+            "Use the Query Pipeline instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         if gateway is None:
             gateway = FilesystemAdapter(root=_DEFAULT_ROOT)
             gateway.initialise()
@@ -250,7 +264,13 @@ class PipelineOrchestrator:
         # Stage 1: Extraction (PTCV-19)
         # ----------------------------------------------------------------
         logger.info("Stage extraction: running ExtractionService")
-        extraction_svc = ExtractionService(gateway=self._gateway)
+        # PTCV-228: Enable universal table extraction so ALL tables
+        # (dosing, eligibility, labs, SoA, PK) get cell-structured
+        # extraction in Stage 1, benefiting all downstream stages.
+        extraction_svc = ExtractionService(
+            gateway=self._gateway,
+            enable_universal_tables=True,
+        )
         extraction_result: ExtractionResult = extraction_svc.extract(
             protocol_data=protocol_data,
             registry_id=registry_id,
@@ -393,12 +413,24 @@ class PipelineOrchestrator:
                 gateway=self._gateway,
                 rag_index=self._rag_index,
             )
+            # PTCV-228: Pass table context to classification router
+            table_dicts = None
+            if pre_extracted_tables:
+                table_dicts = [
+                    {
+                        "page_number": t.page_number,
+                        "header_row": t.header_row,
+                    }
+                    for t in pre_extracted_tables
+                ]
+
             cascade_result = router.classify(
                 text_blocks=text_block_dicts,
                 registry_id=registry_id,
                 run_id=cascade_run_id,
                 source_run_id=soa_result.run_id,
                 source_sha256=soa_cp.artifact_sha256,
+                table_context=table_dicts,
             )
 
             import hashlib

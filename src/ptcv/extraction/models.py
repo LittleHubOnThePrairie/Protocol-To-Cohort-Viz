@@ -43,6 +43,7 @@ class TextBlock:
     text: str
     block_type: str
     extraction_timestamp_utc: str = ""
+    in_table: bool = False
 
 
 @dataclasses.dataclass

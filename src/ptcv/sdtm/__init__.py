@@ -17,12 +17,27 @@ from .domain_generators import (
     TsGenerator,
     TvGenerator,
 )
+from .domain_spec_builder import (
+    CdiscVariable,
+    DomainSpec,
+    DomainSpecResult,
+    DomainTestCode,
+    UnmappedAssessment,
+    build_domain_specs,
+)
+from .ex_domain_builder import (
+    ExDomainSpec,
+    InterventionDetail,
+    build_ex_domain_spec,
+)
 from .models import CtReviewQueueEntry, SdtmGenerationResult, SoaCellMetadata
 from .review_queue import CtReviewQueue
 from .sdtm_service import SdtmService
 from .validation import (
     DefineXmlIssue,
     DefineXmlValidator,
+    DomainCheckResult,
+    DomainFinding,
     P21Issue,
     P21Validator,
     ScheduleIssue,
@@ -32,9 +47,11 @@ from .validation import (
     ValidationResult,
     ValidationService,
     VisitScheduleValidator,
+    check_required_domains,
 )
 
 __all__ = [
+    "CdiscVariable",
     "CtLookupResult",
     "CtNormalizer",
     "CtReviewQueue",
@@ -42,6 +59,13 @@ __all__ = [
     "DefineXmlGenerator",
     "DefineXmlIssue",
     "DefineXmlValidator",
+    "DomainSpec",
+    "DomainSpecResult",
+    "DomainCheckResult",
+    "DomainFinding",
+    "DomainTestCode",
+    "ExDomainSpec",
+    "InterventionDetail",
     "P21Issue",
     "P21Validator",
     "ScheduleIssue",
@@ -56,7 +80,11 @@ __all__ = [
     "TiGenerator",
     "TsGenerator",
     "TvGenerator",
+    "UnmappedAssessment",
     "ValidationResult",
     "ValidationService",
     "VisitScheduleValidator",
+    "build_domain_specs",
+    "build_ex_domain_spec",
+    "check_required_domains",
 ]

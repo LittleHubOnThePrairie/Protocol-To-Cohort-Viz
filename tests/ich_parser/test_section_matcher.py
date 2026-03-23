@@ -1813,3 +1813,109 @@ class TestTocOrderHints:
             if m.protocol_section_number == "3"
         )
         assert inclusion.matches[0].ich_section_code == "B.5"
+
+
+# -------------------------------------------------------------------
+# Non-standard ICU/critical-care headings (PTCV-211)
+# -------------------------------------------------------------------
+
+
+class TestNonStandardHeadings:
+    """PTCV-211: non-standard headings like 'Measurements' and
+    'Safety considerations' must map to B.8/B.9.
+
+    Regression tests for NCT02369900, which uses ICU/critical-care
+    terminology that previously fell through the matcher entirely.
+    """
+
+    @staticmethod
+    def _match_single(
+        title: str,
+        content: str = "",
+    ) -> SectionMapping:
+        """Match a single header and return its SectionMapping."""
+        matcher = SectionMatcher()
+        idx = ProtocolIndex(
+            source_path="t.pdf",
+            page_count=1,
+            toc_entries=[
+                TOCEntry(level=1, number="1", title=title),
+            ],
+            section_headers=[],
+            content_spans={"1": content} if content else {},
+            full_text="",
+            toc_found=True,
+            toc_pages=[],
+        )
+        result = matcher.match(idx)
+        return result.mappings[0]
+
+    def test_measurements_maps_to_b8(self) -> None:
+        """Given 'Measurements' heading, best match is B.8."""
+        mapping = self._match_single("Measurements")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_safety_considerations_maps_to_b9(self) -> None:
+        """Given 'Safety considerations', best match is B.9."""
+        mapping = self._match_single("Safety considerations")
+        assert mapping.matches[0].ich_section_code == "B.9"
+
+    def test_hemodynamics_maps_to_b8(self) -> None:
+        """Given 'Hemodynamics' heading, best match is B.8."""
+        mapping = self._match_single("Hemodynamics")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_vasopressors_maps_to_b7(self) -> None:
+        """Given 'Vasopressors' heading, best match is B.7."""
+        mapping = self._match_single("Vasopressors")
+        assert mapping.matches[0].ich_section_code == "B.7"
+
+    def test_research_blood_draws_maps_to_b8(self) -> None:
+        """Given 'Research Blood draws' heading, best match is B.8."""
+        mapping = self._match_single("Research Blood draws")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_additional_measurements_maps_to_b8(self) -> None:
+        """Given 'Additional measurements', best match is B.8."""
+        mapping = self._match_single("Additional measurements")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_study_procedures_maps_to_b8(self) -> None:
+        """Given 'Study Procedures' heading, best match is B.8."""
+        mapping = self._match_single("Study Procedures")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_clinical_assessments_maps_to_b8(self) -> None:
+        """Given 'Clinical Assessments' heading, best match is B.8."""
+        mapping = self._match_single("Clinical Assessments")
+        assert mapping.matches[0].ich_section_code == "B.8"
+
+    def test_measurements_with_content_maps_b8(self) -> None:
+        """Given 'Measurements' with hemodynamic content, maps B.8."""
+        content = (
+            "Hemodynamics will be measured at baseline and "
+            "every 6 hours. Blood sampling for research "
+            "purposes. Additional measurements include "
+            "cardiac output and vasopressor dose."
+        )
+        mapping = self._match_single("Measurements", content)
+        assert mapping.matches[0].ich_section_code == "B.8"
+        assert mapping.matches[0].confidence in (
+            MatchConfidence.HIGH,
+            MatchConfidence.REVIEW,
+        )
+
+    def test_safety_considerations_with_content_reaches_high(
+        self,
+    ) -> None:
+        """Given 'Safety considerations' with AE content, HIGH."""
+        content = (
+            "Safety monitoring includes adverse event "
+            "reporting, vital signs assessment, laboratory "
+            "tests, and ECG monitoring at each visit."
+        )
+        mapping = self._match_single(
+            "Safety considerations", content
+        )
+        assert mapping.matches[0].ich_section_code == "B.9"
+        assert mapping.matches[0].confidence == MatchConfidence.HIGH

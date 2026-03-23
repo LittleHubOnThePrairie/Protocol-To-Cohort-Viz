@@ -573,7 +573,7 @@ class TestPipelineStages:
     """Tests for PIPELINE_STAGES constant."""
 
     def test_stage_count(self) -> None:
-        assert len(PIPELINE_STAGES) == 4
+        assert len(PIPELINE_STAGES) == 7
 
     def test_stage_names(self) -> None:
         assert PIPELINE_STAGES == [
@@ -581,6 +581,9 @@ class TestPipelineStages:
             "Section Classification",
             "Query Extraction",
             "Result Aggregation",
+            "SoA Extraction",
+            "SDTM Generation",
+            "Validation",
         ]
 
     def test_stages_are_strings(self) -> None:
@@ -691,11 +694,11 @@ class TestProgressCallback:
         result = self._mock_run(callback=None)
         assert "protocol_index" in result
 
-    def test_callback_receives_eight_events(self) -> None:
-        """4 stages x 2 events (start + end) = 8 calls."""
+    def test_callback_receives_fourteen_events(self) -> None:
+        """7 stages x 2 events (start + end) = 14 calls."""
         calls: list[tuple[str, float, int, int]] = []
         self._mock_run(callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)))
-        assert len(calls) == 8
+        assert len(calls) == 14
 
     def test_pipeline_result_unchanged_with_callback(self) -> None:
         result_with = self._mock_run(
@@ -772,7 +775,7 @@ class TestProgressMetadata:
             callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)),
         )
         starts = [c for c in calls if c[1] == 0.0]
-        assert len(starts) == 4
+        assert len(starts) == 7
         for c in starts:
             assert c[2] == 0 and c[3] == 0, (
                 f"start event {c[0]} should have d=0, t=0"
@@ -785,7 +788,7 @@ class TestProgressMetadata:
             callback=lambda s, p, d=0, t=0: calls.append((s, p, d, t)),
         )
         ends = [c for c in calls if c[1] == 1.0]
-        assert len(ends) == 4
+        assert len(ends) == 7
         for c in ends:
             assert c[2] == 0 and c[3] == 0, (
                 f"end event {c[0]} should have d=0, t=0"

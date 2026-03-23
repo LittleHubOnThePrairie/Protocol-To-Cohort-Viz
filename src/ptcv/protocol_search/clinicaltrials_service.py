@@ -33,7 +33,12 @@ from typing import Any, Optional
 from ..compliance.audit import AuditAction, AuditLogger
 from ..compliance.integrity import DataIntegrityGuard
 from .filestore import _DEFAULT_ROOT
-from .models import DownloadResult, ProtocolMetadata, SearchResult
+from .models import (
+    DownloadResult,
+    ProteinSearchResult,
+    ProtocolMetadata,
+    SearchResult,
+)
 
 
 _CT_GOV_BASE = "https://clinicaltrials.gov/api/v2"
@@ -444,6 +449,194 @@ class ClinicalTrialsService:
             has_protocol_doc=True,
             max_results=max_results,
             who=who,
+        )
+
+    # ------------------------------------------------------------------
+    # Protein-based search (PTCV-190)
+    # ------------------------------------------------------------------
+
+    def search_by_proteins(
+        self,
+        proteins: list[str],
+        pdf_only: bool = True,
+        max_results_per_protein: int = 200,
+        who: str = "ptcv-service",
+    ) -> list[ProteinSearchResult]:
+        """Search ClinicalTrials.gov by a list of protein names.
+
+        Uses the v2 API ``query.term`` parameter for free-text matching
+        across all indexed fields (interventions, descriptions, titles,
+        keywords).  Deduplicates across proteins so each NCT ID appears
+        once, with all matched proteins recorded.
+
+        [PTCV-190 Scenario: Search by protein list]
+        [PTCV-190 Scenario: Filter to PDF-available trials]
+
+        Args:
+            proteins: List of protein names to search for (e.g.,
+                ``["VEGF", "PD-1", "HER2"]``).
+            pdf_only: When True, only return trials that have a
+                sponsor-uploaded protocol PDF.
+            max_results_per_protein: Max studies to scan per protein.
+            who: User/service identifier for audit trail.
+
+        Returns:
+            List of ProteinSearchResult instances, deduplicated by
+            NCT ID with matched_proteins aggregated.
+        """
+        self._audit.log(
+            action=AuditAction.SEARCH,
+            record_id="ClinicalTrials.gov",
+            user_id=who,
+            reason=(
+                f"Protein search: proteins={proteins!r} "
+                f"pdf_only={pdf_only}"
+            ),
+        )
+
+        abbrevs = _LARGE_DOC_ABBREVS.get("PDF", ())
+        # NCT ID → ProteinSearchResult (for deduplication)
+        seen: dict[str, ProteinSearchResult] = {}
+
+        for protein in proteins:
+            current_token = ""
+            fetched = 0
+
+            while fetched < max_results_per_protein:
+                page_size = min(
+                    _MAX_PAGE_SIZE,
+                    max_results_per_protein - fetched,
+                )
+                params: dict[str, str] = {
+                    "pageSize": str(page_size),
+                    "format": "json",
+                    "query.term": protein,
+                    "fields": (
+                        "NCTId,BriefTitle,OfficialTitle,"
+                        "OverallStatus,Phase,LeadSponsorName,"
+                        "Condition,ProtocolSection,"
+                        "DocumentSection,ResultsSection,"
+                        "ReferencesModule,StatusModule"
+                    ),
+                }
+                if current_token:
+                    params["pageToken"] = current_token
+
+                try:
+                    data = self._get_json(
+                        f"{_CT_GOV_BASE}/studies", params
+                    )
+                except Exception:
+                    break
+
+                studies = data.get("studies", [])
+                for study in studies:
+                    result = self._extract_protein_result(
+                        study, protein, abbrevs, pdf_only,
+                    )
+                    if result is None:
+                        continue
+
+                    nct_id = result.registry_id
+                    if nct_id in seen:
+                        # Merge protein match into existing entry
+                        if protein not in seen[nct_id].matched_proteins:
+                            seen[nct_id].matched_proteins.append(protein)
+                    else:
+                        seen[nct_id] = result
+
+                fetched += len(studies)
+                current_token = data.get("nextPageToken", "")
+                if not current_token:
+                    break
+
+        return list(seen.values())
+
+    def _extract_protein_result(
+        self,
+        study: dict,
+        protein: str,
+        abbrevs: tuple[str, ...],
+        pdf_only: bool,
+    ) -> ProteinSearchResult | None:
+        """Extract a ProteinSearchResult from a v2 API study record.
+
+        Returns None if pdf_only is True and no protocol PDF exists.
+        """
+        protocol = study.get("protocolSection", {})
+        id_module = protocol.get("identificationModule", {})
+        nct_id = id_module.get("nctId", "")
+        if not nct_id:
+            return None
+
+        has_pdf = self._find_large_doc(study, abbrevs) is not None
+        if pdf_only and not has_pdf:
+            return None
+
+        status_module = protocol.get("statusModule", {})
+        design_module = protocol.get("designModule", {})
+        sponsor_module = protocol.get(
+            "sponsorCollaboratorsModule", {}
+        )
+        conditions_module = protocol.get("conditionsModule", {})
+
+        # Year: prefer study start date, fall back to first post date
+        year = ""
+        start_date = status_module.get(
+            "startDateStruct", {}
+        ).get("date", "")
+        if start_date:
+            # Format: "YYYY-MM-DD" or "YYYY-MM" or "Month YYYY"
+            year = start_date[:4]
+        if not year:
+            first_post = status_module.get(
+                "studyFirstPostDateStruct", {}
+            ).get("date", "")
+            if first_post:
+                year = first_post[:4]
+
+        # Outcome: check for results, otherwise overall status
+        overall_status = status_module.get("overallStatus", "")
+        results_date = status_module.get(
+            "resultsFirstPostDateStruct", {}
+        ).get("date", "")
+        outcome = "Has Results" if results_date else overall_status
+
+        # Publications from referencesModule
+        refs_module = protocol.get("referencesModule", {})
+        references = refs_module.get("references", [])
+        pub_links: list[str] = []
+        for ref in references:
+            pmid = ref.get("pmid", "")
+            if pmid:
+                pub_links.append(
+                    f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                )
+            elif ref.get("citation", ""):
+                pub_links.append(ref["citation"][:120])
+        publications = "; ".join(pub_links)
+
+        return ProteinSearchResult(
+            registry_id=nct_id,
+            title=(
+                id_module.get("officialTitle")
+                or id_module.get("briefTitle", "")
+            ),
+            source="ClinicalTrials.gov",
+            sponsor=sponsor_module.get(
+                "leadSponsor", {}
+            ).get("name", ""),
+            phase=", ".join(design_module.get("phases", [])),
+            condition=", ".join(
+                conditions_module.get("conditions", [])
+            ),
+            status=overall_status,
+            url=f"https://clinicaltrials.gov/study/{nct_id}",
+            matched_proteins=[protein],
+            year=year,
+            outcome=outcome,
+            publications=publications,
+            has_protocol_pdf=has_pdf,
         )
 
     def download(

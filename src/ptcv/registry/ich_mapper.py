@@ -263,12 +263,29 @@ class MetadataToIchMapper:
     def _map_b3_objectives(
         self, proto: dict[str, Any]
     ) -> Optional[MappedRegistrySection]:
-        """B.3 Trial Objectives ← IdentificationModule titles."""
+        """B.3 Trial Objectives ← Identification + Description + Outcomes.
+
+        PTCV-285: Enriched with detailedDescription and primary/secondary
+        outcomes from OutcomesModule. These fields provide rich
+        plain-English descriptions of trial purpose and endpoints.
+        """
         id_mod = proto.get("identificationModule", {})
         official = id_mod.get("officialTitle", "")
         brief = id_mod.get("briefTitle", "")
         brief_summary = _safe_get(
             proto, "descriptionModule", "briefSummary"
+        )
+        detailed_desc = _safe_get(
+            proto, "descriptionModule", "detailedDescription"
+        )
+        primary_outcomes = _safe_get(
+            proto, "outcomesModule", "primaryOutcomes"
+        ) or []
+        secondary_outcomes = _safe_get(
+            proto, "outcomesModule", "secondaryOutcomes"
+        ) or []
+        primary_purpose = _safe_get(
+            proto, "designModule", "designInfo", "primaryPurpose"
         )
 
         if not official and not brief:
@@ -283,9 +300,29 @@ class MetadataToIchMapper:
         if brief:
             parts.append(f"Brief Title: {brief}")
             content["brief_title"] = brief
+        if primary_purpose:
+            parts.append(f"Primary Purpose: {primary_purpose}")
+            content["primary_purpose"] = primary_purpose
         if brief_summary:
             parts.append(f"\nBrief Summary:\n{brief_summary}")
             content["brief_summary"] = brief_summary
+        if detailed_desc:
+            parts.append(
+                f"\nDetailed Description:\n{detailed_desc}"
+            )
+            content["detailed_description"] = detailed_desc
+        if primary_outcomes:
+            formatted = _format_outcomes(
+                primary_outcomes, "Primary Outcomes",
+            )
+            parts.append(f"\n{formatted}")
+            content["primary_outcomes"] = primary_outcomes
+        if secondary_outcomes:
+            formatted = _format_outcomes(
+                secondary_outcomes, "Secondary Outcomes",
+            )
+            parts.append(f"\n{formatted}")
+            content["secondary_outcomes"] = secondary_outcomes
 
         return MappedRegistrySection(
             section_code="B.3",
@@ -293,7 +330,7 @@ class MetadataToIchMapper:
             content_text="\n".join(parts),
             content_json=json.dumps(content, ensure_ascii=False),
             quality_rating=QUALITY_DIRECT,
-            ct_gov_module="IdentificationModule",
+            ct_gov_module="IdentificationModule,OutcomesModule",
         )
 
     def _map_b4_design(

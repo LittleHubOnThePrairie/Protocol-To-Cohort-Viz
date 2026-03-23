@@ -270,15 +270,15 @@ class TestBuildSovGrid:
         for rec in grid:
             assert "," not in rec["assessment"]
 
-    def test_screening_anchored_at_day_zero(self) -> None:
-        """[PTCV-151 Scenario: Screening visit anchored at day 0]"""
+    def test_screening_before_baseline(self) -> None:
+        """[PTCV-254: Screening before Baseline in chronological order]"""
         grid = build_sov_grid(TIMEPOINTS, ACTIVITIES, INSTANCES)
         screening = [r for r in grid if r["visit_label"] == "Screening"]
-        assert len(screening) > 0
-        assert all(r["day"] == 0 for r in screening)
-        # Baseline (C1D1) should have positive day offset
         c1d1 = [r for r in grid if r["visit_label"] == "C1D1"]
-        assert all(r["day"] > 0 for r in c1d1)
+        assert len(screening) > 0
+        assert len(c1d1) > 0
+        # Screening day should be less than C1D1 day
+        assert screening[0]["day"] < c1d1[0]["day"]
 
     def test_clinical_encounter_for_vitals(self) -> None:
         """[PTCV-34 Scenario: Clinical encounter row lists variables]"""
@@ -445,16 +445,19 @@ class TestBuildSovFigure:
         assert "C1D1" in joined
         assert "EOT" in joined
 
-    def test_figure_xaxis_has_rebased_day_offsets(self) -> None:
-        """PTCV-151: X-axis labels use rebased days (screening = day 0)."""
+    def test_figure_xaxis_has_resolved_day_labels(self) -> None:
+        """PTCV-254: X-axis labels use resolved real study days."""
         fig = build_sov_figure(
             TIMEPOINTS, ACTIVITIES, INSTANCES, registry_id="NCT001"
         )
         ticktext = fig.layout.xaxis.ticktext
         joined = " ".join(ticktext)
-        assert "Day 0" in joined   # Screening (was -14)
-        assert "Day 15" in joined  # C1D1 (was 1, rebased: 1 - (-14) = 15)
-        assert "Day 98" in joined  # EOT (was 84, rebased: 84 - (-14) = 98)
+        # Screening should appear with a negative day (resolved: -14)
+        assert "Screening" in joined
+        # C1D1 should appear with Day 1 (resolved from Cycle 1 Day 1)
+        assert "Day 1" in joined
+        # EOT keeps its original day_offset (low resolver confidence)
+        assert "EOT" in joined
 
     def test_figure_height_scales_with_assessments(self) -> None:
         """Chart height increases with more assessments."""

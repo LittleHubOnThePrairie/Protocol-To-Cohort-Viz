@@ -18,3 +18,9 @@ data/templates/*
 .secrets
 .claude/
 jira_changelog.md
+docs/
+PTCV/jira_changelog.md
+debug_*.py
+tmp_*.txt
+checkpoints/
+=))*

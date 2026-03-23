@@ -14,7 +14,10 @@ Regulatory references:
 from __future__ import annotations
 
 import dataclasses
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .template_matcher import TemplateMatchReport
 
 
 @dataclasses.dataclass
@@ -216,6 +219,9 @@ class ExtractResult:
     review_count: int
     artifact_keys: dict[str, str]
     source_sha256: str
+    completeness_ratio: float = 1.0
+    missing_assessments: list[str] = dataclasses.field(default_factory=list)
+    completeness_report: Optional[TemplateMatchReport] = None
 
     def __repr__(self) -> str:
         return (
@@ -223,5 +229,6 @@ class ExtractResult:
             f"registry_id={self.registry_id!r}, "
             f"timepoints={self.timepoint_count}, "
             f"activities={self.activity_count}, "
-            f"review={self.review_count})"
+            f"review={self.review_count}, "
+            f"completeness={self.completeness_ratio:.0%})"
         )

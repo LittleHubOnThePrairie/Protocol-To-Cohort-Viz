@@ -100,7 +100,9 @@ class TestPlotTypesHaveOnlyRelevantFields:
 
     def test_plot_timepoint_fields(self) -> None:
         pt = PlotTimepoint("v1", "Screening", -14)
-        assert set(pt._fields) == {"timepoint_id", "visit_name", "day_offset"}
+        assert set(pt._fields) == {
+            "timepoint_id", "visit_name", "day_offset", "visit_type",
+        }
 
     def test_plot_activity_fields(self) -> None:
         pa = PlotActivity("a1", "Vital Signs", "Vital Signs")

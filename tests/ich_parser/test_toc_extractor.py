@@ -12,6 +12,7 @@ Feature: Protocol TOC and section header extraction
 
 from __future__ import annotations
 
+import sys
 import textwrap
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -416,12 +417,13 @@ class TestNoTOCFallback:
     def test_no_toc_synthesises_entries(self, body_page_text: str):
         """Simulate a PDF with no TOC but with body headers."""
         mock_doc = _make_mock_fitz_doc([body_page_text])
+        mock_fitz = MagicMock()
+        mock_fitz.open.return_value = mock_doc
 
         with (
-            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
+            patch.dict(sys.modules, {"fitz": mock_fitz}),
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_fitz.open.return_value = mock_doc
             idx = extract_protocol_index("/fake/protocol.pdf")
 
         assert idx.toc_found is False
@@ -431,12 +433,13 @@ class TestNoTOCFallback:
     def test_no_toc_logs_warning(self, body_page_text: str, caplog):
         """A warning should be logged when no TOC is found."""
         mock_doc = _make_mock_fitz_doc([body_page_text])
+        mock_fitz = MagicMock()
+        mock_fitz.open.return_value = mock_doc
 
         with (
-            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
+            patch.dict(sys.modules, {"fitz": mock_fitz}),
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_fitz.open.return_value = mock_doc
             import logging
             with caplog.at_level(logging.WARNING):
                 extract_protocol_index("/fake/protocol.pdf")
@@ -1269,11 +1272,13 @@ class TestFullTextTocStripping:
         ]
         mock_doc = _make_mock_fitz_doc(page_texts)
 
+        mock_fitz = MagicMock()
+        mock_fitz.open.return_value = mock_doc
+
         with (
-            patch("ptcv.ich_parser.toc_extractor.fitz") as mock_fitz,
+            patch.dict(sys.modules, {"fitz": mock_fitz}),
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_fitz.open.return_value = mock_doc
             idx = extract_protocol_index("/fake/test.pdf")
 
         # full_text should NOT contain TOC entries
@@ -1285,3 +1290,199 @@ class TestFullTextTocStripping:
             assert not (
                 "TREATMENTS" in s and "43" in s and "..." in s
             ), f"TOC entry in full_text: {s}"
+
+
+# -----------------------------------------------------------------------
+# PTCV-261: DiagramFinder integration into Stage 1
+# -----------------------------------------------------------------------
+
+
+class TestDiagramIntegration:
+    """PTCV-261: DiagramFinder integrated into Stage 1.
+
+    Feature: DiagramFinder integrated into Stage 1
+
+      Scenario: Vector diagrams detected during document assembly
+      Scenario: Raster diagrams detected when Vision enabled
+      Scenario: No diagrams does not break pipeline
+      Scenario: Diagram data available to downstream stages
+    """
+
+    def _make_mock_diagram(
+        self,
+        diagram_type: str = "flowchart",
+        page_number: int = 5,
+        num_nodes: int = 3,
+    ) -> MagicMock:
+        """Create a mock Diagram with to_dict() support."""
+        diag = MagicMock()
+        diag.to_dict.return_value = {
+            "diagram_type": diagram_type,
+            "page_number": page_number,
+            "bbox": (50, 100, 500, 600),
+            "nodes": [
+                {
+                    "node_id": i,
+                    "shape_type": "rect",
+                    "label": f"Node {i}",
+                    "bbox": (50, 100 + i * 50, 200, 140 + i * 50),
+                }
+                for i in range(num_nodes)
+            ],
+            "edges": [
+                {
+                    "source_id": i,
+                    "target_id": i + 1,
+                    "label": "",
+                    "edge_type": "arrow",
+                }
+                for i in range(num_nodes - 1)
+            ],
+        }
+        return diag
+
+    def _setup_mocks(
+        self, body_text: str, mock_finder: MagicMock,
+    ) -> tuple[MagicMock, MagicMock, MagicMock]:
+        """Set up common mocks for fitz, pdfplumber, and DiagramFinder."""
+        mock_doc = _make_mock_fitz_doc([body_text])
+        mock_fitz = MagicMock()
+        mock_fitz.open.return_value = mock_doc
+
+        mock_plumber_pdf = MagicMock()
+        mock_plumber_pdf.__enter__ = MagicMock(
+            return_value=mock_plumber_pdf,
+        )
+        mock_plumber_pdf.__exit__ = MagicMock(return_value=False)
+        mock_plumber_pdf.pages = [MagicMock()]
+
+        mock_pdfplumber = MagicMock()
+        mock_pdfplumber.open.return_value = mock_plumber_pdf
+
+        # Pre-populate sys.modules so local imports inside
+        # extract_protocol_index() find our mocks.
+        mock_diagram_mod = MagicMock()
+        mock_diagram_mod.DiagramFinder = MagicMock(
+            return_value=mock_finder,
+        )
+
+        return mock_fitz, mock_pdfplumber, mock_diagram_mod
+
+    def _run_extract(
+        self,
+        mock_fitz: MagicMock,
+        mock_pdfplumber: MagicMock,
+        mock_diagram_mod: MagicMock,
+        extra_env: dict[str, str] | None = None,
+    ) -> ProtocolIndex:
+        """Run extract_protocol_index with mocks injected."""
+        modules = {
+            "fitz": mock_fitz,
+            "pdfplumber": mock_pdfplumber,
+            "ptcv.extraction.diagram_finder": mock_diagram_mod,
+        }
+        env_patch = extra_env or {}
+        with (
+            patch.dict(sys.modules, modules),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.read_bytes", return_value=b""),
+            patch.dict("os.environ", env_patch, clear=False),
+        ):
+            return extract_protocol_index("/fake/test.pdf")
+
+    def test_vector_diagrams_detected(self) -> None:
+        """Scenario: Vector diagrams detected during document assembly."""
+        mock_diagram = self._make_mock_diagram(
+            diagram_type="study_design", page_number=1, num_nodes=4,
+        )
+        mock_finder = MagicMock()
+        mock_finder.find_diagrams.return_value = [mock_diagram]
+
+        fitz, plumber, diag_mod = self._setup_mocks(
+            "1 STUDY DESIGN\nThis section describes the design.",
+            mock_finder,
+        )
+        idx = self._run_extract(fitz, plumber, diag_mod)
+
+        assert len(idx.diagrams) == 1
+        d = idx.diagrams[0]
+        assert d["diagram_type"] == "study_design"
+        assert len(d["nodes"]) == 4
+        assert len(d["edges"]) == 3
+
+    def test_vision_gated_by_env_flag(self) -> None:
+        """Scenario: Raster diagrams detected when Vision enabled."""
+        import os
+
+        captured_kwargs: list[dict] = []
+
+        def capture_init(**kwargs):  # type: ignore[no-untyped-def]
+            captured_kwargs.append(kwargs)
+            finder = MagicMock()
+            finder.find_diagrams.return_value = []
+            return finder
+
+        body = "1 STUDY DESIGN\nThis section describes the design."
+
+        # Without env flag — Vision should be disabled
+        os.environ.pop("PTCV_ENABLE_DIAGRAM_VISION", None)
+        mock_finder = MagicMock()
+        mock_finder.find_diagrams.return_value = []
+        fitz, plumber, diag_mod = self._setup_mocks(body, mock_finder)
+        diag_mod.DiagramFinder = MagicMock(side_effect=capture_init)
+        self._run_extract(fitz, plumber, diag_mod)
+        assert captured_kwargs[-1].get("enable_vision_fallback") is False
+
+        # With env flag — Vision should be enabled
+        fitz, plumber, diag_mod = self._setup_mocks(body, mock_finder)
+        diag_mod.DiagramFinder = MagicMock(side_effect=capture_init)
+        self._run_extract(
+            fitz, plumber, diag_mod,
+            extra_env={"PTCV_ENABLE_DIAGRAM_VISION": "1"},
+        )
+        assert captured_kwargs[-1].get("enable_vision_fallback") is True
+
+    def test_no_diagrams_does_not_break_pipeline(self) -> None:
+        """Scenario: No diagrams does not break pipeline."""
+        mock_finder = MagicMock()
+        mock_finder.find_diagrams.return_value = []
+
+        fitz, plumber, diag_mod = self._setup_mocks(
+            "1 INTRODUCTION\nThis is the introduction.", mock_finder,
+        )
+        idx = self._run_extract(fitz, plumber, diag_mod)
+
+        assert idx.diagrams == []
+        assert idx.page_count == 1
+        assert isinstance(idx.content_spans, dict)
+
+    def test_diagram_data_available_downstream(self) -> None:
+        """Scenario: Diagram data available to downstream stages."""
+        mock_diagram = self._make_mock_diagram(
+            diagram_type="study_design", page_number=1, num_nodes=5,
+        )
+        mock_finder = MagicMock()
+        mock_finder.find_diagrams.return_value = [mock_diagram]
+
+        fitz, plumber, diag_mod = self._setup_mocks(
+            "1 STUDY DESIGN\nPhase 3 double-blind.", mock_finder,
+        )
+        idx = self._run_extract(fitz, plumber, diag_mod)
+
+        assert len(idx.diagrams) == 1
+        d = idx.diagrams[0]
+        assert "diagram_type" in d
+        assert "nodes" in d
+        assert "edges" in d
+        assert "page_number" in d
+        assert "bbox" in d
+        # Verify node structure
+        node = d["nodes"][0]
+        assert "node_id" in node
+        assert "shape_type" in node
+        assert "label" in node
+        # Verify edge structure
+        edge = d["edges"][0]
+        assert "source_id" in edge
+        assert "target_id" in edge
+        assert "edge_type" in edge

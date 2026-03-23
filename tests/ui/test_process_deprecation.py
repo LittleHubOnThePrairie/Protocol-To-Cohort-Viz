@@ -1,13 +1,11 @@
-"""Tests for Process tab deprecation feature flag (PTCV-142).
+"""Tests for tab layout reorganization (PTCV-268, formerly PTCV-142).
 
-Verifies that the _build_tab_names helper and PTCV_DISABLE_PROCESS_TAB
-feature flag correctly control Process tab visibility.
+Verifies that _build_tab_names produces pipeline-aligned tab order:
+  Query Pipeline → SoA & Observations → SDTM & Validation → Advanced
 """
 
 from __future__ import annotations
 
-import importlib
-import os
 import sys
 from pathlib import Path
 
@@ -19,107 +17,50 @@ from ptcv.ui.app import _build_tab_names
 
 
 # ---------------------------------------------------------------------------
-# _build_tab_names tests
+# _build_tab_names tests (PTCV-268)
 # ---------------------------------------------------------------------------
 
 
 class TestBuildTabNames:
-    """Tests for the _build_tab_names helper (PTCV-142)."""
+    """Tests for the _build_tab_names helper (PTCV-268)."""
 
-    def test_includes_process_by_default(self) -> None:
+    def test_first_tab_is_query_pipeline(self) -> None:
         names = _build_tab_names("Review")
-        assert "Process" in names
-        assert names[0] == "Process"
+        assert names[0] == "Query Pipeline"
 
-    def test_excludes_process_when_disabled(self) -> None:
-        names = _build_tab_names("Review", include_process=False)
-        assert "Process" not in names
-
-    def test_first_tab_is_results_when_process_disabled(self) -> None:
-        names = _build_tab_names("Review", include_process=False)
-        assert names[0] == "Results"
-
-    def test_all_non_process_tabs_present(self) -> None:
-        expected = [
-            "Results", "Quality", "SoA & SDTM",
-            "Mock Data", "Query Pipeline", "Benchmark",
-            "Refinement", "Review",
-        ]
-        names = _build_tab_names("Review", include_process=False)
-        assert names == expected
-
-    def test_review_label_with_count(self) -> None:
-        names = _build_tab_names("Review (3)")
-        assert names[-1] == "Review (3)"
-
-    def test_tab_count_with_process(self) -> None:
+    def test_second_tab_is_soa(self) -> None:
         names = _build_tab_names("Review")
-        assert len(names) == 9
+        assert names[1] == "SoA & Observations"
 
-    def test_tab_count_without_process(self) -> None:
-        names = _build_tab_names("Review", include_process=False)
-        assert len(names) == 8
+    def test_third_tab_is_sdtm(self) -> None:
+        names = _build_tab_names("Review")
+        assert names[2] == "SDTM & Validation"
 
-    def test_order_preserved_with_process(self) -> None:
+    def test_advanced_tab_present(self) -> None:
+        names = _build_tab_names("Review")
+        assert "Advanced" in names
+
+    def test_tab_count(self) -> None:
+        names = _build_tab_names("Review")
+        assert len(names) == 4
+
+    def test_pipeline_order(self) -> None:
+        """Tabs read left-to-right matching pipeline flow."""
         names = _build_tab_names("Review")
         expected = [
-            "Process", "Results", "Quality", "SoA & SDTM",
-            "Mock Data", "Query Pipeline", "Benchmark",
-            "Refinement", "Review",
+            "Query Pipeline",
+            "SoA & Observations",
+            "SDTM & Validation",
+            "Advanced",
         ]
         assert names == expected
 
-
-# ---------------------------------------------------------------------------
-# Feature flag tests
-# ---------------------------------------------------------------------------
-
-
-class TestFeatureFlag:
-    """Tests for the PTCV_DISABLE_PROCESS_TAB env var (PTCV-142)."""
-
-    def test_flag_false_by_default(self) -> None:
-        """Without env var, flag should be False."""
-        env_backup = os.environ.pop(
-            "PTCV_DISABLE_PROCESS_TAB", None,
-        )
-        try:
-            mod = importlib.import_module("ptcv.ui.app")
-            importlib.reload(mod)
-            assert mod._PROCESS_TAB_DISABLED is False
-        finally:
-            if env_backup is not None:
-                os.environ["PTCV_DISABLE_PROCESS_TAB"] = (
-                    env_backup
-                )
-            else:
-                os.environ.pop(
-                    "PTCV_DISABLE_PROCESS_TAB", None,
-                )
-            # Restore module state
-            importlib.reload(mod)
-
-    def test_flag_true_when_env_set(self) -> None:
-        """With env var set, flag should be True."""
-        env_backup = os.environ.get(
-            "PTCV_DISABLE_PROCESS_TAB",
-        )
-        os.environ["PTCV_DISABLE_PROCESS_TAB"] = "1"
-        try:
-            mod = importlib.import_module("ptcv.ui.app")
-            importlib.reload(mod)
-            assert mod._PROCESS_TAB_DISABLED is True
-        finally:
-            if env_backup is not None:
-                os.environ["PTCV_DISABLE_PROCESS_TAB"] = (
-                    env_backup
-                )
-            else:
-                os.environ.pop(
-                    "PTCV_DISABLE_PROCESS_TAB", None,
-                )
-            # Restore module state
-            importlib.reload(mod)
+    def test_legacy_tabs_not_at_top_level(self) -> None:
+        """Legacy tabs (Process, Results, etc.) are not top-level."""
+        names = _build_tab_names("Review")
+        for legacy in ["Process", "Results", "Quality",
+                        "Mock Data", "Benchmark", "Refinement"]:
+            assert legacy not in names
 
 
 # ---------------------------------------------------------------------------
@@ -128,28 +69,19 @@ class TestFeatureFlag:
 
 
 class TestTabLookup:
-    """Verify dict(zip(...)) pattern for tab references (PTCV-142)."""
+    """Verify dict(zip(...)) pattern for tab references (PTCV-268)."""
 
-    def test_process_tab_none_when_excluded(self) -> None:
-        names = _build_tab_names("Review", include_process=False)
-        # Simulate dict creation (real st.tabs returns widgets)
+    def test_all_primary_tabs_accessible(self) -> None:
+        names = _build_tab_names("Review")
+        tabs_dict = {n: f"widget_{n}" for n in names}
+        assert tabs_dict["Query Pipeline"] is not None
+        assert tabs_dict["SoA & Observations"] is not None
+        assert tabs_dict["SDTM & Validation"] is not None
+        assert tabs_dict["Advanced"] is not None
+
+    def test_legacy_tabs_not_in_dict(self) -> None:
+        names = _build_tab_names("Review")
         tabs_dict = {n: f"widget_{n}" for n in names}
         assert tabs_dict.get("Process") is None
-
-    def test_process_tab_present_when_included(self) -> None:
-        names = _build_tab_names("Review", include_process=True)
-        tabs_dict = {n: f"widget_{n}" for n in names}
-        assert tabs_dict.get("Process") == "widget_Process"
-
-    def test_all_tabs_accessible_without_process(self) -> None:
-        names = _build_tab_names("Review", include_process=False)
-        tabs_dict = {n: f"widget_{n}" for n in names}
-        # All non-Process tabs must be accessible by key
-        assert tabs_dict["Results"] is not None
-        assert tabs_dict["Quality"] is not None
-        assert tabs_dict["SoA & SDTM"] is not None
-        assert tabs_dict["Mock Data"] is not None
-        assert tabs_dict["Query Pipeline"] is not None
-        assert tabs_dict["Benchmark"] is not None
-        assert tabs_dict["Refinement"] is not None
-        assert tabs_dict["Review"] is not None
+        assert tabs_dict.get("Results") is None
+        assert tabs_dict.get("SoA & SDTM") is None

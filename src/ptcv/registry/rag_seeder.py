@@ -286,6 +286,140 @@ class RegistryRagSeeder:
                 keys.add((nct_id, meta["section_code"]))
         return keys
 
+    def seed_from_pubmed(
+        self,
+        rag_index: Any,
+        articles: list,
+        nct_id: str,
+    ) -> SeedResult:
+        """Add PubMed publication vectors to the RAG index (PTCV-282).
+
+        Classifies each article as PRIMARY, SECONDARY, or EXCLUDED.
+        PRIMARY articles contribute full abstract + title + MeSH.
+        SECONDARY articles contribute title + MeSH only.
+        EXCLUDED articles are skipped.
+
+        Args:
+            rag_index: A ``RagIndex`` instance (must be initialised).
+            articles: List of ``PubmedArticle`` objects.
+            nct_id: ClinicalTrials.gov NCT ID for provenance.
+
+        Returns:
+            SeedResult with counts and seeded codes.
+        """
+        from ptcv.ich_parser.rag_index import _ensure_rag_deps
+        from ptcv.registry.pubmed_classifier import (
+            PublicationRelevance,
+            classify_publication,
+            get_embedding_text,
+        )
+
+        _ensure_rag_deps()
+
+        if rag_index._index is None:
+            raise RuntimeError(
+                "RagIndex not initialised. Call build_from_sections() "
+                "or load() first."
+            )
+
+        # Filter out articles already seeded for this trial
+        existing_pmids = self._existing_pubmed_pmids(
+            rag_index, nct_id
+        )
+
+        texts: list[str] = []
+        metadata_entries: list[dict[str, Any]] = []
+        skipped = 0
+
+        for article in articles:
+            if article.pmid in existing_pmids:
+                skipped += 1
+                continue
+
+            relevance = classify_publication(article)
+            if relevance == PublicationRelevance.EXCLUDED:
+                skipped += 1
+                continue
+
+            text = get_embedding_text(article, relevance)
+            if not text.strip():
+                skipped += 1
+                continue
+
+            source_tag = (
+                "pubmed_primary"
+                if relevance == PublicationRelevance.PRIMARY
+                else "pubmed_secondary"
+            )
+
+            texts.append(text[:_MAX_TEXT_CHARS])
+            metadata_entries.append({
+                "section_code": "",  # PubMed vectors are not section-specific
+                "section_name": "",
+                "registry_id": nct_id,
+                "confidence_score": 0.0,
+                "content_text": text[:_CONTENT_DISPLAY_CHARS],
+                "source": source_tag,
+                "quality_rating": 0.0,
+                "nct_id": nct_id,
+                "pmid": article.pmid,
+                "pub_title": article.title[:200],
+                "relevance": relevance.value,
+                "content_preview": text[:200],
+            })
+
+        if not texts:
+            logger.info(
+                "RegistryRagSeeder: no PubMed articles to seed "
+                "for %s (%d skipped)",
+                nct_id,
+                skipped,
+            )
+            return SeedResult(
+                sections_seeded=0,
+                sections_skipped=skipped,
+                nct_id=nct_id,
+                section_codes=[],
+            )
+
+        # Embed and add to index
+        embeddings = rag_index._encode(texts)
+        rag_index._index.add(embeddings)
+
+        for meta in metadata_entries:
+            rag_index._metadata.append(meta)
+
+        logger.info(
+            "RegistryRagSeeder: seeded %d PubMed articles for %s "
+            "(%d skipped)",
+            len(texts),
+            nct_id,
+            skipped,
+        )
+
+        return SeedResult(
+            sections_seeded=len(texts),
+            sections_skipped=skipped,
+            nct_id=nct_id,
+            section_codes=[],  # PubMed vectors are not section-specific
+        )
+
+    @staticmethod
+    def _existing_pubmed_pmids(
+        rag_index: Any,
+        nct_id: str,
+    ) -> set[str]:
+        """Return PMIDs already in the index for this trial."""
+        pmids: set[str] = set()
+        for meta in rag_index._metadata:
+            if (
+                meta.get("source", "").startswith("pubmed_")
+                and meta.get("nct_id") == nct_id
+                and meta.get("pmid")
+            ):
+                pmids.add(meta["pmid"])
+        return pmids
+
     @staticmethod
     def get_registry_vectors(
         rag_index: Any,

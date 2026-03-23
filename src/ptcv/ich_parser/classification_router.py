@@ -249,6 +249,9 @@ class ClassificationRouter:
         self._sonnet_model = sonnet_model
         self._rag_index = rag_index
 
+        # PTCV-234: Optional centroid classifier for fast pre-filtering
+        self._centroid_classifier: Optional[Any] = None
+
         # Lazy Anthropic client
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         self._use_sonnet = bool(api_key)
@@ -262,6 +265,16 @@ class ClassificationRouter:
     # Public API
     # ---------------------------------------------------------------
 
+    def set_centroid_classifier(
+        self, classifier: Any,
+    ) -> None:
+        """Inject centroid classifier for fast pre-filtering (PTCV-234).
+
+        Args:
+            classifier: CentroidClassifier instance, or None to disable.
+        """
+        self._centroid_classifier = classifier
+
     def classify(
         self,
         text_blocks: list[dict[str, Any]],
@@ -269,6 +282,7 @@ class ClassificationRouter:
         run_id: str,
         source_run_id: str,
         source_sha256: str,
+        table_context: Optional[list[dict[str, Any]]] = None,
     ) -> CascadeResult:
         """Run the classification cascade on text blocks.
 
@@ -278,10 +292,20 @@ class ClassificationRouter:
             run_id: UUID4 for this cascade run.
             source_run_id: Upstream extraction run_id.
             source_sha256: SHA-256 of upstream artifact.
+            table_context: Optional list of table dicts from Stage 1
+                (PTCV-228). When provided, table header content is
+                appended to classification text for sections on the
+                same page, improving section disambiguation.
 
         Returns:
             ``CascadeResult`` with routing decisions, stats, and sections.
         """
+        # PTCV-228: Enrich text blocks with table context
+        if table_context:
+            text_blocks = self._enrich_with_table_context(
+                text_blocks, table_context,
+            )
+
         # Concatenate text for the local classifier
         full_text = "\n".join(
             b.get("text", "") for b in text_blocks
@@ -402,6 +426,61 @@ class ClassificationRouter:
         )
 
     # ---------------------------------------------------------------
+    # Table context enrichment (PTCV-228)
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _enrich_with_table_context(
+        text_blocks: list[dict[str, Any]],
+        table_context: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Append table header summaries to text blocks on same pages.
+
+        For each page that has both text blocks and tables, appends
+        a synthetic text block with the table headers. This helps
+        the classifier distinguish dosing tables (B.6) from
+        assessment tables (B.8/B.9), etc.
+
+        Args:
+            text_blocks: Original text blocks.
+            table_context: Table dicts with ``page_number`` and
+                ``header_row`` (JSON string or list).
+
+        Returns:
+            Enriched text block list (original + synthetic blocks).
+        """
+        import json as _json
+
+        # Build page → table headers map
+        table_headers_by_page: dict[int, list[str]] = {}
+        for tbl in table_context:
+            page = tbl.get("page_number", 0)
+            header = tbl.get("header_row", "")
+            if isinstance(header, str):
+                try:
+                    header = _json.loads(header)
+                except (ValueError, TypeError):
+                    header = [header]
+            if header and page > 0:
+                summary = " | ".join(str(h) for h in header)
+                table_headers_by_page.setdefault(page, []).append(summary)
+
+        if not table_headers_by_page:
+            return text_blocks
+
+        enriched = list(text_blocks)
+        for page, headers in table_headers_by_page.items():
+            for header_text in headers:
+                enriched.append({
+                    "page_number": page,
+                    "text": f"[Table on this page: {header_text}]",
+                    "block_type": "table_context",
+                    "in_table": True,
+                })
+
+        return enriched
+
+    # ---------------------------------------------------------------
     # Routing
     # ---------------------------------------------------------------
 
@@ -425,6 +504,38 @@ class ClassificationRouter:
                 final_section_code=section.section_code,
                 final_confidence=section.confidence_score,
             )
+
+        # PTCV-234: Centroid classifier pre-filter before Sonnet
+        if self._centroid_classifier is not None:
+            try:
+                from .centroid_classifier import CentroidClassifier
+
+                matches = self._centroid_classifier.classify(
+                    section.content_text, top_k=3,
+                )
+                if CentroidClassifier.is_high_confidence(matches):
+                    top = matches[0]
+                    logger.info(
+                        "Centroid pre-filter: %s -> %s (%.2f), "
+                        "skipping Sonnet",
+                        section.section_code,
+                        top.section_code,
+                        top.confidence,
+                    )
+                    return RoutingDecision(
+                        block_index=block_index,
+                        content_hash=content_hash,
+                        local_candidates=candidates,
+                        route="centroid",
+                        threshold_used=threshold,
+                        final_section_code=top.section_code,
+                        final_confidence=top.confidence,
+                    )
+            except Exception:
+                logger.debug(
+                    "Centroid classifier failed; falling through",
+                    exc_info=True,
+                )
 
         # Low confidence — route to Sonnet if available
         if not self._use_sonnet:

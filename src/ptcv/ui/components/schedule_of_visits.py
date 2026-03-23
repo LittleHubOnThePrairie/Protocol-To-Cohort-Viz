@@ -39,6 +39,7 @@ class PlotTimepoint(NamedTuple):
     timepoint_id: str
     visit_name: str
     day_offset: int
+    visit_type: str = ""
 
 
 class PlotActivity(NamedTuple):
@@ -90,7 +91,10 @@ def to_plot_data(
     """
     return SoVPlotData(
         timepoints=[
-            PlotTimepoint(tp.timepoint_id, tp.visit_name, tp.day_offset)
+            PlotTimepoint(
+                tp.timepoint_id, tp.visit_name, tp.day_offset,
+                getattr(tp, "visit_type", ""),
+            )
             for tp in timepoints
         ],
         activities=[
@@ -304,12 +308,39 @@ def build_sov_grid(
     tp_by_id = {tp.timepoint_id: tp for tp in unique_tps}
     act_by_id = {a.activity_id: a for a in activities}
 
-    # Sort unique timepoints by day_offset for x-axis ordering
-    sorted_tps = sorted(unique_tps, key=_visit_sort_key)
+    # PTCV-254: Resolve visit labels to real study days for
+    # chronological ordering.  Uses resolver for labels that parse
+    # to a confident day; keeps existing day_offset otherwise.
+    resolved_days: dict[str, int] = {}
+    try:
+        from ptcv.soa_extractor.visit_day_resolver import (
+            VisitDayResolver,
+        )
+        resolver = VisitDayResolver()
+        for tp in unique_tps:
+            rv = resolver.resolve(tp.visit_name)
+            if rv.confidence >= 0.8:
+                resolved_days[tp.timepoint_id] = rv.real_day
+            # else: keep day_offset (handled by fallback below)
+    except ImportError:
+        pass  # Fallback to day_offset if resolver not available
+
+    def _resolved_sort_key(tp: Any) -> tuple[int, int, str]:
+        """Sort by resolved real_day, falling back to day_offset."""
+        day = resolved_days.get(tp.timepoint_id, tp.day_offset)
+        m = _VISIT_NUM_SORT_RE.search(tp.visit_name)
+        num = int(m.group(1)) if m else 0
+        return (day, num, tp.visit_name)
+
+    # Sort unique timepoints by resolved day for x-axis ordering
+    sorted_tps = sorted(unique_tps, key=_resolved_sort_key)
     tp_order = {tp.timepoint_id: idx for idx, tp in enumerate(sorted_tps)}
 
-    # Rebase days so Screening = day 0 (PTCV-151)
+    # Use resolved days for display; fall back to rebased day_offset
     rebased_days = _rebase_to_screening(unique_tps)
+    # Override with resolved real days where available
+    for tp_id, real_day in resolved_days.items():
+        rebased_days[tp_id] = real_day
 
     # Build one record per scheduled (assessment, visit) pair
     records: list[dict[str, Any]] = []

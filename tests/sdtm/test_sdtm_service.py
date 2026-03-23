@@ -148,7 +148,10 @@ class TestScenario2WormAllArtifacts:
             registry_id="NCT00112827",
             run_id="test-run-worm",
         )
-        expected = {"ts", "ta", "te", "tv", "ti", "define"}
+        expected = {
+            "ts", "ta", "te", "tv", "ti", "define",
+            "dm", "sv", "lb", "ae", "vs", "cm", "mh", "ds", "ex",
+        }
         assert set(result.artifact_keys.keys()) == expected
 
     def test_all_artifact_sha256s_present(self, service, all_sections, timepoints):
@@ -158,7 +161,10 @@ class TestScenario2WormAllArtifacts:
             registry_id="NCT00112827",
             run_id="test-run-worm2",
         )
-        expected = {"ts", "ta", "te", "tv", "ti", "define"}
+        expected = {
+            "ts", "ta", "te", "tv", "ti", "define",
+            "dm", "sv", "lb", "ae", "vs", "cm", "mh", "ds", "ex",
+        }
         assert set(result.artifact_sha256s.keys()) == expected
 
     def test_all_sha256s_non_empty(self, service, all_sections, timepoints):
@@ -667,15 +673,15 @@ class TestEdgeCases:
         assert result.generation_timestamp_utc != ""
         assert "T" in result.generation_timestamp_utc  # ISO 8601
 
-    def test_domain_row_counts_five_domains(self, service, all_sections, timepoints):
+    def test_domain_row_counts_includes_trial_design(self, service, all_sections, timepoints):
         result = service.generate(
             sections=all_sections,
             timepoints=timepoints,
             registry_id="NCT00112827",
             run_id="test-run-counts",
         )
-        expected_domains = {"TS", "TA", "TE", "TV", "TI"}
-        assert set(result.domain_row_counts.keys()) == expected_domains
+        trial_design = {"TS", "TA", "TE", "TV", "TI"}
+        assert trial_design.issubset(set(result.domain_row_counts.keys()))
 
     def test_source_type_default_is_ich_section(self, service, all_sections, timepoints):
         result = service.generate(
@@ -704,7 +710,10 @@ class TestGenerateFromAssembled:
             registry_id="NCT00112827",
             run_id="test-asm-001",
         )
-        expected = {"ts", "ta", "te", "tv", "ti", "define"}
+        expected = {
+            "ts", "ta", "te", "tv", "ti", "define",
+            "dm", "sv", "lb", "ae", "vs", "cm", "mh", "ds", "ex",
+        }
         assert set(result.artifact_keys.keys()) == expected
 
     def test_source_type_is_query_pipeline(
@@ -784,3 +793,336 @@ class TestGenerateFromAssembled:
                 registry_id="NCT00112827",
                 run_id="test-asm-worm",
             )
+
+
+# ---------------------------------------------------------------------------
+# PTCV-246: Domain spec integration — SoA assessments → SDTM domain specs
+# ---------------------------------------------------------------------------
+
+
+class TestDomainSpecIntegration:
+    """PTCV-246: SoA assessment mapping produces domain specs alongside
+    trial design domains in SdtmGenerationResult."""
+
+    def test_domain_specs_none_without_soa_table(
+        self, service, all_sections, timepoints,
+    ):
+        """Without soa_table, domain_specs is None."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-none",
+        )
+        assert result.domain_specs is None
+
+    def test_domain_specs_populated_with_soa_table(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """With soa_table, domain_specs is populated."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-pop",
+            soa_table=soa_table,
+        )
+        assert result.domain_specs is not None
+        assert len(result.domain_specs.specs) > 0
+
+    def test_vs_domain_spec_produced(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: VS domain spec produced from Vital Signs assessments."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-vs",
+            soa_table=soa_table,
+        )
+        vs = result.domain_specs.get_spec("VS")
+        assert vs is not None
+        assert vs.domain_code == "VS"
+        testcds = [tc.testcd for tc in vs.test_codes]
+        assert "SYSBP" in testcds
+        assert "DIABP" in testcds
+        assert "HR" in testcds
+
+    def test_vs_visit_schedule_preserved(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: Visit schedule from SoA is preserved in VS spec."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-vs-sched",
+            soa_table=soa_table,
+        )
+        vs = result.domain_specs.get_spec("VS")
+        assert vs is not None
+        # Vital Signs are scheduled at all 4 visits
+        first_tc = vs.test_codes[0]
+        assert "Screening" in first_tc.visit_schedule
+        assert "End of Study" in first_tc.visit_schedule
+
+    def test_lb_domain_with_specimen(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: LB domain with standard lab test codes and specimen."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-lb",
+            soa_table=soa_table,
+        )
+        lb = result.domain_specs.get_spec("LB")
+        assert lb is not None
+        assert "BLOOD" in lb.specimen_type
+        assert "SERUM" in lb.specimen_type
+        testcds = [tc.testcd for tc in lb.test_codes]
+        assert "WBC" in testcds  # From Hematology
+        assert "ALT" in testcds  # From Chemistry
+
+    def test_eg_domain_from_ecg(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: EG domain from 12-lead ECG assessment."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-eg",
+            soa_table=soa_table,
+        )
+        eg = result.domain_specs.get_spec("EG")
+        assert eg is not None
+        testcds = [tc.testcd for tc in eg.test_codes]
+        assert "QTCF" in testcds
+
+    def test_pe_domain_from_physical_exam(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: PE domain from Physical Examination."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-pe",
+            soa_table=soa_table,
+        )
+        pe = result.domain_specs.get_spec("PE")
+        assert pe is not None
+        var_names = [v.name for v in pe.variables]
+        assert "PETESTCD" in var_names
+        assert "PEBODSYS" in var_names
+
+    def test_unmapped_assessments_flagged(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """GHERKIN: Unmapped assessments flagged with suggested domain."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-unmap",
+            soa_table=soa_table,
+        )
+        unmapped_names = [
+            u.assessment_name for u in result.domain_specs.unmapped
+        ]
+        assert "Genomic Sequencing" in unmapped_names
+        # Suggested domain defaults to FA
+        genomic = next(
+            u for u in result.domain_specs.unmapped
+            if u.assessment_name == "Genomic Sequencing"
+        )
+        assert genomic.suggested_domain == "FA"
+
+    def test_domain_specs_via_generate_from_assembled(
+        self, service, assembled_protocol, timepoints, soa_table,
+    ):
+        """Domain specs work through generate_from_assembled() too."""
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-asm",
+            soa_table=soa_table,
+        )
+        assert result.domain_specs is not None
+        assert result.domain_specs.get_spec("VS") is not None
+
+    def test_target_domains_filter_to_vs_lb_eg_pe(
+        self, service, all_sections, timepoints, soa_table,
+    ):
+        """Service filters domain specs to VS, LB, EG, PE only."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ds-filter",
+            soa_table=soa_table,
+        )
+        domain_codes = {s.domain_code for s in result.domain_specs.specs}
+        # Only observation domains — no AE, DS, CM, etc.
+        assert domain_codes <= {"VS", "LB", "EG", "PE"}
+
+
+# ---------------------------------------------------------------------------
+# PTCV-248: EX domain spec integration — intervention → EX domain
+# ---------------------------------------------------------------------------
+
+
+class TestExDomainSpecIntegration:
+    """PTCV-248: EX domain generated from registry metadata and/or
+    protocol sections alongside trial design domains."""
+
+    @pytest.fixture()
+    def registry_with_interventions(self) -> dict:
+        """CT.gov-style registry metadata with interventions."""
+        return {
+            "protocolSection": {
+                "armsInterventionsModule": {
+                    "interventions": [
+                        {
+                            "type": "DRUG",
+                            "name": "Drug X",
+                            "description": "10 mg oral daily",
+                            "armGroupLabels": ["Arm A"],
+                        },
+                        {
+                            "type": "DRUG",
+                            "name": "Placebo",
+                            "description": "Matching placebo capsule oral daily",
+                            "armGroupLabels": ["Arm B"],
+                        },
+                    ],
+                },
+            },
+        }
+
+    def test_ex_spec_none_without_metadata(
+        self, service, all_sections, timepoints,
+    ):
+        """Without registry_metadata or B.4/B.7 text, ex_domain_spec is None."""
+        result = service.generate(
+            sections=[],
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-none",
+        )
+        assert result.ex_domain_spec is None
+
+    def test_ex_spec_from_registry(
+        self, service, all_sections, timepoints, registry_with_interventions,
+    ):
+        """GHERKIN: Drug intervention maps to EX domain from registry."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-reg",
+            registry_metadata=registry_with_interventions,
+        )
+        assert result.ex_domain_spec is not None
+        names = [i.name for i in result.ex_domain_spec.interventions]
+        assert "Drug X" in names
+        assert "Placebo" in names
+
+    def test_ex_spec_extrt_populated(
+        self, service, all_sections, timepoints, registry_with_interventions,
+    ):
+        """GHERKIN: EXTRT includes Drug X and Placebo."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-extrt",
+            registry_metadata=registry_with_interventions,
+        )
+        var_names = [v["name"] for v in result.ex_domain_spec.variables]
+        assert "EXTRT" in var_names
+        assert "EXDOSE" in var_names
+        assert "EXDOSU" in var_names
+        assert "EXROUTE" in var_names
+        assert "EXDOSFRQ" in var_names
+
+    def test_ex_spec_dose_route_freq_from_registry(
+        self, service, all_sections, timepoints, registry_with_interventions,
+    ):
+        """GHERKIN: EXDOSE, EXDOSU, EXROUTE, EXDOSFRQ populated from protocol."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-dose",
+            registry_metadata=registry_with_interventions,
+        )
+        drug_x = next(
+            i for i in result.ex_domain_spec.interventions
+            if i.name == "Drug X"
+        )
+        assert drug_x.dose == "10"
+        assert drug_x.dose_unit == "MG"
+        assert drug_x.route == "ORAL"
+        assert drug_x.frequency == "QD"
+
+    def test_ex_spec_arm_treatment_map(
+        self, service, all_sections, timepoints, registry_with_interventions,
+    ):
+        """Arm → treatment mapping present in EX spec."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-arm",
+            registry_metadata=registry_with_interventions,
+        )
+        assert "Arm A" in result.ex_domain_spec.arm_treatment_map
+        assert "Drug X" in result.ex_domain_spec.arm_treatment_map["Arm A"]
+
+    def test_ex_spec_from_sections_fallback(
+        self, service, all_sections, timepoints,
+    ):
+        """EX spec falls back to B.4/B.7 section text when no registry."""
+        result = service.generate(
+            sections=all_sections,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-text",
+        )
+        # B.7 fixture has "Drug X 10 mg tablet" — should parse
+        assert result.ex_domain_spec is not None
+        assert result.ex_domain_spec.treatment_count >= 1
+
+    def test_ex_spec_via_generate_from_assembled(
+        self, service, assembled_protocol, timepoints,
+    ):
+        """EX spec works through generate_from_assembled() with registry."""
+        metadata = {
+            "protocolSection": {
+                "armsInterventionsModule": {
+                    "interventions": [
+                        {
+                            "type": "DRUG",
+                            "name": "Test Drug",
+                            "description": "50 mg IV weekly",
+                            "armGroupLabels": ["Arm 1"],
+                        },
+                    ],
+                },
+            },
+        }
+        result = service.generate_from_assembled(
+            assembled=assembled_protocol,
+            timepoints=timepoints,
+            registry_id="NCT00112827",
+            run_id="test-ex-asm",
+            registry_metadata=metadata,
+        )
+        assert result.ex_domain_spec is not None
+        assert result.ex_domain_spec.interventions[0].name == "Test Drug"
+        assert result.ex_domain_spec.interventions[0].route == "INTRAVENOUS"

@@ -457,3 +457,27 @@ class TestNaturalSectionOrdering:
         headers = re.findall(r"^## (B\.\d+) ", md, re.MULTILINE)
         expected = [f"B.{i}" for i in range(1, 17)]
         assert headers == expected
+
+    def test_subsection_hits_sorted_within_parent(self):
+        """Hits arriving in arbitrary order are sorted by subsection.
+
+        Regression: concurrent LLM extraction returns hits in completion
+        order (via as_completed), producing shuffled subsection order
+        like B.4.2 → B.4.1 → B.4.3. The assembler must sort them.
+        """
+        # Deliberately shuffled subsection order
+        hits = [
+            _make_hit("B.4.2.q1", "B.4.2", "B.4", "Design overview"),
+            _make_hit("B.4.1.q1", "B.4.1", "B.4", "Study rationale"),
+            _make_hit("B.4.3.q1", "B.4.3", "B.4", "Blinding strategy"),
+            _make_hit("B.4.1.q2", "B.4.1", "B.4", "Primary endpoint"),
+        ]
+        result = assemble_template(hits)
+        b4 = result.get_section("B.4")
+
+        assert b4 is not None
+        section_ids = [h.section_id for h in b4.hits]
+        # B.4.1 hits first (sorted by query_id), then B.4.2, then B.4.3
+        assert section_ids == [
+            "B.4.1", "B.4.1", "B.4.2", "B.4.3",
+        ]

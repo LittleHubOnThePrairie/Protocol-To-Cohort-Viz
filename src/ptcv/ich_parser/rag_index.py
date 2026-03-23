@@ -119,6 +119,7 @@ class RagIndexStats:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_FINETUNED_MODEL_DIR = Path("C:/Dev/PTCV/data/models/ich_classifier_v1")
 _INDEX_FILENAME = "faiss_index.bin"
 _METADATA_FILENAME = "index_metadata.jsonl"
 _MIN_CONFIDENCE = 0.80
@@ -425,15 +426,33 @@ class RagIndex:
         ]
 
     def _get_model(self) -> Any:
-        """Lazy-load the sentence-transformers model."""
+        """Lazy-load the sentence-transformers model.
+
+        PTCV-234: If the fine-tuned model exists at
+        ``_FINETUNED_MODEL_DIR`` and no explicit model override was
+        provided, automatically use it instead of the default.
+        """
         if self._model is None:
             st, _ = _ensure_rag_deps()
-            self._model = st.SentenceTransformer(
-                self._embedding_model_name,
-            )
+
+            model_name = self._embedding_model_name
+
+            # PTCV-234: Auto-detect fine-tuned model
+            if (
+                model_name == _DEFAULT_MODEL
+                and _FINETUNED_MODEL_DIR.exists()
+                and (_FINETUNED_MODEL_DIR / "config.json").exists()
+            ):
+                model_name = str(_FINETUNED_MODEL_DIR)
+                logger.info(
+                    "RagIndex: using fine-tuned model from %s",
+                    model_name,
+                )
+
+            self._model = st.SentenceTransformer(model_name)
             logger.info(
                 "RagIndex: loaded embedding model %s",
-                self._embedding_model_name,
+                model_name,
             )
         return self._model
 

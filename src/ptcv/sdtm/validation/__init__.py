@@ -13,6 +13,11 @@ from .models import (
     ValidationResult,
 )
 from .p21_validator import P21Validator
+from .required_domain_checker import (
+    DomainCheckResult,
+    DomainFinding,
+    check_required_domains,
+)
 from .schedule_validator import (
     ScheduleIssue,
     ScheduleValidationReport,
@@ -24,6 +29,8 @@ from .validation_service import ValidationService
 __all__ = [
     "DefineXmlIssue",
     "DefineXmlValidator",
+    "DomainCheckResult",
+    "DomainFinding",
     "P21Issue",
     "P21Validator",
     "ScheduleIssue",
@@ -33,4 +40,5 @@ __all__ = [
     "ValidationResult",
     "ValidationService",
     "VisitScheduleValidator",
+    "check_required_domains",
 ]

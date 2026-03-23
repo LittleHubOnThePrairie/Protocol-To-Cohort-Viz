@@ -461,10 +461,16 @@ def assemble_template(
     for h in hits:
         hits_by_query[h.query_id] = h
 
-    # Index hits by parent section.
+    # Index hits by parent section, then sort within each group
+    # by (section_id, query_id) to ensure deterministic subsection
+    # order regardless of concurrent extraction completion order.
     hits_by_parent: dict[str, list[QueryExtractionHit]] = {}
     for h in hits:
         hits_by_parent.setdefault(h.parent_section, []).append(h)
+    for parent_hits in hits_by_parent.values():
+        parent_hits.sort(key=lambda h: (
+            section_sort_key(h.section_id), h.query_id,
+        ))
 
     # Build assembled sections in Appendix B order.
     assembled: list[AssembledSection] = []

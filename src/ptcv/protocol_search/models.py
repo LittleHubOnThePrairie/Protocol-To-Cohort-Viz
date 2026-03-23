@@ -38,6 +38,45 @@ class SearchResult:
 
 
 @dataclass
+class ProteinSearchResult:
+    """A trial matched by protein-based free-text search (PTCV-190).
+
+    Extends SearchResult fields with protein-match tracking, year,
+    publication links, and results status for CSV index generation.
+
+    Attributes:
+        registry_id: NCT identifier.
+        title: Official or brief trial title.
+        source: Always "ClinicalTrials.gov".
+        sponsor: Lead sponsor organisation name.
+        phase: Trial phase(s).
+        condition: Condition(s) studied.
+        status: Overall study status.
+        url: Direct ClinicalTrials.gov URL.
+        matched_proteins: Protein name(s) from the input list that
+            triggered this match.
+        year: Study start year, or first-posted year as fallback.
+        outcome: Results status (e.g., "Has Results") or overall status.
+        publications: Semicolon-separated PubMed/DOI links.
+        has_protocol_pdf: Whether a sponsor-uploaded PDF is available.
+    """
+
+    registry_id: str
+    title: str
+    source: str = "ClinicalTrials.gov"
+    sponsor: str = ""
+    phase: str = ""
+    condition: str = ""
+    status: str = ""
+    url: str = ""
+    matched_proteins: list[str] = field(default_factory=list)
+    year: str = ""
+    outcome: str = ""
+    publications: str = ""
+    has_protocol_pdf: bool = False
+
+
+@dataclass
 class ProtocolMetadata:
     """Metadata written alongside every downloaded protocol file.
 

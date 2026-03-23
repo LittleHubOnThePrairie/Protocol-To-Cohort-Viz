@@ -1,10 +1,14 @@
 """Bridge from Query Pipeline AssembledProtocol to IchSection consumers.
 
-Converts all assembled ICH E6(R3) Appendix B sections (B.1–B.14) into
+.. deprecated:: PTCV-242
+    This module is deprecated. The Query Pipeline now handles all stages
+    natively (PTCV-237 through PTCV-241). The ``assembled_to_sections``
+    function and session-state helpers remain available for backward
+    compatibility but should not be used in new code.
+
+Converts all assembled ICH E6(R3) Appendix B sections (B.1-B.14) into
 synthetic IchSection objects that downstream tabs (SoA, Results, Quality,
-Review, SDTM) can consume.  This allows the full extraction pipeline to
-reuse already-parsed and LLM-transformed content from the query pipeline
-rather than re-parsing from the raw PDF.
+Review, SDTM) can consume.
 
 PTCV-112: Feed query pipeline parsed output to SOA graphing functions.
 PTCV-136: Extend bridge to all 14 ICH sections for downstream migration.

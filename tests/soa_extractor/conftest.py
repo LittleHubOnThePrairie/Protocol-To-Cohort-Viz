@@ -14,8 +14,13 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 # ---------------------------------------------------------------------------
 # Stub fitz (PyMuPDF) and pymupdf4llm to prevent toc_extractor import chain
 # failure when these packages are not installed.
+#
+# PTCV-213: Try importing the real package first.  Only install the
+# stub when the real package is genuinely unavailable.
 # ---------------------------------------------------------------------------
-if "fitz" not in sys.modules:
+try:
+    import fitz as _real_fitz  # noqa: F401
+except ImportError:
     _fitz = types.ModuleType("fitz")
 
     class _StubFitzDoc:
@@ -33,7 +38,9 @@ if "fitz" not in sys.modules:
     _fitz.open = lambda **kw: _StubFitzDoc(**kw)  # type: ignore[attr-defined]
     sys.modules["fitz"] = _fitz
 
-if "pymupdf4llm" not in sys.modules:
+try:
+    import pymupdf4llm as _real_pymupdf  # noqa: F401
+except ImportError:
     _pymupdf = types.ModuleType("pymupdf4llm")
     _pymupdf.to_markdown = lambda doc, **kw: []  # type: ignore[attr-defined]
     sys.modules["pymupdf4llm"] = _pymupdf

@@ -276,7 +276,7 @@ def _anchor_to_screening(
     screening_offsets = [
         tp.day_offset
         for tp in timepoints
-        if tp.visit_type == "Screening"
+        if getattr(tp, "visit_type", "") == "Screening"
     ]
     if screening_offsets:
         anchor = min(screening_offsets)

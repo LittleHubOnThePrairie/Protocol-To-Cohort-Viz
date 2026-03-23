@@ -44,6 +44,74 @@ _ROTATION_THRESHOLD = 0.5
 _ROTATION_SAMPLE_LIMIT = 20
 
 
+def _collect_table_cell_texts(page: Any) -> set[str]:
+    """Collect normalized text fragments from table cells on a page.
+
+    Uses pdfplumber's ``extract_tables()`` to find table regions,
+    then collects all non-empty cell texts. Used to detect which
+    ``extract_text()`` lines come from table regions (PTCV-224).
+
+    Args:
+        page: A pdfplumber Page object.
+
+    Returns:
+        Set of normalized cell text fragments (lowercased, stripped).
+    """
+    cell_texts: set[str] = set()
+    try:
+        tables = page.extract_tables()  # type: ignore[union-attr]
+        if not tables:
+            return cell_texts
+        for tbl in tables:
+            for row in tbl:
+                for cell in row:
+                    if cell:
+                        text = str(cell).strip()
+                        if len(text) >= 2:
+                            cell_texts.add(text.lower())
+    except Exception:
+        pass
+    return cell_texts
+
+
+def _line_overlaps_table(
+    line: str,
+    table_cell_texts: set[str],
+) -> bool:
+    """Check if a text line overlaps with table cell content.
+
+    A line is considered part of a table if it matches a table
+    cell exactly, or if >50% of its words appear in table cells.
+
+    Args:
+        line: Stripped text line from ``extract_text()``.
+        table_cell_texts: Set of normalized table cell texts.
+
+    Returns:
+        True if the line likely comes from a table region.
+    """
+    if not table_cell_texts:
+        return False
+
+    normalized = line.strip().lower()
+
+    # Exact match
+    if normalized in table_cell_texts:
+        return True
+
+    # Word-level overlap: if most words in this line appear in
+    # table cells, it's likely garbled table content
+    words = normalized.split()
+    if len(words) < 2:
+        return False
+
+    matches = sum(
+        1 for w in words
+        if any(w in cell for cell in table_cell_texts)
+    )
+    return matches / len(words) > 0.5
+
+
 class PdfExtractor:
     """Extracts text blocks and tables from PDF bytes.
 
@@ -52,8 +120,13 @@ class PdfExtractor:
             block (filters noise). Default 3.
     """
 
-    def __init__(self, min_words_for_text_block: int = 3) -> None:
+    def __init__(
+        self,
+        min_words_for_text_block: int = 3,
+        enable_universal_tables: bool = False,
+    ) -> None:
         self._min_words = min_words_for_text_block
+        self._enable_universal_tables = enable_universal_tables
 
     # ------------------------------------------------------------------
     # Page rotation normalisation (PTCV-63)
@@ -238,6 +311,20 @@ class PdfExtractor:
             )
             tables.extend(page_tables)
             table_index += len(page_tables)
+
+        # PTCV-223: Universal table extraction — supplement pymupdf4llm
+        # tables with Camelot + pdfplumber discoveries.
+        if self._enable_universal_tables:
+            from .table_extractor import extract_all_tables
+
+            tables = extract_all_tables(
+                pdf_bytes=pdf_bytes,
+                page_count=page_count,
+                run_id=run_id,
+                registry_id=registry_id,
+                source_sha256=source_sha256,
+                existing_tables=tables,
+            )
 
         # Quality gate: if pymupdf4llm produced very few text blocks
         # relative to page count, the PDF likely has unusual structure
@@ -512,6 +599,10 @@ class PdfExtractor:
     ) -> list["TextBlock"]:
         """Extract text blocks from a pdfplumber page.
 
+        PTCV-224: Detects lines that overlap with table regions
+        and marks them with ``in_table=True``. Downstream consumers
+        can filter ``in_table=False`` for clean prose.
+
         Args:
             page: pdfplumber Page object.
             page_num: 1-based page number.
@@ -525,6 +616,11 @@ class PdfExtractor:
         from .models import TextBlock
 
         raw_text = page.extract_text() or ""
+
+        # PTCV-224: Build set of table-cell text fragments
+        # to detect which text lines come from table regions
+        table_cell_texts = _collect_table_cell_texts(page)
+
         blocks: list[TextBlock] = []
         block_index = 0
         for line in raw_text.splitlines():
@@ -535,6 +631,10 @@ class PdfExtractor:
             if word_count < self._min_words:
                 continue
             block_type = self._classify_block_type(stripped)
+
+            # Check if this line overlaps with table content
+            in_table = _line_overlaps_table(stripped, table_cell_texts)
+
             blocks.append(
                 TextBlock(
                     run_id=run_id,
@@ -544,6 +644,7 @@ class PdfExtractor:
                     block_index=block_index,
                     text=stripped,
                     block_type=block_type,
+                    in_table=in_table,
                 )
             )
             block_index += 1

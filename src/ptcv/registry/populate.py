@@ -42,6 +42,9 @@ class PopulateResult:
         total_sections_mapped: Total ICH sections produced.
         sections_seeded: Total vectors added to RAG index (0 if
             RAG seeding was not requested).
+        enriched: Number of trials enriched with literature/newswire.
+        total_enrichment_articles: Total articles found across all
+            enriched trials.
     """
 
     total_nct_ids: int = 0
@@ -50,6 +53,8 @@ class PopulateResult:
     failed: int = 0
     total_sections_mapped: int = 0
     sections_seeded: int = 0
+    enriched: int = 0
+    total_enrichment_articles: int = 0
 
 
 def discover_nct_ids(base_dir: str | Path) -> list[str]:
@@ -80,6 +85,9 @@ def populate(
     seed_rag: bool = False,
     delay: float = 0.5,
     dry_run: bool = False,
+    enrich: bool = False,
+    sources: Optional[str] = None,
+    newsdata_api_key: Optional[str] = None,
 ) -> PopulateResult:
     """Batch-fetch CT.gov metadata and map to ICH sections.
 
@@ -90,6 +98,13 @@ def populate(
         seed_rag: If True, seed the FAISS RAG index after mapping.
         delay: Seconds between fresh API requests.
         dry_run: If True, only discover and list NCT IDs.
+        enrich: If True, enrich metadata with literature and
+            newswire data from GDELT, NewsData.io, and PubMed
+            (PTCV-206).
+        sources: Comma-separated source list for enrichment
+            (e.g. ``"gdelt,newsdata"``). Defaults to all.
+        newsdata_api_key: NewsData.io API key. Required if
+            newsdata is in sources and enrich is True.
 
     Returns:
         PopulateResult with counts and statistics.
@@ -162,6 +177,66 @@ def populate(
         if not was_cached:
             time.sleep(delay)
 
+    # Optional literature/newswire enrichment (PTCV-206)
+    if enrich and all_mapped:
+        from ptcv.registry.literature_enricher import (
+            LiteratureEnricher,
+            parse_sources,
+        )
+        from ptcv.registry.gdelt_adapter import GdeltAdapter
+        from ptcv.registry.newsdata_adapter import NewsdataAdapter
+        from ptcv.registry.pubmed_adapter import PubmedAdapter
+
+        source_set = parse_sources(sources or "all")
+        newswire_cache = cache_dir / "newswire"
+        pubmed_cache = cache_dir / "pubmed"
+
+        gdelt = GdeltAdapter(cache_dir=newswire_cache)
+        newsdata = None
+        if "newsdata" in source_set and newsdata_api_key:
+            newsdata = NewsdataAdapter(
+                api_key=newsdata_api_key,
+                cache_dir=newswire_cache,
+            )
+        elif "newsdata" in source_set:
+            logger.warning(
+                "NewsData.io API key not provided, skipping "
+                "newsdata source"
+            )
+            source_set.discard("newsdata")
+
+        pubmed = PubmedAdapter(cache_dir=pubmed_cache)
+
+        enricher = LiteratureEnricher(
+            gdelt_adapter=gdelt,
+            newsdata_adapter=newsdata,
+            pubmed_adapter=pubmed,
+            cache_dir=cache_dir,
+        )
+
+        print(
+            f"\nEnriching {len(all_mapped)} trials from: "
+            f"{', '.join(sorted(source_set))}..."
+        )
+        for i, nct_id in enumerate(all_mapped, 1):
+            enrichment = enricher.enrich_trial(
+                nct_id, sources=source_set
+            )
+            if enrichment.total_articles > 0:
+                result.enriched += 1
+                result.total_enrichment_articles += (
+                    enrichment.total_articles
+                )
+                print(
+                    f"  [{i}/{len(all_mapped)}] "
+                    f"{enrichment.summary()}"
+                )
+            else:
+                print(
+                    f"  [{i}/{len(all_mapped)}] "
+                    f"{nct_id}: no articles"
+                )
+
     # Optional RAG seeding pass
     if seeder and rag_index and all_mapped:
         print(f"\nSeeding RAG index with {len(all_mapped)} trials...")
@@ -181,6 +256,9 @@ def populate(
     print(f"  Total ICH sections:     {result.total_sections_mapped}")
     if seed_rag:
         print(f"  RAG vectors seeded:     {result.sections_seeded}")
+    if enrich:
+        print(f"  Trials enriched:        {result.enriched}")
+        print(f"  Enrichment articles:    {result.total_enrichment_articles}")
     print(f"  Cache dir:              {cache_dir}")
 
     return result
@@ -231,6 +309,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help=(
+            "Enrich metadata with literature and newswire data "
+            "from GDELT, NewsData.io, and PubMed (PTCV-206)"
+        ),
+    )
+    parser.add_argument(
+        "--sources",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated enrichment sources: "
+            "pubmed,gdelt,newsdata or 'all' (default: all)"
+        ),
+    )
+    parser.add_argument(
+        "--newsdata-api-key",
+        type=str,
+        default=None,
+        help="NewsData.io API key (required for newsdata source)",
+    )
     return parser
 
 
@@ -248,6 +349,9 @@ def main(argv: list[str] | None = None) -> PopulateResult:
         seed_rag=args.seed_rag,
         delay=args.delay,
         dry_run=args.dry_run,
+        enrich=args.enrich,
+        sources=args.sources,
+        newsdata_api_key=args.newsdata_api_key,
     )
 
 

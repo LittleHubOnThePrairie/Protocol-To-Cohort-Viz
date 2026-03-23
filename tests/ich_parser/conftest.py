@@ -12,13 +12,16 @@ sys.path.insert(0, str(Path(__file__).parents[2] / "src"))
 
 # Mock fitz (PyMuPDF) if not installed — prevents ImportError when
 # ich_parser.__init__ imports toc_extractor which requires fitz.
-if "fitz" not in sys.modules:
-    try:
-        import fitz  # noqa: F401
-    except ImportError:
-        from unittest.mock import MagicMock
+# PTCV-213: Try importing the real package first.
+try:
+    import fitz as _real_fitz  # noqa: F401
+except ImportError:
+    import types as _types
+    from unittest.mock import MagicMock
 
-        sys.modules["fitz"] = MagicMock()
+    _fitz_stub = _types.ModuleType("fitz")
+    _fitz_stub.open = lambda **kw: MagicMock()  # type: ignore[attr-defined]
+    sys.modules["fitz"] = _fitz_stub
 
 
 # A realistic protocol excerpt covering several ICH sections.

@@ -194,3 +194,37 @@ class TestDefaultFallback:
         assert "Unscheduled" in VISIT_TYPES
         assert "Early Termination" in VISIT_TYPES
         assert "Long-term Follow-up" in VISIT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# PTCV-280: Visit day offset regression tests (NCT03003390)
+# ---------------------------------------------------------------------------
+
+
+class TestDayOffsetFromVisitName:
+    """Regression: visit names with explicit day numbers must extract
+    the correct day_offset, not default to 0 or 7."""
+
+    def test_day_0_from_parenthetical(self, resolver):
+        r = resolver.resolve("CVC Insertion (Day 0)")
+        assert r.day_offset == 0
+
+    def test_day_6_from_avg(self, resolver):
+        r = resolver.resolve("CVC Removal (Avg Day 6)")
+        assert r.day_offset == 6
+
+    def test_day_4_from_name(self, resolver):
+        r = resolver.resolve("Day 4 After CVC Insertion (Day 4)")
+        assert r.day_offset == 4
+
+    def test_day_10_from_avg(self, resolver):
+        r = resolver.resolve("PICU Discharge (avg Day 10)")
+        assert r.day_offset == 10
+
+    def test_daily_is_treatment(self, resolver):
+        r = resolver.resolve("Daily")
+        assert r.visit_type == "Treatment"
+
+    def test_weekly_thereafter_is_treatment(self, resolver):
+        r = resolver.resolve("Weekly Thereafter")
+        assert r.visit_type == "Treatment"

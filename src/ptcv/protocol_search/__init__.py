@@ -21,7 +21,13 @@ from .industry_sponsors import (
     canonicalise_sponsor,
     is_known_industry_sponsor,
 )
-from .models import DownloadResult, ProtocolMetadata, SearchResult
+from .models import (
+    DownloadResult,
+    ProteinSearchResult,
+    ProtocolMetadata,
+    SearchResult,
+)
+from .protein_search import run_protein_search, write_protein_csv_index
 from .trial_curator import QualifyingTrial, curate_trials, write_manifest
 
 __all__ = [
@@ -31,11 +37,14 @@ __all__ = [
     "DownloadResult",
     "FilestoreManager",
     "INDUSTRY_SPONSORS",
+    "ProteinSearchResult",
     "ProtocolMetadata",
     "QualifyingTrial",
     "SearchResult",
     "canonicalise_sponsor",
     "curate_trials",
     "is_known_industry_sponsor",
+    "run_protein_search",
     "write_manifest",
+    "write_protein_csv_index",
 ]

@@ -186,6 +186,8 @@ sections:
       - "\\bconcomitant\\s+(?:medication|treatment|therapy)\\b"
       - "\\bstudy\\s+treatment\\b"
       - "\\binvestigational\\s+(?:product|medicinal\\s+product)\\b"
+      - "\\bvasopressor(?:s)?\\b"
+      - "\\bfluid\\s+(?:management|therapy|resuscitation)\\b"
     keywords:
       - "dose"
       - "dosing"
@@ -196,6 +198,9 @@ sections:
       - "treatment schedule"
       - "concomitant medication"
       - "rescue medication"
+      - "vasopressor"
+      - "vasopressors"
+      - "fluid management"
 
   B.8:
     name: "Assessment of Efficacy"
@@ -211,6 +216,11 @@ sections:
       - "\\bresponse\\s+(?:criteria|rate|assessment)\\b"
       - "\\bsurvival\\b"
       - "\\bremission\\b"
+      - "\\bmeasurements?\\b"
+      - "\\bh[ae]emodynamic(?:s)?\\b"
+      - "\\bblood\\s+(?:draws?|sampl(?:es?|ing))\\b"
+      - "\\bclinical\\s+(?:assessments?|procedures?)\\b"
+      - "\\bstudy\\s+(?:assessments?|procedures?)\\b"
     keywords:
       - "efficacy assessment"
       - "clinical response"
@@ -220,6 +230,13 @@ sections:
       - "remission"
       - "disease-free"
       - "response rate"
+      - "measurements"
+      - "hemodynamics"
+      - "haemodynamics"
+      - "blood sampling"
+      - "blood draws"
+      - "study assessments"
+      - "clinical assessments"
 
   B.9:
     name: "Assessment of Safety"
@@ -229,7 +246,7 @@ sections:
     requirement: mandatory
     render_order: 9
     patterns:
-      - "\\bsafety\\s+(?:assessments?|monitoring|evaluations?)\\b"
+      - "\\bsafety\\s+(?:assessments?|monitoring|evaluations?|considerations?|measures?|parameters?)\\b"
       - "\\badverse\\s+(?:event|reaction|effect)\\b"
       - "\\bserious\\s+adverse\\b"
       - "\\bvital\\s+signs?\\b"
@@ -241,6 +258,8 @@ sections:
       - "adverse reaction"
       - "SAE"
       - "safety monitoring"
+      - "safety considerations"
+      - "safety parameters"
       - "vital signs"
       - "laboratory"
       - "ECG"

@@ -36,9 +36,12 @@ from ptcv.ui.components.sdtm_viewer import (
 class TestConstants:
     """Tests for module-level constants."""
 
-    def test_domain_order_has_five_entries(self) -> None:
-        assert len(DOMAIN_ORDER) == 5
-        assert set(DOMAIN_ORDER) == {"TS", "TA", "TE", "TV", "TI"}
+    def test_domain_order_includes_trial_design_and_clinical(self) -> None:
+        trial_design = {"TS", "TA", "TE", "TV", "TI"}
+        clinical = {"DM", "SV", "LB", "AE", "VS", "CM", "MH", "DS", "EX"}
+        assert trial_design.issubset(set(DOMAIN_ORDER))
+        assert clinical.issubset(set(DOMAIN_ORDER))
+        assert len(DOMAIN_ORDER) == len(trial_design) + len(clinical)
 
     def test_domain_labels_covers_all_domains(self) -> None:
         for domain in DOMAIN_ORDER:
@@ -46,7 +49,10 @@ class TestConstants:
 
     def test_lineage_links_covers_all_domains(self) -> None:
         target_domains = {link[1] for link in LINEAGE_LINKS}
-        assert target_domains == {"TS", "TA", "TE", "TV", "TI"}
+        trial_design = {"TS", "TA", "TE", "TV", "TI"}
+        clinical = {"DM", "SV", "LB", "AE", "VS", "CM", "MH", "DS", "EX"}
+        assert trial_design.issubset(target_domains)
+        assert clinical.issubset(target_domains)
 
     def test_lineage_links_sources_are_valid(self) -> None:
         valid_sources = {

@@ -41,8 +41,11 @@ PIPELINE_STAGES = [
     "Section Classification",
     "Query Extraction",
     "Result Aggregation",
+    "SoA Extraction",
+    "SDTM Generation",
+    "Validation",
 ]
-"""Ordered stage names for the query pipeline (PTCV-123)."""
+"""Ordered stage names for the query pipeline (PTCV-123, PTCV-250)."""
 
 
 def run_query_pipeline(
@@ -79,8 +82,7 @@ def run_query_pipeline(
         Exception: Re-raised from any pipeline stage.
     """
     from ptcv.ich_parser.toc_extractor import extract_protocol_index
-    from ptcv.ich_parser.section_matcher import SectionMatcher
-    from ptcv.ich_parser.summarization_matcher import SummarizationMatcher
+    from ptcv.ich_parser.section_classifier import SectionClassifier
     from ptcv.ich_parser.query_extractor import QueryExtractor
     from ptcv.ich_parser.template_assembler import (
         QueryExtractionHit,
@@ -106,30 +108,27 @@ def run_query_pipeline(
     )
     _notify("Document Assembly", 1.0)
 
-    # Stage 2: Section matching (keyword-only, PTCV-102)
+    # Stage 2: Hybrid embedding-first classification (PTCV-279)
+    # FAISS centroids as primary signal where available, keyword
+    # fallback for sections without centroids, LLM sub-section
+    # scoring via SummarizationMatcher.
     _notify("Section Classification", 0.0)
     t0 = time.monotonic()
-    matcher = SectionMatcher()
-    match_result = matcher.match(protocol_index)
+    api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+    classifier = SectionClassifier(anthropic_api_key=api_key)
 
-    # Stage 2.5: Sub-section enrichment (PTCV-96)
-    enriched_result = None
-    if enable_summarization:
-        api_key = anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
-        summarizer = SummarizationMatcher(anthropic_api_key=api_key)
+    def _on_classify(done: int, total: int) -> None:
+        if total > 0:
+            _notify(
+                "Section Classification",
+                done / total,
+                done, total,
+            )
 
-        def _on_classify(done: int, total: int) -> None:
-            if total > 0:
-                _notify(
-                    "Section Classification",
-                    done / total,
-                    done, total,
-                )
-
-        enriched_result = summarizer.refine(
-            match_result, protocol_index,
-            progress_callback=_on_classify,
-        )
+    match_result, enriched_result = classifier.classify(
+        protocol_index,
+        progress_callback=_on_classify,
+    )
     stage_timings["section_classification"] = round(
         time.monotonic() - t0, 3
     )
@@ -166,7 +165,11 @@ def run_query_pipeline(
     t0 = time.monotonic()
     hits = []
     for ext in extraction_result.extractions:
-        parent = ext.section_id.rsplit(".", 1)[0] if "." in ext.section_id else ext.section_id
+        # PTCV-288: Correct parent extraction for ICH section IDs.
+        # "B.3" has 2 parts → is already a parent. "B.3.1" has 3 → parent is "B.3".
+        # The old rsplit(".",1)[0] broke parent-level IDs: "B.3" → "B".
+        _parts = ext.section_id.split(".")
+        parent = ext.section_id if len(_parts) <= 2 else ".".join(_parts[:-1])
         hits.append(QueryExtractionHit(
             query_id=ext.query_id,
             section_id=ext.section_id,
@@ -185,6 +188,219 @@ def run_query_pipeline(
     )
     _notify("Result Aggregation", 1.0)
 
+    # ------------------------------------------------------------------
+    # Stage 5: SoA Extraction (PTCV-239, PTCV-250 progress)
+    # Run SoA extractor using structured tables from ProtocolIndex.
+    # Uses filter_soa_tables() on pre-extracted tables — no PDF
+    # re-parsing needed.
+    # ------------------------------------------------------------------
+    _notify("SoA Extraction", 0.0)
+    soa_result = None
+    try:
+        from ptcv.soa_extractor.table_bridge import filter_soa_tables
+        from ptcv.soa_extractor.mapper import UsdmMapper
+        from ptcv.soa_extractor.resolver import SynonymResolver
+        from ptcv.extraction.models import ExtractedTable
+
+        t0 = time.monotonic()
+
+        # Convert ProtocolIndex.tables (dicts) to ExtractedTable objects
+        extracted_tables = []
+        for tbl in getattr(protocol_index, "tables", []):
+            extracted_tables.append(ExtractedTable(
+                run_id="query-pipeline",
+                source_registry_id="",
+                source_sha256="",
+                page_number=tbl.get("page_number", 0),
+                extractor_used=tbl.get("extractor_used", "pdfplumber_table"),
+                table_index=tbl.get("table_index", 0),
+                header_row=tbl.get("header_row", "[]"),
+                data_rows=tbl.get("data_rows", "[]"),
+            ))
+
+        soa_tables = filter_soa_tables(extracted_tables)
+
+        if soa_tables:
+            mapper = UsdmMapper(resolver=SynonymResolver())
+            timestamp = time.strftime(
+                "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()
+            )
+            epochs, timepoints, activities, instances, synonyms = (
+                mapper.map(
+                    soa_tables,
+                    run_id="query-pipeline",
+                    source_run_id="",
+                    source_sha256="",
+                    registry_id="",
+                    timestamp=timestamp,
+                )
+            )
+            soa_result = {
+                "tables_found": len(soa_tables),
+                "timepoint_count": len(timepoints),
+                "activity_count": len(activities),
+                "instance_count": len(instances),
+                "epochs": epochs,
+                "timepoints": timepoints,
+                "activities": activities,
+                "instances": instances,
+                "synonyms": synonyms,
+            }
+            logger.info(
+                "SoA extraction: %d tables, %d timepoints, "
+                "%d activities",
+                len(soa_tables), len(timepoints), len(activities),
+            )
+
+        stage_timings["soa_extraction"] = round(
+            time.monotonic() - t0, 3
+        )
+    except Exception as exc:
+        logger.debug(
+            "SoA extraction in query pipeline failed: %s",
+            exc, exc_info=True,
+        )
+    _notify("SoA Extraction", 1.0)
+
+    # ------------------------------------------------------------------
+    # Stage 6: SDTM Domain Spec Generation (PTCV-240, PTCV-250 progress)
+    # Generate domain specs from SoA assessments + registry metadata.
+    # ------------------------------------------------------------------
+    _notify("SDTM Generation", 0.0)
+    sdtm_result = None
+    try:
+        t0 = time.monotonic()
+
+        from ptcv.sdtm.domain_spec_builder import build_domain_specs
+        from ptcv.sdtm.ex_domain_builder import build_ex_domain_spec
+
+        domain_specs = None
+        ex_spec = None
+
+        # Build observation domain specs from SoA tables
+        tables_found: int = int(soa_result.get("tables_found", 0)) if soa_result else 0  # type: ignore[arg-type]
+        if tables_found > 0:
+            # Reconstruct RawSoaTable from SoA result
+            from ptcv.soa_extractor.table_bridge import filter_soa_tables
+
+            soa_tables = filter_soa_tables(extracted_tables)
+            if soa_tables:
+                domain_specs = build_domain_specs(soa_tables[0])
+
+        # Build EX domain from registry metadata
+        registry_id = Path(pdf_path).stem.split("_")[0]
+        registry_cache_path = (
+            Path(pdf_path).parent / "registry_cache" / f"{registry_id}.json"
+        )
+        if not registry_cache_path.exists():
+            # Try standard location
+            registry_cache_path = Path(
+                "C:/Dev/PTCV/data/protocols/clinicaltrials"
+                "/registry_cache"
+            ) / f"{registry_id}.json"
+
+        # Extract B.4/B.6 text from AssembledProtocol for fallback
+        b4_text = ""
+        for code in ("B.4", "B.6"):
+            section = assembled.get_section(code)
+            if section and section.hits:
+                b4_text += "\n".join(
+                    h.extracted_content for h in section.hits
+                    if h.extracted_content
+                )
+
+        registry_meta = None
+        if registry_cache_path.exists():
+            import json as _json
+            registry_meta = _json.loads(
+                registry_cache_path.read_text(encoding="utf-8")
+            )
+
+        ex_spec = build_ex_domain_spec(
+            registry_metadata=registry_meta,
+            protocol_text=b4_text,
+        )
+
+        domain_count = len(domain_specs.specs) if domain_specs else 0  # type: ignore[union-attr]
+        treatment_count = ex_spec.treatment_count if ex_spec else 0  # type: ignore[union-attr]
+
+        sdtm_result = {
+            "domain_specs": domain_specs,
+            "ex_spec": ex_spec,
+            "domain_count": domain_count,
+            "treatment_count": treatment_count,
+        }
+
+        stage_timings["sdtm_generation"] = round(
+            time.monotonic() - t0, 3
+        )
+        logger.info(
+            "SDTM generation: %d observation domains, %d treatments",
+            sdtm_result["domain_count"],
+            sdtm_result["treatment_count"],
+        )
+    except Exception as exc:
+        logger.debug(
+            "SDTM generation in query pipeline failed: %s",
+            exc, exc_info=True,
+        )
+    _notify("SDTM Generation", 1.0)
+
+    # ------------------------------------------------------------------
+    # Stage 7: Validation (PTCV-240, PTCV-250 progress)
+    # Check required domain completeness.
+    # ------------------------------------------------------------------
+    _notify("Validation", 0.0)
+    validation_result = None
+    try:
+        t0 = time.monotonic()
+
+        from ptcv.sdtm.validation.required_domain_checker import (
+            check_required_domains,
+        )
+
+        # Collect present domains from specs
+        present_domains: list[str] = ["TS", "TV", "TA", "TE", "TI"]
+        if sdtm_result and sdtm_result.get("domain_specs"):
+            present_domains.extend(
+                s.domain_code
+                for s in sdtm_result["domain_specs"].specs
+            )
+        if sdtm_result and sdtm_result.get("ex_spec"):
+            if sdtm_result["ex_spec"].treatment_count > 0:
+                present_domains.append("EX")
+
+        # Collect SoA assessment names for conditional checks
+        soa_assessments: list[str] = []
+        if soa_result and soa_result.get("activities"):
+            soa_assessments = [
+                a.activity_name
+                for a in soa_result["activities"]
+                if hasattr(a, "activity_name")
+            ]
+
+        domain_check = check_required_domains(
+            domains_present=present_domains,
+            soa_assessments=soa_assessments,
+        )
+
+        validation_result = {
+            "domain_check": domain_check,
+            "passed": domain_check.passed,
+            "error_count": domain_check.error_count,
+            "warning_count": domain_check.warning_count,
+        }
+
+        stage_timings["validation"] = round(
+            time.monotonic() - t0, 3
+        )
+    except Exception as exc:
+        logger.debug(
+            "Validation in query pipeline failed: %s",
+            exc, exc_info=True,
+        )
+    _notify("Validation", 1.0)
+
     logger.info("Pipeline stage timings: %s", stage_timings)
 
     return {
@@ -195,6 +411,9 @@ def run_query_pipeline(
         "assembled": assembled,
         "assembled_markdown": assembled.to_markdown(),
         "coverage": assembled.coverage,
+        "soa_result": soa_result,
+        "sdtm_result": sdtm_result,
+        "validation_result": validation_result,
         "stage_timings": stage_timings,
     }
 
@@ -736,6 +955,33 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
                 st.session_state["query_cache"][cache_key] = result
                 cached = result
 
+                # PTCV-250: Propagate Stage 5-7 results to
+                # downstream tab session state so SoA/SDTM tabs
+                # auto-populate without re-extraction.
+                if result.get("soa_result"):
+                    soa_data = result["soa_result"]
+                    soa_data["_source"] = "query_pipeline"
+                    st.session_state.setdefault("soa_cache", {})[
+                        file_sha
+                    ] = soa_data
+                    logger.info(
+                        "PTCV-250: Propagated SoA result to soa_cache"
+                    )
+                if result.get("sdtm_result"):
+                    st.session_state.setdefault("sdtm_cache", {})[
+                        file_sha
+                    ] = result["sdtm_result"]
+                    logger.info(
+                        "PTCV-250: Propagated SDTM result to sdtm_cache"
+                    )
+                if result.get("validation_result"):
+                    st.session_state.setdefault(
+                        "validation_cache", {},
+                    )[file_sha] = result["validation_result"]
+                    logger.info(
+                        "PTCV-250: Propagated validation result"
+                    )
+
                 # Persist artifacts to disk (PTCV-126: ALCOA++)
                 try:
                     from ptcv.ui.query_persistence import (
@@ -839,6 +1085,23 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
         with st.expander("Section Mappings", expanded=False):
             st.dataframe(match_rows, use_container_width=True)
 
+    # --- Source Provenance Matrix (PTCV-269: Stage 1-2 output) ---
+    from ptcv.ui.components.provenance_matrix import (
+        build_provenance_matrix,
+        render_provenance_matrix,
+    )
+
+    _prov_rows = build_provenance_matrix(cached)
+    render_provenance_matrix(_prov_rows)
+
+    # --- Section Coverage Diagram (PTCV-270: Stage 2 visual) ---
+    _assembled = cached.get("assembled")
+    if _assembled is not None:
+        from ptcv.ui.components.section_coverage_diagram import (
+            render_coverage_diagram,
+        )
+        render_coverage_diagram(_assembled)
+
     st.divider()
 
     # --- Sub-Section Matching (PTCV-96) ---
@@ -933,6 +1196,27 @@ def render_query_pipeline(file_path: Path, file_sha: str) -> None:
         st.metric(
             "Avg confidence",
             f"{cov_metrics['avg_confidence']:.2f}",
+        )
+
+    # --- Source Provenance Matrix (PTCV-251) ---
+    try:
+        from ptcv.ui.components.provenance_matrix import (
+            build_provenance_matrix,
+            render_provenance_matrix,
+        )
+
+        _stem = Path(file_path).stem if "file_path" in dir() else ""
+        _nct = ""
+        _m = re.search(r"NCT\d{8}", _stem) if _stem else None
+        if _m:
+            _nct = _m.group(0)
+
+        prov_rows = build_provenance_matrix(cached, nct_id=_nct)
+        with st.expander("Source Provenance", expanded=False):
+            render_provenance_matrix(prov_rows)
+    except Exception:
+        logger.debug(
+            "Provenance matrix render failed", exc_info=True
         )
 
     md = cached["assembled_markdown"]

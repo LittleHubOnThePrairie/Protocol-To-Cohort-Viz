@@ -685,3 +685,94 @@ class TestScenario5DefineXmlValidation:
             assert tag in result.artifact_keys, f"Missing {tag} report"
             stored = tmp_gateway.get_artifact(result.artifact_keys[tag])
             assert len(stored) > 0
+
+
+# ---------------------------------------------------------------------------
+# PTCV-249: Required domain completeness validation
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredDomainCheck:
+    """PTCV-249: ValidationService checks required domain presence."""
+
+    def test_missing_required_domain_error(
+        self, tmp_gateway, all_domains,
+    ):
+        """GHERKIN: Missing always-required domain flagged as Error."""
+        sdtm_result = _make_sdtm_result(tmp_gateway, domains=all_domains)
+        svc = ValidationService(tmp_gateway)
+        result = svc.validate(sdtm_result)
+
+        # Package has TS, TV, TA, TE, TI but NOT DM, DS, AE
+        assert result.domain_check is not None
+        assert not result.domain_check_passed
+        dm_findings = [
+            f for f in result.domain_findings
+            if f.domain_code == "DM"
+        ]
+        assert len(dm_findings) == 1
+        assert dm_findings[0].severity == "Error"
+        assert "required" in dm_findings[0].message.lower()
+
+    def test_missing_conditional_domain_warning(
+        self, tmp_gateway, all_domains,
+    ):
+        """GHERKIN: Missing conditional domain flagged as Warning."""
+        sdtm_result = _make_sdtm_result(tmp_gateway, domains=all_domains)
+        svc = ValidationService(tmp_gateway)
+        result = svc.validate(
+            sdtm_result,
+            soa_assessments=["Vital Signs", "Blood Pressure"],
+        )
+
+        vs_findings = [
+            f for f in result.domain_findings
+            if f.domain_code == "VS"
+        ]
+        assert len(vs_findings) == 1
+        assert vs_findings[0].severity == "Warning"
+
+    def test_domain_findings_merged_into_p21(
+        self, tmp_gateway, all_domains,
+    ):
+        """Domain findings appear as P21-DOM-* issues in p21_issues."""
+        sdtm_result = _make_sdtm_result(tmp_gateway, domains=all_domains)
+        svc = ValidationService(tmp_gateway)
+        result = svc.validate(sdtm_result)
+
+        dom_p21 = [
+            i for i in result.p21_issues
+            if i.rule_id.startswith("P21-DOM-")
+        ]
+        # At least DM, DS, AE are missing
+        assert len(dom_p21) >= 3
+
+    def test_no_findings_when_no_soa(
+        self, tmp_gateway, all_domains,
+    ):
+        """Without soa_assessments, no conditional warnings produced."""
+        sdtm_result = _make_sdtm_result(tmp_gateway, domains=all_domains)
+        svc = ValidationService(tmp_gateway)
+        result = svc.validate(sdtm_result)
+
+        warnings = [
+            f for f in result.domain_findings
+            if f.severity == "Warning"
+        ]
+        assert len(warnings) == 0
+
+    def test_domain_check_result_attached(
+        self, tmp_gateway,
+    ):
+        """DomainCheckResult is attached to ValidationResult."""
+        # Use default _make_sdtm_result which produces lowercase keys
+        # matching the ValidationService loading logic
+        sdtm_result = _make_sdtm_result(tmp_gateway)
+        svc = ValidationService(tmp_gateway)
+        result = svc.validate(sdtm_result)
+
+        assert result.domain_check is not None
+        # Package has TS and TV loaded; DM, DS, AE, TA, TE, TI missing
+        assert result.domain_check.error_count >= 3
+        assert "TS" in result.domain_check.domains_present
+        assert "TV" in result.domain_check.domains_present

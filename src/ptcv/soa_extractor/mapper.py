@@ -322,15 +322,36 @@ class UsdmMapper:
                 )
                 continue
 
-            # Prefer day_headers for temporal info if present
-            temporal_hint = (
-                table.day_headers[i]
-                if i < len(table.day_headers) and table.day_headers[i].strip()
-                else header
+            # Prefer day_headers for temporal info if present,
+            # but fall back to the visit header if day_headers
+            # resolution is low confidence (PTCV-280).
+            has_day_header = (
+                i < len(table.day_headers)
+                and table.day_headers[i].strip()
             )
-            resolved, mapping = self._resolver.resolve_to_mapping(
-                temporal_hint, run_id, timestamp
-            )
+            if has_day_header:
+                resolved, mapping = self._resolver.resolve_to_mapping(
+                    table.day_headers[i], run_id, timestamp,
+                )
+                # If day_header resolution is weak, try the visit
+                # header itself — it may contain explicit day info
+                # (e.g., "CVC Removal (Avg Day 6)").
+                if resolved.confidence < 0.50 or (
+                    resolved.method == "default"
+                    and resolved.day_offset == 0
+                ):
+                    alt_resolved, alt_mapping = (
+                        self._resolver.resolve_to_mapping(
+                            header, run_id, timestamp,
+                        )
+                    )
+                    if alt_resolved.confidence > resolved.confidence:
+                        resolved = alt_resolved
+                        mapping = alt_mapping
+            else:
+                resolved, mapping = self._resolver.resolve_to_mapping(
+                    header, run_id, timestamp,
+                )
             # Override canonical name with the original header (more readable)
             synonyms.append(mapping)
 

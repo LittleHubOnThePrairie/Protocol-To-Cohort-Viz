@@ -105,7 +105,7 @@ class LocalStorageAdapter(StorageGateway):
         [PTCV-29 Scenario: Initialise WORM bucket and lineage schema]
         """
         if not self._client.bucket_exists(self._bucket):
-            lock_config = ObjectLockConfig(COMPLIANCE, str(_RETENTION_YEARS), "Years")
+            lock_config = ObjectLockConfig(COMPLIANCE, _RETENTION_YEARS, "Years")
             self._client.make_bucket(
                 self._bucket, object_lock=True
             )

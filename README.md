@@ -1,349 +1,320 @@
 # Protocol-To-Cohort-Viz (PTCV)
 
-> ML-enabled clinical trial software for parsing, classifying, and transforming clinical trial
-> protocols into CDISC-compliant SDTM datasets with interactive Schedule of Activities
-> visualizations.
+> ML-powered clinical trial protocol extraction pipeline that transforms PDF protocols into
+> CDISC SDTM-compliant datasets with interactive Schedule of Activities visualizations.
 
 ## Overview
 
-PTCV ingests clinical trial protocols from public registries (EU-CTR / CTIS and ClinicalTrials.gov),
-extracts structured content from PDF and CTR-XML documents, classifies sections against the
-ICH E6(R3) Appendix B format, builds a CDISC USDM v4.0 Schedule of Activities model, and
-generates SDTM trial design datasets (TS, TA, TE, TV, TI) with accompanying Define-XML v2.1.
-All artifact writes are immutable (WORM) with a tamper-evident SHA-256 lineage chain, satisfying
-21 CFR Part 11, ICH E6(R3), and ALCOA+ requirements.
+PTCV ingests clinical trial protocols from ClinicalTrials.gov and EU-CTR, extracts structured
+content from PDF documents, classifies sections against the ICH E6(R3) Appendix B format,
+and generates CDISC USDM v4.0 Schedule of Activities models with SDTM trial design datasets.
 
-The pipeline employs a **2D graceful degradation matrix** with independent extraction and
-classification axes, ensuring the system always produces output even when optional components
-(Docling, NeoBERT, Claude API) are unavailable.
+The system uses a **7-stage query-driven pipeline** with embedding-first section classification,
+adaptive extraction strategies, and multi-source data enrichment from CT.gov registry metadata
+and PubMed journal abstracts.
 
-The project ships a Streamlit application with two independent processing pipelines:
+All artifact writes are immutable (WORM) with a tamper-evident SHA-256 lineage chain,
+satisfying 21 CFR Part 11, ICH E6(R3), and ALCOA+ requirements.
 
-- **Process (LLM Retemplater)** — rule-based ICH section classification followed by optional
-  LLM-powered retemplating against the full ICH E6(R3) Appendix B structure.
-- **Query Pipeline** — query-driven extraction using a pre-defined schema of questions per
-  section, with optional Claude Sonnet transformation for content reframing.
+### Key Capabilities
 
-Both pipelines feed the SoA extraction and SDTM generation stages.
+- **Protocol parsing** — PyMuPDF text extraction, TOC detection, section header mapping, table and diagram extraction
+- **ICH classification** — Hybrid embedding-first classifier using FAISS centroid vectors, RAG exemplar voting, and Sonnet cascade
+- **Query extraction** — 120+ queries across all 16 ICH Appendix B sections with adaptive format detection and gap recovery
+- **Schedule of Activities** — Automated SoA table parsing with visit day resolution and chronological ordering
+- **SDTM generation** — 11 domain spec generators (DM, DS, AE, CM, MH, IE, EX, VS, LB, EG, PE) with CDISC controlled terminology
+- **Validation** — P21 (115 FDA rules), TCG v5.9, Define-XML schema, visit schedule validation
+- **Streamlit UI** — Interactive protocol browser with 6 content tabs, real-time 7-stage progress tracking
 
-## Architecture
+---
+
+## Pipeline Architecture
+
+The query pipeline processes protocols through 7 sequential stages:
 
 ```
-src/ptcv/
-    protocol_search/    -- Search and download protocols from EU-CTR and ClinicalTrials.gov
-    extraction/         -- Format detection, text/table extraction from PDF and CTR-XML,
-                           and hybrid Claude vision enhancement for sparse pages (PTCV-172)
-    ich_parser/         -- ICH E6(R3) section classifier, LLM retemplater, query extractor,
-                           classification cascade (NeoBERT + RAG + Sonnet), and template
-                           assembler
-    soa_extractor/      -- Schedule of Activities parser with 3-level cascade (table, vision,
-                           LLM text construction), CDISC USDM v4.0 mapper, and query bridge
-    sdtm/               -- SDTM domain generators, Define-XML, CT normalizer, and validator
-    annotations/        -- Span-level annotation service for section boundaries
-    storage/            -- StorageGateway abstraction (FilesystemAdapter / MinIO WORM)
-    compliance/         -- Audit trail, data integrity, and access control (21 CFR Part 11)
-    pipeline/           -- PipelineOrchestrator with 2D degradation chain (PTCV-163)
-    analysis/           -- Batch analysis runner and quality benchmarking
-    benchmark/          -- Extraction quality comparator and metrics
-    ui/                 -- Streamlit application with modular component library
+PDF → Document Assembly → Section Classification → Query Extraction
+    → Template Assembly → SoA Extraction → SDTM Generation → Validation
 ```
 
-### Pipeline stages
+### Stage 1: Document Assembly
 
-1. **protocol_search** -- retrieves protocol PDFs or CTR-XML from registries, stores via
-   `StorageGateway` with SHA-256 checksums.
-2. **extraction** -- `ExtractionService` detects format (`ProtocolFormat`) and runs the
-   appropriate extractor, writing `text_blocks.parquet` and `tables.parquet`. At E1 level,
-   `VisionEnhancer` renders sparse/low-quality pages to PNG and sends them to Claude vision
-   API for structured JSON extraction.
-3. **soa_extraction** -- `SoaExtractor` runs a 3-level cascade to build USDM entities:
-   - *Level 1*: Table-based extraction (pre-extracted tables, PDF discovery, text parsing)
-   - *Level 2*: Claude vision extraction for complex merged-cell tables (PTCV-172)
-   - *Level 3*: Sonnet text construction from B.4/B.7/B.8/B.9 prose (PTCV-166)
-4. **classification_cascade** -- `ClassificationRouter` runs a hybrid local + Sonnet cascade:
-   rule-based or NeoBERT classifiers produce initial predictions; low-confidence sections are
-   routed to Claude Sonnet with optional RAG context from prior protocols (PTCV-161, PTCV-162).
-5. **retemplating** -- `LlmRetemplater` reorganizes non-ICH protocols into standard
-   ICH E6(R3) structure via two-pass Claude Opus classification and text assembly.
-6. **sdtm** -- `SdtmService` generates SDTM trial design domains (TS, TA, TE, TV, TI)
-   and `DefineXmlGenerator` produces Define-XML v2.1; `ValidationService` runs Pinnacle 21,
-   FDA TCG, and Define-XML checks.
-7. **pipeline** -- `PipelineOrchestrator` orchestrates stages 1-6 with per-stage lineage
-   checkpoints and SHA-256 chain verification.
+Extracts a navigable `ProtocolIndex` from protocol PDFs including TOC entries, section headers,
+content spans, structured tables (pdfplumber + Camelot), and diagrams (vector detection + Vision API fallback).
 
-### 2D degradation matrix (PTCV-163)
+![Stage 1: Document Assembly](docs/diagrams/stage1-document-assembly.png)
 
-The pipeline selects the highest available quality level on each axis independently:
+*Source: [stage1-document-assembly.mmd](docs/diagrams/stage1-document-assembly.mmd)*
 
-| Extraction | Description | Requirements |
-|-----------|-------------|--------------|
-| E1 | Docling + Vision | `docling`, `PTCV_VISION_API_KEY` |
-| E2 | Docling only | `docling` |
-| E3 | pdfplumber cascade | None (always available) |
+### Stage 2: Section Classification
 
-| Classification | Description | Requirements |
-|---------------|-------------|--------------|
-| C1 | NeoBERT + RAG + Sonnet | `torch`, `transformers`, NeoBERT model, RAG index, `ANTHROPIC_API_KEY` |
-| C2 | NeoBERT + Sonnet | `torch`, `transformers`, NeoBERT model, `ANTHROPIC_API_KEY` |
-| C3 | RuleBased + Sonnet | `ANTHROPIC_API_KEY` |
-| C4 | NeoBERT + RuleBased | `torch`, `transformers`, NeoBERT model |
-| C5 | RuleBased only | None (always available) |
+Hybrid embedding-first classifier that uses FAISS centroid vectors as the primary classification
+signal for sections with centroids, keyword scoring as fallback for sections without, and
+LLM sub-section scoring via SummarizationMatcher.
 
-E3+C5 is guaranteed to work with zero external dependencies.
+- **Phase 1** — TOC + keywords bound the search space (no classification decisions)
+- **Phase 2** — FAISS centroids classify where available; keyword fallback for remaining sections
+- **Phase 3** — LLM sub-section enrichment (3-signal composite: embed=0.45, keyword=0.15, LLM=0.40)
+- **Phase 4** — Bottom-up propagation: HIGH sub-sections upgrade REVIEW parents
 
-### SoA extraction cascade (PTCV-166)
+![Stage 2: Section Classification](docs/diagrams/stage2-section-classification.png)
 
-| Level | Source | Method | Trigger |
-|-------|--------|--------|---------|
-| 1 | Pre-extracted tables / PDF discovery / text parsing | `SoaTableParser`, `TableDiscovery` | Always tried first |
-| 2 | Claude vision API | `VisionEnhancer` | E1 extraction level |
-| 3 | Sonnet text construction | `LlmSoaBuilder` | < 3 activities from L1/L2 |
+*Source: [stage2-section-classification.mmd](docs/diagrams/stage2-section-classification.mmd)*
 
-### Key modules
+### Stage 3: Query Extraction
 
-| Module | Key files | Purpose |
-|--------|-----------|---------|
-| `extraction` | `extraction_service.py`, `pdf_extractor.py`, `vision_enhancer.py` | PDF/XML extraction with vision fallback |
-| `ich_parser` | `classification_router.py`, `neobert_classifier.py`, `rag_index.py` | Hybrid classification cascade with ML and RAG |
-| `ich_parser` | `query_extractor.py`, `template_assembler.py`, `query_schema.py` | Query-driven extraction with LLM transformation |
-| `ich_parser` | `parser.py`, `classifier.py`, `llm_retemplater.py` | Rule-based classification and LLM retemplating |
-| `soa_extractor` | `extractor.py`, `llm_soa_builder.py`, `query_bridge.py` | 3-level SoA cascade with LLM text construction |
-| `soa_extractor` | `mapper.py`, `resolver.py`, `table_discovery.py` | USDM mapping, visit synonyms, PDF table discovery |
-| `sdtm` | `domain_generators.py`, `define_xml.py`, `ct_normalizer.py` | SDTM domain generation and controlled terminology |
-| `pipeline` | `orchestrator.py`, `degradation.py` | Pipeline orchestration with 2D degradation chain |
-| `ui` | `app.py`, `components/query_pipeline.py` | Streamlit application and query pipeline UI |
+Processes ~120 queries from the Appendix B YAML schema against routed content spans. Features
+adaptive content format detection (auto-detects table/list/prose structure) and a 3-level gap
+recovery cascade (alternative strategy → adjacent section search → registry fallback).
 
-## Requirements
+![Stage 3: Query Extraction](docs/diagrams/stage3-query-extraction.png)
 
-- Python 3.13+ (CUDA torch compatibility)
-- Java runtime (JRE 8+) for `tabula-py`
+*Source: [stage3-query-extraction.mmd](docs/diagrams/stage3-query-extraction.mmd)*
 
-### Python dependencies (runtime)
+### Stage 4: Template Assembly
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `minio` | >= 7.2.0 | MinIO client for WORM object storage (production) |
-| `pyarrow` | >= 14.0.0 | Parquet read/write for all intermediate artifacts |
-| `duckdb` | >= 0.10.0 | In-process analytics over Parquet files |
-| `PyMuPDF` | >= 1.24.0 | PDF rendering for vision extraction |
-| `pymupdf4llm` | >= 0.0.17 | PDF-to-markdown conversion |
-| `pdfplumber` | >= 0.11.0 | PDF text and table extraction |
-| `camelot-py[base]` | >= 0.11.0 | Lattice/stream table extraction fallback |
-| `tabula-py` | >= 2.9.0 | Java-based table extraction (third fallback) |
-| `pandas` | >= 2.0.0 | Tabular data manipulation |
-| `spacy` | >= 3.8.0 | NLP for section matching |
-| `lxml` | >= 5.0.0 | CTR-XML / CDISC ODM parsing |
-| `PyYAML` | >= 6.0 | YAML schema loading |
-| `requests` | >= 2.31.0 | HTTP client for registry API calls |
-| `anthropic` | >= 0.40.0 | Claude API for classification, retemplating, vision, and SoA construction |
-| `pyreadstat` | >= 1.3.0 | SDTM XPT serialization |
-| `streamlit` | >= 1.28.0 | Interactive web application |
-| `plotly` | >= 5.0.0 | Schedule of Visits swimlane visualization |
+Groups extraction hits by ICH parent section (B.1–B.16), sorts subsections deterministically,
+computes coverage metrics, and produces an `AssembledProtocol` with populated sections,
+gap placeholders, and confidence badges.
 
-### ML dependencies (optional)
+![Stage 4: Template Assembly](docs/diagrams/stage4-template-assembly.png)
 
-Install separately for NeoBERT fine-tuning and RAG index support:
+*Source: [stage4-template-assembly.mmd](docs/diagrams/stage4-template-assembly.mmd)*
+
+### Stage 5: SoA Extraction
+
+Parses Schedule of Activities tables from PDF content, resolves visit labels to absolute study
+days (7 resolution strategies), and produces CDISC USDM v4.0 entities (epochs, timepoints,
+activities, scheduled instances).
+
+![Stage 5: SoA Extraction](docs/diagrams/stage5-soa-extraction.png)
+
+*Source: [stage5-soa-extraction.mmd](docs/diagrams/stage5-soa-extraction.mmd)*
+
+### Stage 6: SDTM Generation
+
+Generates SDTM domain specifications from SoA data, protocol sections, and registry metadata.
+Produces observation domains (VS, LB, EG, PE) from assessments, subject domains (DM, DS, AE,
+CM, MH) from protocol text, IE domain from inclusion/exclusion criteria (17 criterion patterns),
+and EX domain from arm/intervention structure.
+
+![Stage 6: SDTM Generation](docs/diagrams/stage6-sdtm-generation.png)
+
+*Source: [stage6-sdtm-generation.mmd](docs/diagrams/stage6-sdtm-generation.mmd)*
+
+### Stage 7: Validation
+
+Validates generated SDTM specs against FDA requirements: P21 validator (115 rules), TCG checker
+(FDA TCG v5.9, 21 required TS parameters), Define-XML schema conformance, and visit schedule
+validation (12 rules for window overlaps and gaps).
+
+![Stage 7: Validation](docs/diagrams/stage7-validation.png)
+
+*Source: [stage7-validation.mmd](docs/diagrams/stage7-validation.mmd)*
+
+---
+
+## Embedding & Classification
+
+The pipeline uses a fine-tuned sentence-transformer model (`ich_classifier_v1`, +0.423
+same-section similarity improvement via SetFit contrastive training) for all embedding operations.
+
+The FAISS RAG index contains **2,491 vectors** from two sources:
+- **1,820 registry vectors** — CT.gov structured metadata mapped to ICH sections
+- **671 PubMed vectors** — section-anchored journal article abstract chunks
+
+Section-anchored embedding bridges the domain gap between journal prose and protocol text
+by prefixing each chunk with its ICH section code (e.g., `"B.4 Trial Design: ..."`).
+
+![Embedding Model Flow](docs/diagrams/embedding-model-flow.png)
+
+*Source: [embedding-model-flow.mmd](docs/diagrams/embedding-model-flow.mmd)*
+
+---
+
+## Streamlit UI
+
+The application provides an interactive protocol browser with 6 content tabs:
+
+![UI User Flow](docs/diagrams/ui-user-flow.png)
+
+*Source: [ui-user-flow.mmd](docs/diagrams/ui-user-flow.mmd)*
+
+| Tab | Content |
+|-----|---------|
+| **Query Pipeline** | Section matching, sub-section scoring, extraction results, provenance matrix |
+| **Results** | Assembled ICH E6(R3) template with confidence badges |
+| **SoA & Observations** | Schedule of visits grid, visit timeline, observation domain specs |
+| **SDTM & Validation** | Domain specs (11 domains), P21/TCG/Define-XML validation results |
+| **Quality** | Coverage diagram, confidence distribution, gap analysis |
+| **Protocol Catalog** | Browse 241 cached protocols, registry metadata, file browser |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.12+
+- Node.js (for Mermaid diagram rendering)
+- Anthropic API key (optional — for LLM features)
+
+### Setup
 
 ```bash
-pip install -r requirements-ml.txt
-```
-
-| Package | Purpose |
-|---------|---------|
-| `torch` >= 2.10.0 | PyTorch for NeoBERT |
-| `transformers` >= 4.38.0 | Hugging Face model loading |
-| `sentence-transformers` >= 2.2.0 | RAG embedding model |
-| `faiss-cpu` >= 1.7.4 | Vector similarity search for RAG index |
-
-## Installation
-
-```bash
-# Clone
 git clone https://github.com/LittleHubOnThePrairie/Protocol-To-Cohort-Viz.git
 cd Protocol-To-Cohort-Viz
 
-# Install runtime dependencies
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+
 pip install -r requirements.txt
-
-# (Optional) Install ML dependencies for NeoBERT/RAG
-pip install -r requirements-ml.txt
 ```
 
-## Usage
-
-### Streamlit application
+### Configuration
 
 ```bash
-streamlit run src/ptcv/ui/app.py
+cp .secrets.example .secrets
+# Edit .secrets with your API keys
+
+# Load secrets into environment
+source ./load-secrets.sh  # or . .\load-secrets.ps1 on Windows
 ```
 
-The application provides a tabbed interface:
-
-| Tab | Description |
-|-----|-------------|
-| **Search** | Download protocols from ClinicalTrials.gov or EU-CTR |
-| **Process** | Run ICH section classification and optional LLM retemplating |
-| **Query Pipeline** | Run query-driven extraction with optional Claude Sonnet transformation |
-| **SoA & SDTM** | Extract Schedule of Activities and generate SDTM datasets |
-| **Analysis** | Batch analysis runner and extraction quality benchmarking |
-
-### Run the full pipeline programmatically
-
-```python
-from ptcv.storage import FilesystemAdapter
-from ptcv.pipeline import PipelineOrchestrator
-
-gateway = FilesystemAdapter(root="data/protocols")
-gateway.initialise()
-
-orchestrator = PipelineOrchestrator(gateway=gateway)
-result = orchestrator.run(pdf_bytes, registry_id="NCT12345678")
-
-print(result.pipeline_run_id)
-print(result.verify_lineage_chain())
-```
-
-### Download a protocol
-
-```python
-from ptcv.protocol_search import ClinicalTrialsService, FilestoreManager
-
-filestore = FilestoreManager(root="data/protocols")
-service = ClinicalTrialsService(filestore=filestore)
-result = service.download(registry_id="NCT12345678")
-```
-
-### Query-driven extraction
-
-```python
-from ptcv.ich_parser.query_extractor import QueryExtractor
-
-extractor = QueryExtractor(
-    enable_transformation=True,
-    anthropic_api_key="sk-...",
-)
-results = extractor.extract(protocol_text, registry_id="NCT12345678")
-```
-
-### Extract Schedule of Activities
-
-```python
-from ptcv.soa_extractor import SoaExtractor
-
-extractor = SoaExtractor()
-result = extractor.extract(
-    sections=sections,
-    registry_id="NCT12345678",
-    source_run_id=parse_result.run_id,
-    source_sha256=parse_result.artifact_sha256,
-)
-```
-
-### Run tests
+### Running
 
 ```bash
+# Start Streamlit UI
+python -m streamlit run src/ptcv/ui/app.py
+
+# Run tests
 python -m pytest tests/ -v
+
+# Regenerate diagrams
+npm install -g @mermaid-js/mermaid-cli
+for f in docs/diagrams/*.mmd; do npx mmdc -i "$f" -o "${f%.mmd}.png" -t default -b white -w 1200; done
 ```
 
-## Configuration
+---
 
-### Storage backends
-
-| Backend | Class | Use case |
-|---------|-------|---------|
-| Local filesystem + SQLite | `FilesystemAdapter` | Development and testing |
-| MinIO WORM + SQLite | `LocalStorageAdapter` | Production (GxP-compliant) |
-
-```python
-# Development (default)
-from ptcv.storage import FilesystemAdapter
-gateway = FilesystemAdapter(root="data/protocols")
-
-# Production
-from ptcv.storage import LocalStorageAdapter
-gateway = LocalStorageAdapter(
-    endpoint="minio.internal:9000",
-    access_key="...",
-    secret_key="...",
-    bucket="protocols",
-    db_path="data/lineage.db",
-)
-```
-
-### Protocol data directory
-
-Downloaded protocols are stored under `data/protocols/` by default:
+## Project Structure
 
 ```
-data/protocols/
-    clinicaltrials/      -- ClinicalTrials.gov PDF/XML files (83 protocols)
-    eu-ctr/              -- EU-CTR / CTIS PDF/XML files
-    metadata/            -- Protocol metadata JSON
-    lineage.db           -- SQLite append-only lineage chain
+src/ptcv/
+  ich_parser/          # Stage 2-4: Classification, extraction, assembly
+    section_classifier.py    # Hybrid embedding-first classifier (PTCV-279)
+    section_matcher.py       # Keyword scoring (search-space bounding)
+    summarization_matcher.py # LLM sub-section scoring
+    centroid_classifier.py   # FAISS centroid classification (PTCV-234)
+    query_extractor.py       # Stage 3: 9 extraction strategies
+    content_format_detector.py # Adaptive format detection (PTCV-257)
+    gap_recovery.py          # 3-level gap recovery (PTCV-258)
+    template_assembler.py    # Stage 4: ICH template assembly
+    rag_index.py             # FAISS RAG index (2,491 vectors)
+    toc_extractor.py         # Stage 1: TOC + section header extraction
+
+  extraction/           # PDF processing
+    pdf_extractor.py         # PyMuPDF text extraction
+    table_extractor.py       # pdfplumber + Camelot tables
+    diagram_finder.py        # Vector + Vision diagram detection (PTCV-243)
+    markdown_normalizer.py   # pymupdf4llm normalization
+
+  soa_extractor/        # Stage 5: Schedule of Activities
+    extractor.py             # SoA extraction orchestrator
+    parser.py                # Pipe-table and aligned-table parsing
+    mapper.py                # CDISC USDM v4.0 mapping
+    visit_day_resolver.py    # 7 visit day resolution strategies (PTCV-253)
+    reconciler.py            # Multi-table merge (PTCV-265)
+    footnote_parser.py       # Assessment name cleanup (PTCV-266)
+
+  sdtm/                 # Stage 6: SDTM generation
+    domain_generators.py     # Observation domains (VS, LB, EG, PE)
+    subject_domain_generators.py # Subject domains (DM, DS, AE, CM, MH)
+    ie_domain_generator.py   # IE domain from criteria (PTCV-247)
+    ex_domain_builder.py     # EX domain from arm structure
+    validation/              # Stage 7: P21, TCG, Define-XML, schedule
+
+  registry/             # CT.gov + PubMed data sources
+    metadata_fetcher.py      # CT.gov API v2 fetcher/cache
+    ich_mapper.py            # Registry → ICH section mapping
+    rag_seeder.py            # FAISS index seeding
+    pubmed_vector_builder.py # Section-anchored PubMed embeddings (PTCV-286)
+    query_injector.py        # Query-level registry injection (PTCV-259)
+
+  ui/                   # Streamlit application
+    app.py                   # Main app entry point
+    components/              # Tab components and widgets
+
+  pipeline/             # Pipeline orchestration
+    query_pipeline_lineage.py # SHA-256 lineage chain (PTCV-241)
+
+data/
+  templates/             # ICH E6(R3) YAML schema
+  rag_index/             # FAISS index (2,491 vectors)
+  models/                # Fine-tuned sentence-transformer
+  protocols/             # 241 cached protocol PDFs + registry metadata
+
+docs/
+  diagrams/              # Mermaid source (.mmd) + rendered PNG
+  analysis/              # PubMed abstract analysis (PTCV-287)
+  TEST_COVERAGE_MAP.md   # Test ↔ module ↔ feature mapping
 ```
 
-### Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `ANTHROPIC_API_KEY` | Claude API key for classification cascade, retemplating, vision, and SoA construction |
-| `PTCV_VISION_API_KEY` | API key for Claude vision extraction (enables E1 degradation level) |
-| `PTCV_VISION_MAX_PAGES` | Max pages for vision extraction per protocol (default: 5) |
-| `PTCV_NEOBERT_MODEL` | Path to NeoBERT checkpoint directory (enables C1/C2/C4 classification) |
-| `PTCV_RAG_INDEX` | Path to RAG vector index directory (enables C1 classification) |
+---
 
 ## Testing
 
-The test suite contains 3,200+ tests across all modules:
+| Category | Test Files | Tests | Coverage |
+|----------|-----------|-------|----------|
+| ich_parser | 35 | 1,037 | 100% |
+| sdtm | 17 | 678 | 100% |
+| ui | 45 | 675 | 97.8% |
+| soa_extractor | 22 | 529 | 95.7% |
+| extraction | 11 | 273 | 100% |
+| registry | 13 | 278 | 92.9% |
+| Other | 17 | 590 | 100% |
+| **Total** | **160** | **3,560+** | **97.6%** |
 
-```
-tests/
-    ich_parser/         -- ICH classification, query extraction, template assembly,
-                           classification cascade, NeoBERT, RAG index
-    soa_extractor/      -- SoA parsing, USDM mapping, query bridge, LLM SoA builder
-    sdtm/               -- SDTM domain generation, Define-XML, validation
-    extraction/         -- PDF/XML extraction, vision enhancer, markdown normalizer
-    storage/            -- Storage gateway adapters
-    pipeline/           -- Pipeline orchestration, degradation chain
-    analysis/           -- Batch analysis, benchmarking
-    annotations/        -- Span annotation service
-    protocol_search/    -- Protocol download and search
-    ui/                 -- Streamlit components and visualization
-    smoke/              -- Integration smoke tests
-```
+See [TEST_COVERAGE_MAP.md](docs/TEST_COVERAGE_MAP.md) for complete test ↔ module ↔ feature mapping.
 
 ```bash
-# Run all tests
+# Run full suite
 python -m pytest tests/ -v
 
-# Run a specific module
-python -m pytest tests/ich_parser/ -v
-python -m pytest tests/soa_extractor/ -v
-
-# Run with coverage
-python -m pytest tests/ --cov=ptcv --cov-report=term-missing
+# Run specific stage tests
+python -m pytest tests/ich_parser/ -v          # Stages 2-4
+python -m pytest tests/soa_extractor/ -v       # Stage 5
+python -m pytest tests/sdtm/ -v               # Stages 6-7
+python -m pytest tests/ui/ -v                 # UI components
 ```
 
-## Compliance
+---
 
-PTCV is designed for use in regulated clinical trial environments:
+## Data Sources
 
-| Framework | Coverage |
-|-----------|----------|
-| **21 CFR Part 11** | Electronic records, audit trails, WORM storage, access controls |
-| **ICH E6(R3)** | Appendix B section classification (16 sections) |
-| **ALCOA+** | Attributable, Legible, Contemporaneous, Original, Accurate data integrity |
-| **CDISC USDM v4.0** | Schedule of Activities entity model |
-| **CDISC SDTM** | Trial design domains (TS, TA, TE, TV, TI) |
-| **Define-XML v2.1** | Dataset metadata and controlled terminology |
-| **NIST AI RMF** | Risk management for ML components |
+| Source | Records | Coverage | Update |
+|--------|---------|----------|--------|
+| ClinicalTrials.gov PDFs | 241 protocols | Full pipeline input | Cached |
+| CT.gov Registry (API v2) | 241 JSON responses | 8 ICH sections | Cached |
+| PubMed Abstracts | 159 articles (98 protocols) | 6 ICH sections | Cached |
+| Alignment Corpus | 1,644 records (185 protocols) | 6 section centroids | Static |
+| Fine-tuned Model | ich_classifier_v1 (384-dim) | +0.423 improvement | Static |
 
-## Contributing
+---
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for compliance requirements, code style, and
-branch/commit conventions that apply to this regulated software project.
+## Regulatory Compliance
 
-## Related
+- **ICH E6(R3)** — Appendix B section structure as extraction template
+- **CDISC USDM v4.0** — Schedule of Activities entity model
+- **CDISC SDTM** — Trial design domain specifications with controlled terminology
+- **21 CFR Part 11** — Immutable WORM storage, SHA-256 lineage chain
+- **ALCOA+** — Attributable, Legible, Contemporaneous, Original, Accurate
 
-- Jira: [PTCV](https://littlehubonprairie.atlassian.net/jira/software/projects/PTCV/board)
-- Confluence: [PTCV](https://littlehubonprairie.atlassian.net/wiki/spaces/PTCV)
+---
+
+## Related Documentation
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — GxP-compliant development workflow
+- [TEST_COVERAGE_MAP.md](docs/TEST_COVERAGE_MAP.md) — Complete test mapping
+- [Confluence: Embedding Strategy](https://littlehubonprairie.atlassian.net/spaces/PTCV/) — Vector generation methodology
+- [Jira: PTCV Project](https://littlehubonprairie.atlassian.net/jira/software/projects/PTCV/board) — Issue tracking

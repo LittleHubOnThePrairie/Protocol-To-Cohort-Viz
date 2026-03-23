@@ -27,8 +27,17 @@ LINEAGE_LINKS: list[tuple[str, str]] = [
     ("B.4 Trial Design", "TS"),
     ("B.4 Trial Design", "TA"),
     ("B.4 Trial Design", "TE"),
+    ("B.4 Trial Design", "DM"),
+    ("B.4 Trial Design", "EX"),
     ("B.5 Selection of Subjects", "TI"),
+    ("B.5 Selection of Subjects", "MH"),
     ("SoA Visit Schedule", "TV"),
+    ("SoA Visit Schedule", "SV"),
+    ("SoA Visit Schedule", "LB"),
+    ("SoA Visit Schedule", "VS"),
+    ("SoA Visit Schedule", "AE"),
+    ("SoA Visit Schedule", "DS"),
+    ("SoA Visit Schedule", "CM"),
 ]
 
 DOMAIN_LABELS: dict[str, str] = {
@@ -37,10 +46,23 @@ DOMAIN_LABELS: dict[str, str] = {
     "TE": "TE \u2014 Trial Elements",
     "TV": "TV \u2014 Trial Visits",
     "TI": "TI \u2014 Inclusion/Exclusion",
+    "DM": "DM \u2014 Demographics",
+    "SV": "SV \u2014 Subject Visits",
+    "LB": "LB \u2014 Laboratory",
+    "AE": "AE \u2014 Adverse Events",
+    "VS": "VS \u2014 Vital Signs",
+    "CM": "CM \u2014 Concomitant Meds",
+    "MH": "MH \u2014 Medical History",
+    "DS": "DS \u2014 Disposition",
+    "EX": "EX \u2014 Exposure",
 }
 
 # Ordered domain list for tab display
-DOMAIN_ORDER: list[str] = ["TV", "TA", "TE", "TS", "TI"]
+# Trial design domains first, then clinical domains (PTCV-284)
+DOMAIN_ORDER: list[str] = [
+    "TV", "TA", "TE", "TS", "TI",
+    "DM", "SV", "LB", "AE", "VS", "CM", "MH", "DS", "EX",
+]
 
 # Map section codes to source labels for matching
 _CODE_TO_SOURCE: dict[str, str] = {
@@ -156,10 +178,14 @@ def build_lineage_figure(
         + ["#00CC96"] * len(target_labels)
     )
 
+    # Scale height based on number of nodes to avoid compression
+    n_nodes = len(all_labels)
+    fig_height = max(400, 30 * n_nodes + 100)
+
     fig = go.Figure(data=[go.Sankey(
         node=dict(
-            pad=20,
-            thickness=20,
+            pad=15,
+            thickness=22,
             line=dict(color="white", width=0.5),
             label=all_labels,
             color=node_colors,
@@ -171,16 +197,17 @@ def build_lineage_figure(
             label=link_label,
             color="rgba(99, 110, 250, 0.3)",
         ),
+        textfont=dict(size=13, family="Arial, sans-serif"),
     )])
 
     title = "Protocol \u2192 SDTM Lineage"
     if registry_id:
         title = f"Protocol \u2192 SDTM Lineage \u2014 {registry_id}"
     fig.update_layout(
-        title=title,
-        height=350,
-        margin=dict(l=20, r=20, t=50, b=20),
-        font=dict(size=12),
+        title=dict(text=title, font=dict(size=15)),
+        height=fig_height,
+        margin=dict(l=10, r=10, t=45, b=10),
+        font=dict(size=13),
     )
 
     return fig

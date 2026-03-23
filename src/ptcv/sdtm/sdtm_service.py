@@ -44,13 +44,16 @@ from ..storage import FilesystemAdapter, StorageGateway
 from .ct_normalizer import CtNormalizer
 from .define_xml import DefineXmlGenerator
 from .domain_generators import TaGenerator, TeGenerator, TiGenerator, TsGenerator, TvGenerator
+from .domain_spec_builder import build_domain_specs
+from .ex_domain_builder import build_ex_domain_spec
 from .models import CtReviewQueueEntry, SdtmGenerationResult
 from .review_queue import CtReviewQueue
+from .synthetic_generator import SyntheticSdtmGenerator
 
 if TYPE_CHECKING:
     from ..ich_parser.models import IchSection
     from ..ich_parser.template_assembler import AssembledProtocol, QueryExtractionHit
-    from ..soa_extractor.models import UsdmTimepoint
+    from ..soa_extractor.models import RawSoaTable, UsdmTimepoint
 
 
 logger = logging.getLogger(__name__)
@@ -132,6 +135,8 @@ class SdtmService:
         amendment_number: str = "00",
         source_sha256: str = "",
         run_id: Optional[str] = None,
+        soa_table: Optional["RawSoaTable"] = None,
+        registry_metadata: Optional[dict] = None,
     ) -> SdtmGenerationResult:
         """Generate all SDTM trial design domains and write to storage.
 
@@ -146,6 +151,8 @@ class SdtmService:
             source_sha256: SHA-256 of the upstream timepoints.parquet.
                 Pass "" when testing without an upstream artifact.
             run_id: Optional explicit run_id for deterministic testing.
+            soa_table: Optional RawSoaTable for observation domain specs.
+            registry_metadata: Optional CT.gov JSON for EX domain (PTCV-248).
 
         Returns:
             SdtmGenerationResult with artifact keys, sha256s, and counts.
@@ -207,6 +214,9 @@ class SdtmService:
             source_sha256=source_sha256,
             amendment_number=amendment_number,
             source_type="ich_section",
+            soa_table=soa_table,
+            registry_metadata=registry_metadata,
+            sections=sections,
         )
 
     def generate_from_assembled(
@@ -217,6 +227,8 @@ class SdtmService:
         amendment_number: str = "00",
         source_sha256: str = "",
         run_id: Optional[str] = None,
+        soa_table: Optional["RawSoaTable"] = None,
+        registry_metadata: Optional[dict] = None,
     ) -> SdtmGenerationResult:
         """Generate SDTM domains from query pipeline AssembledProtocol.
 
@@ -283,6 +295,9 @@ class SdtmService:
             source_sha256=source_sha256,
             amendment_number=amendment_number,
             source_type="query_pipeline",
+            soa_table=soa_table,
+            registry_metadata=registry_metadata,
+            sections=None,
         )
 
     # -------------------------------------------------------------------
@@ -298,6 +313,9 @@ class SdtmService:
         source_sha256: str,
         amendment_number: str,
         source_type: str = "ich_section",
+        soa_table: Optional["RawSoaTable"] = None,
+        registry_metadata: Optional[dict] = None,
+        sections: Optional[list] = None,
     ) -> SdtmGenerationResult:
         """Write XPT artifacts, Define-XML, and route CT-unmapped terms.
 
@@ -306,6 +324,26 @@ class SdtmService:
         studyid = registry_id[:20]
         prefix = f"sdtm/{registry_id}/{run_id}"
         timestamp = datetime.now(timezone.utc).isoformat()
+
+        # --- Generate synthetic clinical domains (PTCV-284) -------------
+        ta_df = datasets.get("ta", pd.DataFrame())
+        tv_df = datasets.get("tv", pd.DataFrame())
+        try:
+            synth_gen = SyntheticSdtmGenerator()
+            synth_result = synth_gen.generate_from_dataframes(
+                studyid=studyid,
+                ta_df=ta_df,
+                tv_df=tv_df,
+            )
+            for domain_code, domain_df in synth_result.domains.items():
+                if not domain_df.empty:
+                    datasets[domain_code.lower()] = domain_df
+        except Exception:
+            logger.warning(
+                "Synthetic clinical domain generation failed; "
+                "continuing with trial design domains only",
+                exc_info=True,
+            )
 
         # --- Route CT-unmapped terms to review queue --------------------
         ct_unmapped_count = 0
@@ -394,6 +432,41 @@ class SdtmService:
         artifact_keys["define"] = define_key
         artifact_sha256s["define"] = define_artifact.sha256
 
+        # --- Build observation domain specs from SoA (PTCV-246) -----------
+        domain_specs = None
+        if soa_table is not None:
+            domain_specs = build_domain_specs(
+                soa_table,
+                target_domains={"VS", "LB", "EG", "PE"},
+            )
+            logger.info(
+                "Domain spec generation: %d specs, %d unmapped assessments",
+                len(domain_specs.specs),
+                len(domain_specs.unmapped),
+            )
+
+        # --- Build EX domain spec from interventions (PTCV-248) -----------
+        ex_spec = None
+        protocol_text = ""
+        if sections:
+            import json as _json
+            for sec in sections:
+                if sec.section_code in ("B.4", "B.7"):
+                    try:
+                        data = _json.loads(sec.content_json)
+                        protocol_text += data.get("text_excerpt", "") + "\n"
+                    except (ValueError, AttributeError):
+                        pass
+        if registry_metadata or protocol_text.strip():
+            ex_spec = build_ex_domain_spec(
+                registry_metadata=registry_metadata,
+                protocol_text=protocol_text,
+            )
+            logger.info(
+                "EX domain spec: %d interventions",
+                ex_spec.treatment_count,
+            )
+
         logger.info(
             "SDTM generation complete: registry_id=%s run_id=%s ct_unmapped=%d",
             registry_id,
@@ -411,4 +484,6 @@ class SdtmService:
             ct_unmapped_count=ct_unmapped_count,
             generation_timestamp_utc=timestamp,
             source_type=source_type,
+            domain_specs=domain_specs,
+            ex_domain_spec=ex_spec,
         )

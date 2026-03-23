@@ -177,7 +177,10 @@ class SoaTableParser:
         for row in rows[activity_start:]:
             if not row or not row[0]:
                 continue
-            activity_name = row[0]
+            # PTCV-266: Separate footnote markers from assessment names
+            from .footnote_parser import parse_assessment_name
+            _parsed = parse_assessment_name(row[0])
+            activity_name = _parsed.clean_name
             scheduled = [
                 _MARKED_RE.match(cell.strip()) is not None
                 for cell in row[1:]
@@ -263,7 +266,10 @@ class SoaTableParser:
         activities: list[tuple[str, list[bool]]] = []
 
         for row in data_lines[1:]:
-            name = row[0]
+            # PTCV-266: Separate footnote markers from assessment names
+            from .footnote_parser import parse_assessment_name
+            _parsed = parse_assessment_name(row[0])
+            name = _parsed.clean_name
             scheduled = [
                 _MARKED_RE.match(cell.strip()) is not None
                 for cell in row[1:]

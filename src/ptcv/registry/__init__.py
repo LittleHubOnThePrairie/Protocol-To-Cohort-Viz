@@ -6,9 +6,12 @@ to improve classification confidence for PDF-extracted sections.
 
 from __future__ import annotations
 
-import importlib
-from typing import Any
-
+from .cross_validator import (
+    CrossValidationReport,
+    CrossValidator,
+    SectionStatus,
+    SectionValidation,
+)
 from .fallback import (
     RegistryEnrichmentResult,
     RegistryPipelineMetrics,
@@ -18,20 +21,34 @@ from .fallback import (
 )
 from .gdelt_adapter import GdeltAdapter, GdeltSearchResult, NewswireArticle
 from .ich_mapper import MappedRegistrySection, MetadataToIchMapper
-from .newsdata_adapter import NewsdataAdapter, NewsdataSearchResult
+from .literature_enricher import EnrichmentResult, LiteratureEnricher
 from .metadata_fetcher import RegistryMetadataFetcher
+from .newsdata_adapter import NewsdataAdapter, NewsdataSearchResult
+from .pubmed_adapter import (
+    EndpointResult,
+    PubmedAdapter,
+    PubmedArticle,
+    PubmedSearchResult,
+    extract_endpoints,
+)
 from .rag_seeder import RegistryRagSeeder, SeedResult
 
 __all__ = [
     "CrossValidationReport",
     "CrossValidator",
+    "EnrichmentResult",
+    "EndpointResult",
     "GdeltAdapter",
     "GdeltSearchResult",
+    "LiteratureEnricher",
     "MappedRegistrySection",
     "MetadataToIchMapper",
     "NewsdataAdapter",
     "NewsdataSearchResult",
     "NewswireArticle",
+    "PubmedAdapter",
+    "PubmedArticle",
+    "PubmedSearchResult",
     "RegistryEnrichmentResult",
     "RegistryMetadataFetcher",
     "RegistryPipelineMetrics",
@@ -41,19 +58,6 @@ __all__ = [
     "SeedResult",
     "collect_batch_metrics",
     "detect_nct_id",
+    "extract_endpoints",
     "try_registry_enrichment",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """Lazy-load cross_validator to avoid pulling in fitz/PyMuPDF."""
-    _cross_validator_names = {
-        "CrossValidationReport",
-        "CrossValidator",
-        "SectionStatus",
-        "SectionValidation",
-    }
-    if name in _cross_validator_names:
-        mod = importlib.import_module(".cross_validator", __name__)
-        return getattr(mod, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

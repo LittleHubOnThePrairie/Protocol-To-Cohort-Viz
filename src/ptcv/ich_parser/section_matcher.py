@@ -142,7 +142,12 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "dosage": "B.7",
     "dose modification": "B.7",
     "concomitant medication": "B.7",
+    "concomitant therapy": "B.7",
     "treatment schedule": "B.7",
+    "vasopressor": "B.7",
+    "vasopressors": "B.7",
+    "fluid management": "B.7",
+    "fluid therapy": "B.7",
     # B.8 Assessment of Efficacy
     "efficacy assessment": "B.8",
     "clinical outcome": "B.8",
@@ -159,10 +164,29 @@ _SYNONYM_BOOSTS: dict[str, str] = {
     "endpoints and assessment": "B.8",
     "efficacy evaluation": "B.8",
     "efficacy measures": "B.8",
+    "measurements": "B.8",
+    "hemodynamics": "B.8",
+    "hemodynamic": "B.8",
+    "haemodynamic": "B.8",
+    "haemodynamics": "B.8",
+    "blood draws": "B.8",
+    "blood draw": "B.8",
+    "blood sampling": "B.8",
+    "blood samples": "B.8",
+    "research blood": "B.8",
+    "study assessments": "B.8",
+    "study procedures": "B.8",
+    "clinical assessments": "B.8",
+    "clinical procedures": "B.8",
+    "additional measurements": "B.8",
     # B.9 Assessment of Safety
     "adverse event": "B.9",
     "safety assessment": "B.9",
     "safety monitoring": "B.9",
+    "safety considerations": "B.9",
+    "safety evaluations": "B.9",
+    "safety measures": "B.9",
+    "safety parameters": "B.9",
     "vital signs": "B.9",
     "laboratory test": "B.9",
     "safety reporting": "B.9",
@@ -454,10 +478,16 @@ class SectionMatcher:
         auto_threshold: float = 0.75,
         review_threshold: float = 0.50,
         synonym_boost: float = 0.15,
+        rag_index: Optional[Any] = None,
+        rag_boost: float = 0.06,
     ) -> None:
         self._auto_threshold = auto_threshold
         self._review_threshold = review_threshold
         self._synonym_boost = synonym_boost
+
+        # PTCV-238: RAG exemplar index for REVIEW-tier disambiguation
+        self._rag_index = rag_index
+        self._rag_boost = rag_boost
 
         # Load ICH schema — 16 sections (B.1 through B.16)
         schema = load_ich_schema()
@@ -545,6 +575,15 @@ class SectionMatcher:
         all_boosted = self._apply_toc_order_hints(
             headers, all_boosted, protocol_index
         )
+
+        # PTCV-238: RAG exemplar tiebreaker for REVIEW-tier headers.
+        # Query RAG for similar sections and boost the candidate that
+        # matches exemplar consensus. Only for headers that would land
+        # in REVIEW tier (between review_threshold and auto_threshold).
+        if self._rag_index is not None:
+            all_boosted = self._apply_rag_tiebreaker(
+                headers, all_boosted, protocol_index,
+            )
 
         # --- Pass 2: classify with potentially adjusted scores --------
         mappings: list[SectionMapping] = []
@@ -762,6 +801,110 @@ class SectionMatcher:
                     break
 
         return boosted
+
+    # ------------------------------------------------------------------
+    # RAG exemplar tiebreaker (PTCV-238)
+    # ------------------------------------------------------------------
+
+    def _apply_rag_tiebreaker(
+        self,
+        headers: list[tuple[str, str]],
+        all_boosted: list[list[float]],
+        protocol_index: "ProtocolIndex",
+    ) -> list[list[float]]:
+        """Use RAG exemplars to disambiguate REVIEW-tier headers.
+
+        For headers where the top-2 candidates are within the REVIEW
+        tier (score between review_threshold and auto_threshold), query
+        the RAG index with the section content text. If exemplar
+        consensus favors one candidate, apply a small boost.
+
+        Only runs when ``self._rag_index`` is not None.
+
+        Args:
+            headers: List of (section_number, title) tuples.
+            all_boosted: Current boosted score matrix.
+            protocol_index: Protocol index for content access.
+
+        Returns:
+            Updated score matrix (may be same object, mutated).
+        """
+        if self._rag_index is None:
+            return all_boosted
+
+        for idx, (number, title) in enumerate(headers):
+            scores = all_boosted[idx]
+
+            # Only act on REVIEW-tier: top score between thresholds
+            top_score = max(scores) if scores else 0.0
+            if (
+                top_score >= self._auto_threshold
+                or top_score < self._review_threshold
+            ):
+                continue  # Skip HIGH and LOW — only REVIEW
+
+            # Get top-2 candidates
+            sorted_indices = sorted(
+                range(len(scores)),
+                key=lambda i: scores[i],
+                reverse=True,
+            )
+            if len(sorted_indices) < 2:
+                continue
+
+            top_idx = sorted_indices[0]
+            second_idx = sorted_indices[1]
+
+            # Only if they're close (within 0.15)
+            if scores[top_idx] - scores[second_idx] > 0.15:
+                continue
+
+            # Query RAG with section content
+            content = protocol_index.content_spans.get(number, "")
+            if not content:
+                content = title
+            query_text = content[:500]
+
+            try:
+                exemplars = self._rag_index.query(query_text, top_k=3)
+            except Exception:
+                continue
+
+            if not exemplars:
+                continue
+
+            # Count exemplar votes for each candidate code
+            top_code = self._ref_codes[top_idx]
+            second_code = self._ref_codes[second_idx]
+
+            votes: dict[str, int] = {}
+            for ex in exemplars:
+                code = ex.section_code
+                votes[code] = votes.get(code, 0) + 1
+
+            top_votes = votes.get(top_code, 0)
+            second_votes = votes.get(second_code, 0)
+
+            # Boost the candidate with more exemplar votes
+            if second_votes > top_votes:
+                scores[second_idx] += self._rag_boost
+                logger.info(
+                    "RAG tiebreaker: %s '%s' — boosted %s "
+                    "over %s (votes: %d vs %d)",
+                    number, title[:40],
+                    second_code, top_code,
+                    second_votes, top_votes,
+                )
+            elif top_votes > second_votes:
+                scores[top_idx] += self._rag_boost
+                logger.info(
+                    "RAG tiebreaker: %s '%s' — confirmed %s "
+                    "(votes: %d vs %d)",
+                    number, title[:40],
+                    top_code, top_votes, second_votes,
+                )
+
+        return all_boosted
 
     # ------------------------------------------------------------------
     # TOC order disambiguation (PTCV-160)

@@ -13,7 +13,11 @@ Regulatory references:
 from __future__ import annotations
 
 import dataclasses
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .domain_spec_builder import DomainSpecResult
+    from .ex_domain_builder import ExDomainSpec
 
 
 @dataclasses.dataclass
@@ -65,6 +69,8 @@ class SdtmGenerationResult:
     ct_unmapped_count: int
     generation_timestamp_utc: str
     source_type: str = "ich_section"  # "ich_section" | "query_pipeline"
+    domain_specs: Optional["DomainSpecResult"] = None
+    ex_domain_spec: Optional["ExDomainSpec"] = None
 
     def __repr__(self) -> str:
         domains = list(self.artifact_keys.keys())

@@ -78,6 +78,9 @@ _LOOKUP: dict[str, str] = {
     "treatment": "Treatment",
     "on treatment": "Treatment",
     "on-treatment": "Treatment",
+    "daily": "Treatment",
+    "weekly": "Treatment",
+    "weekly thereafter": "Treatment",
     # Follow-up
     "follow-up": "Follow-up",
     "follow up": "Follow-up",

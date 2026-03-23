@@ -4,6 +4,8 @@ Pure-Python module for loading protocol metadata, classifying
 conditions into therapeutic area buckets, and building a sorted
 catalog for the file browser sidebar.
 
+Enriched with ClinicalTrials.gov registry cache (PTCV-207).
+
 No Streamlit dependency — fully testable with ``pytest``.
 """
 
@@ -214,6 +216,8 @@ class ProtocolEntry:
     filename: str
     file_path: Path
     quality: QualityScores = field(default_factory=QualityScores)
+    sponsor: str = ""
+    phase: str = ""
 
     @property
     def display_label(self) -> str:
@@ -326,6 +330,69 @@ def _build_entry(
     )
 
 
+def _enrich_from_registry_cache(
+    entries: list[ProtocolEntry],
+    registry_cache_dir: Path,
+) -> list[ProtocolEntry]:
+    """Enrich catalog entries with CT.gov registry cache data.
+
+    Overwrites title, condition, therapeutic_area, sponsor, and
+    phase from the authoritative CT.gov JSON when available.
+    Falls back to existing metadata values when cache is missing.
+
+    Args:
+        entries: Flat list of ProtocolEntry objects to enrich.
+        registry_cache_dir: Path to registry_cache directory.
+
+    Returns:
+        Same list with entries replaced by enriched copies where
+        registry data was available.
+    """
+    if not registry_cache_dir.is_dir():
+        return entries
+
+    from ptcv.ui.components.registry_panel import (
+        load_registry_metadata,
+    )
+
+    enriched: list[ProtocolEntry] = []
+    for entry in entries:
+        meta = load_registry_metadata(
+            registry_cache_dir, entry.registry_id,
+        )
+        if meta is None:
+            enriched.append(entry)
+            continue
+
+        # Use CT.gov title if available
+        title = meta.display_title or entry.title
+
+        # Use CT.gov conditions for classification
+        condition = (
+            ", ".join(meta.conditions)
+            if meta.conditions
+            else entry.condition
+        )
+        area = classify_therapeutic_area(condition)
+
+        enriched.append(
+            ProtocolEntry(
+                registry_id=entry.registry_id,
+                title=title,
+                condition=condition,
+                therapeutic_area=area,
+                registry_source=entry.registry_source,
+                filename=entry.filename,
+                file_path=entry.file_path,
+                quality=entry.quality,
+                sponsor=meta.sponsor or entry.sponsor,
+                phase=meta.phase_display or entry.phase,
+            )
+        )
+
+    return enriched
+
+
 def load_protocol_catalog(
     protocols_dir: Path,
 ) -> dict[TherapeuticArea, list[ProtocolEntry]]:
@@ -334,6 +401,11 @@ def load_protocol_catalog(
     Scans metadata JSON files under ``protocols_dir/metadata/``,
     matches each to a PDF file, classifies by therapeutic area,
     and sorts by quality within each group.
+
+    If a CT.gov registry cache exists under
+    ``protocols_dir/clinicaltrials/registry_cache/``, entries are
+    enriched with authoritative trial titles, conditions, sponsor,
+    and phase data (PTCV-207).
 
     Args:
         protocols_dir: Root protocols directory (e.g.,
@@ -348,7 +420,7 @@ def load_protocol_catalog(
     if not metadata_dir.is_dir():
         return {}
 
-    catalog: dict[TherapeuticArea, list[ProtocolEntry]] = {}
+    all_entries: list[ProtocolEntry] = []
 
     for meta_path in sorted(metadata_dir.glob("*.json")):
         try:
@@ -363,7 +435,19 @@ def load_protocol_catalog(
 
         registry_source, pdf_path = result
         entry = _build_entry(meta, registry_source, pdf_path)
+        all_entries.append(entry)
 
+    # Enrich from CT.gov registry cache (PTCV-207)
+    registry_cache_dir = (
+        protocols_dir / "clinicaltrials" / "registry_cache"
+    )
+    all_entries = _enrich_from_registry_cache(
+        all_entries, registry_cache_dir,
+    )
+
+    # Group by therapeutic area
+    catalog: dict[TherapeuticArea, list[ProtocolEntry]] = {}
+    for entry in all_entries:
         catalog.setdefault(entry.therapeutic_area, []).append(entry)
 
     # Sort each group by quality

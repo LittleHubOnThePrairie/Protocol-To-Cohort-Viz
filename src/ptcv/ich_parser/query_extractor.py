@@ -1287,13 +1287,38 @@ class QueryExtractor:
         # when no HIGH/REVIEW content was matched for B.1.
         self._inject_front_matter_route(routes, protocol_index)
 
+        # PTCV-230: Inject registry metadata content as
+        # supplementary route content for sections where PDF
+        # routes are absent or low-confidence.
+        self._inject_registry_routes(routes, protocol_index)
+
         # PTCV-99: Citation extraction and consolidation.
         # Collect full citations from all routes, inject into B.2.7,
         # and strip from non-B.2 routes.
         self._consolidate_citations(routes)
 
+        # PTCV-256: Build embedding-based Layer 2 routes.
+        # Scores all content_spans against section centroids to
+        # recover from Stage 2 misclassification.
+        embedding_routes = self._build_embedding_routes(
+            protocol_index,
+        )
+
         extractions: list[QueryExtraction] = []
         gaps: list[ExtractionGap] = []
+
+        # PTCV-258: Pre-load registry metadata for gap recovery.
+        _registry_meta: dict | None = None
+        try:
+            nct_id = self._resolve_nct_id(protocol_index)
+            if nct_id:
+                from ptcv.registry.metadata_fetcher import (
+                    RegistryMetadataFetcher,
+                )
+                _fetcher = RegistryMetadataFetcher()
+                _registry_meta = _fetcher.fetch(nct_id)
+        except Exception:
+            pass  # Registry unavailable — recovery L3 skipped
 
         if self._use_llm:
             # Concurrent extraction — LLM calls are I/O-bound
@@ -1309,6 +1334,7 @@ class QueryExtractor:
                         routes,
                         protocol_index,
                         match_result,
+                        embedding_routes,
                     ): q
                     for q in queries
                 }
@@ -1320,13 +1346,36 @@ class QueryExtractor:
                     if extraction is not None:
                         extractions.append(extraction)
                     else:
-                        gaps.append(
-                            ExtractionGap(
+                        # PTCV-258: Gap recovery cascade
+                        from .gap_recovery import recover_gap
+                        recovery = recover_gap(
+                            q, routes, _TYPE_DISPATCH,
+                            registry_metadata=_registry_meta,
+                        )
+                        if recovery.recovered:
+                            extractions.append(QueryExtraction(
                                 query_id=q.query_id,
                                 section_id=q.section_id,
-                                reason="no_match",
-                            )
-                        )
+                                content=recovery.content,
+                                confidence=recovery.confidence,
+                                extraction_method=recovery.method,
+                                source_section=recovery.source_section,
+                                verbatim_content="",
+                            ))
+                        else:
+                            reason = "no_match"
+                            if recovery.exhaustive_search:
+                                reason = (
+                                    "exhaustive_no_match:"
+                                    + ",".join(
+                                        recovery.strategies_attempted
+                                    )
+                                )
+                            gaps.append(ExtractionGap(
+                                query_id=q.query_id,
+                                section_id=q.section_id,
+                                reason=reason,
+                            ))
                     done_count += 1
                     if progress_callback is not None:
                         progress_callback(done_count, total_queries)
@@ -1334,20 +1383,50 @@ class QueryExtractor:
             total_queries = len(queries)
             for i, query in enumerate(queries, 1):
                 extraction = self._process_query(
-                    query, routes, protocol_index, match_result
+                    query, routes, protocol_index, match_result,
+                    embedding_routes,
                 )
                 if extraction is not None:
                     extractions.append(extraction)
                 else:
-                    gaps.append(
-                        ExtractionGap(
+                    # PTCV-258: Gap recovery cascade
+                    from .gap_recovery import recover_gap
+                    recovery = recover_gap(
+                        query, routes, _TYPE_DISPATCH,
+                        registry_metadata=_registry_meta,
+                    )
+                    if recovery.recovered:
+                        extractions.append(QueryExtraction(
                             query_id=query.query_id,
                             section_id=query.section_id,
-                            reason="no_match",
-                        )
-                    )
+                            content=recovery.content,
+                            confidence=recovery.confidence,
+                            extraction_method=recovery.method,
+                            source_section=recovery.source_section,
+                            verbatim_content="",
+                        ))
+                    else:
+                        reason = "no_match"
+                        if recovery.exhaustive_search:
+                            reason = (
+                                "exhaustive_no_match:"
+                                + ",".join(
+                                    recovery.strategies_attempted
+                                )
+                            )
+                        gaps.append(ExtractionGap(
+                            query_id=query.query_id,
+                            section_id=query.section_id,
+                            reason=reason,
+                        ))
                 if progress_callback is not None:
                     progress_callback(i, total_queries)
+
+        # PTCV-259: Query-level registry injection — replace
+        # low-confidence extractions with direct CT.gov answers.
+        extractions = self._inject_registry_query_answers(
+            extractions, protocol_index,
+        )
 
         answered = sum(
             1
@@ -1639,6 +1718,74 @@ class QueryExtractor:
         return routes
 
     # ------------------------------------------------------------------
+    # Embedding-based semantic routing — Layer 2 (PTCV-256)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_embedding_routes(
+        protocol_index: ProtocolIndex,
+    ) -> dict[str, list[tuple[str, float, str]]]:
+        """Build Layer 2 routes via centroid similarity scoring.
+
+        Uses the CentroidClassifier to score ALL content_spans
+        against ALL section centroids. Returns the top-k most
+        similar spans per ICH code, regardless of how Stage 2
+        classified them. This recovers from Stage 2 misclassification.
+
+        Returns:
+            Dict mapping ICH code to list of
+            ``(content_text, similarity_score, section_number)``
+            tuples sorted by similarity descending.
+            Empty dict if centroid classifier is unavailable.
+
+        PTCV-256: Embedding-based semantic routing.
+        """
+        if not protocol_index.content_spans:
+            return {}
+
+        try:
+            from .centroid_classifier import load_centroid_classifier
+        except ImportError:
+            logger.debug(
+                "PTCV-256: centroid_classifier not available; "
+                "skipping embedding routes"
+            )
+            return {}
+
+        classifier = load_centroid_classifier()
+        if classifier is None:
+            return {}
+
+        scored = classifier.score_spans(
+            protocol_index.content_spans, top_k=3,
+        )
+
+        embedding_routes: dict[
+            str, list[tuple[str, float, str]]
+        ] = {}
+        for ich_code, span_scores in scored.items():
+            entries: list[tuple[str, float, str]] = []
+            for section_num, similarity in span_scores:
+                content = protocol_index.content_spans.get(
+                    section_num, ""
+                )
+                if content.strip():
+                    entries.append(
+                        (content, similarity, section_num)
+                    )
+            if entries:
+                embedding_routes[ich_code] = entries
+
+        if embedding_routes:
+            logger.info(
+                "PTCV-256: Built embedding routes for %d "
+                "section codes",
+                len(embedding_routes),
+            )
+
+        return embedding_routes
+
+    # ------------------------------------------------------------------
     # Front-matter extraction (PTCV-155, Tier 3)
     # ------------------------------------------------------------------
 
@@ -1717,6 +1864,172 @@ class QueryExtractor:
                 "front_matter",
                 MatchConfidence.REVIEW,
             )
+
+    # ------------------------------------------------------------------
+    # Registry metadata injection (PTCV-230)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _inject_registry_routes(
+        routes: dict[str, tuple[str, str, MatchConfidence]],
+        protocol_index: ProtocolIndex,
+    ) -> None:
+        """Inject registry metadata as route content for missing/low sections.
+
+        Fetches ClinicalTrials.gov registry metadata for the protocol's
+        NCT ID, maps it to ICH E6(R3) sections via MetadataToIchMapper,
+        and injects the content into routes where:
+        - No PDF route exists (creates new route from registry)
+        - PDF route has LOW confidence (appends registry as supplement)
+
+        Skips injection for routes with HIGH or REVIEW confidence to
+        avoid polluting high-quality PDF-extracted content.
+
+        Follows the ``_inject_front_matter_route()`` pattern.
+        """
+        # Resolve NCT ID from filename or front-matter text
+        nct_id = QueryExtractor._resolve_nct_id(protocol_index)
+        if not nct_id:
+            return
+
+        # Fetch and map registry metadata
+        try:
+            from ptcv.registry.metadata_fetcher import (
+                RegistryMetadataFetcher,
+            )
+            from ptcv.registry.ich_mapper import MetadataToIchMapper
+        except ImportError:
+            logger.debug(
+                "PTCV-230: Registry modules not available; "
+                "skipping registry injection"
+            )
+            return
+
+        fetcher = RegistryMetadataFetcher()
+        metadata = fetcher.fetch(nct_id)
+        if not metadata:
+            logger.debug(
+                "PTCV-230: No registry metadata for %s", nct_id
+            )
+            return
+
+        mapper = MetadataToIchMapper()
+        mapped_sections = mapper.map(metadata)
+        if not mapped_sections:
+            return
+
+        injected = 0
+        for section in mapped_sections:
+            code = section.section_code
+            content = (
+                f"[REGISTRY — ClinicalTrials.gov {nct_id}]\n"
+                f"{section.content_text}"
+            )
+
+            if code not in routes:
+                # No PDF route — create from registry
+                routes[code] = (
+                    content,
+                    f"registry:{nct_id}",
+                    MatchConfidence.REVIEW,
+                )
+                injected += 1
+
+            else:
+                _, src, conf = routes[code]
+                if conf == MatchConfidence.LOW:
+                    # Low-confidence PDF route — append registry
+                    existing_content = routes[code][0]
+                    routes[code] = (
+                        f"{existing_content}\n\n"
+                        f"--- [Registry Supplement] ---\n"
+                        f"{content}",
+                        f"{src}, registry:{nct_id}",
+                        MatchConfidence.REVIEW,
+                    )
+                    injected += 1
+                # HIGH/REVIEW — skip, PDF content is sufficient
+
+        if injected:
+            logger.info(
+                "PTCV-230: Injected %d registry routes for %s",
+                injected,
+                nct_id,
+            )
+
+    @staticmethod
+    def _resolve_nct_id(
+        protocol_index: ProtocolIndex,
+    ) -> str | None:
+        """Extract NCT ID from protocol source path or front-matter.
+
+        Checks filename first (most reliable), then scans the first
+        2000 chars of full_text for an NCT pattern.
+
+        Returns:
+            NCT ID string or None if not found.
+        """
+        # Check filename
+        if protocol_index.source_path:
+            m = _NCT_RE.search(protocol_index.source_path)
+            if m:
+                return m.group(0)
+
+        # Check front-matter (first 2000 chars)
+        if protocol_index.full_text:
+            m = _NCT_RE.search(protocol_index.full_text[:2000])
+            if m:
+                return m.group(0)
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Query-level registry injection (PTCV-259)
+    # ------------------------------------------------------------------
+
+    def _inject_registry_query_answers(
+        self,
+        extractions: list[QueryExtraction],
+        protocol_index: ProtocolIndex,
+    ) -> list[QueryExtraction]:
+        """Replace low-confidence extractions with direct registry answers.
+
+        Fetches registry metadata for the protocol's NCT ID, then uses
+        ``inject_registry_answers()`` to replace low-confidence results
+        with exact CT.gov field values. Unlike route-level injection
+        (PTCV-230), this operates at query granularity — each query
+        gets exactly the registry field that answers it.
+
+        High-confidence PDF extractions are never overridden.
+        """
+        nct_id = self._resolve_nct_id(protocol_index)
+        if not nct_id:
+            return extractions
+
+        try:
+            from ptcv.registry.metadata_fetcher import (
+                RegistryMetadataFetcher,
+            )
+            from ptcv.registry.query_injector import (
+                inject_registry_answers,
+            )
+        except ImportError:
+            logger.debug(
+                "PTCV-259: Registry modules not available; "
+                "skipping query-level injection"
+            )
+            return extractions
+
+        fetcher = RegistryMetadataFetcher()
+        metadata = fetcher.fetch(nct_id)
+        if not metadata:
+            return extractions
+
+        return inject_registry_answers(
+            extractions,
+            metadata,
+            confidence_threshold=self._threshold,
+        )
 
     # ------------------------------------------------------------------
     # Citation consolidation (PTCV-99)
@@ -1800,8 +2113,18 @@ class QueryExtractor:
         routes: dict[str, tuple[str, str, MatchConfidence]],
         protocol_index: ProtocolIndex,
         match_result: MatchResult,
+        embedding_routes: (
+            dict[str, list[tuple[str, float, str]]] | None
+        ) = None,
     ) -> QueryExtraction | None:
-        """Process a single query against routed content."""
+        """Process a single query against routed content.
+
+        Resolution order:
+        1. Layer 1 sub-section route (B.x.y)
+        2. Layer 1 parent route (B.x)
+        3. Layer 2 embedding route (PTCV-256) — semantic similarity
+        4. Unscoped full-text search (fallback)
+        """
         # PTCV-110: Try sub-section route first (B.x.y).
         section_id = query.section_id
         if section_id in routes:
@@ -1830,6 +2153,16 @@ class QueryExtractor:
                 scoped=True,
             )
 
+        # PTCV-256: Layer 2 — embedding-based semantic routing.
+        # Try centroid similarity to recover from Stage 2
+        # misclassification before falling back to unscoped search.
+        if embedding_routes:
+            l2_result = self._try_embedding_route(
+                query, embedding_routes,
+            )
+            if l2_result is not None:
+                return l2_result
+
         # Fallback: unscoped full-text search (PTCV-157: capped)
         if protocol_index.full_text:
             # Pre-filter to the most query-relevant paragraphs
@@ -1851,6 +2184,54 @@ class QueryExtractor:
 
         return None
 
+    # ------------------------------------------------------------------
+    # Embedding route resolution (PTCV-256)
+    # ------------------------------------------------------------------
+
+    _EMBEDDING_MIN_SIMILARITY = 0.30
+
+    def _try_embedding_route(
+        self,
+        query: AppendixBQuery,
+        embedding_routes: dict[
+            str, list[tuple[str, float, str]]
+        ],
+    ) -> QueryExtraction | None:
+        """Try to resolve a query via Layer 2 embedding routes.
+
+        Checks both subsection (B.x.y) and parent (B.x) codes.
+        Uses the highest-similarity span above the minimum threshold.
+        Route confidence is REVIEW — better than unscoped, but not
+        as reliable as Layer 1 keyword routing.
+
+        Returns:
+            QueryExtraction or None if no suitable embedding match.
+        """
+        for code in (query.section_id, query.schema_section):
+            spans = embedding_routes.get(code)
+            if not spans:
+                continue
+            # spans is sorted by similarity descending
+            best_content, best_sim, best_section = spans[0]
+            if best_sim < self._EMBEDDING_MIN_SIMILARITY:
+                continue
+
+            logger.debug(
+                "PTCV-256: Layer 2 route for %s via %s "
+                "(sim=%.3f)",
+                query.query_id, best_section, best_sim,
+            )
+
+            return self._extract_from_content(
+                query,
+                best_content,
+                f"embedding:{best_section}",
+                MatchConfidence.REVIEW,
+                scoped=True,
+            )
+
+        return None
+
     def _extract_from_content(
         self,
         query: AppendixBQuery,
@@ -1860,12 +2241,36 @@ class QueryExtractor:
         scoped: bool,
     ) -> QueryExtraction | None:
         """Dispatch to type-specific extractor and apply penalties."""
+        # PTCV-257: Auto-detect content format and select best strategy.
+        # The detected format overrides the YAML hint when confident.
+        from .content_format_detector import (
+            detect_content_format,
+            select_strategy,
+        )
+
+        detected = detect_content_format(text)
+        strategy = select_strategy(query.expected_type, detected)
         extractor_fn = _TYPE_DISPATCH.get(
-            query.expected_type, _extract_text_long
+            strategy, _extract_text_long
         )
         extracted, confidence, method = extractor_fn(
             text, query
         )
+
+        # If detected strategy produced empty result and differs from
+        # YAML hint, retry with the original hint as fallback.
+        if (
+            not extracted
+            and strategy != query.expected_type
+        ):
+            fallback_fn = _TYPE_DISPATCH.get(
+                query.expected_type, _extract_text_long
+            )
+            extracted, confidence, method = fallback_fn(
+                text, query
+            )
+            if extracted:
+                method = f"{method}(fallback)"
 
         if not extracted:
             return None
