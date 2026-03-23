@@ -1,0 +1,42 @@
+---
+title: "Stage 4: Template Assembly"
+---
+
+flowchart TD
+    ER["ExtractionResult<br/><i>from Stage 3</i>"] --> CONVERT
+
+    subgraph Stage4["Stage 4: Template Assembly"]
+        direction TB
+
+        CONVERT["Convert to QueryExtractionHit<br/><i>compute parent_section from section_id</i><br/><i>B.3 → B.3, B.3.1 → B.3 (PTCV-288)</i>"]
+
+        CONVERT --> ASSEMBLE["assemble_template(hits)"]
+
+        ASSEMBLE --> GROUP["Group hits by parent<br/><i>hits_by_parent[B.x] = [...]</i>"]
+
+        GROUP --> SORT["Sort within groups<br/><i>by (section_sort_key, query_id)</i><br/><i>deterministic order (PTCV-262)</i>"]
+
+        SORT --> BUILD["Build AssembledSections<br/><i>B.1 through B.16</i>"]
+
+        BUILD --> COVERAGE["Coverage Calculation"]
+        COVERAGE --> METRICS["total_sections, populated_count<br/>gap_count, avg_confidence<br/>high/review/low counts"]
+
+        BUILD --> GAPS{"Gaps?"}
+        GAPS -->|Missing| GAP_SEC["Gap Section<br/><i>flagged for review</i>"]
+        GAPS -->|Populated| POP_SEC["Populated Section<br/><i>with confidence + source</i>"]
+
+        GAP_SEC --> AP
+        POP_SEC --> AP["AssembledProtocol"]
+
+        AP --> MD["to_markdown()<br/><i>human-readable report</i>"]
+        AP --> DICT["to_dict()<br/><i>JSON-serializable</i>"]
+    end
+
+    AP --> NEXT["→ Stage 5: SoA Extraction"]
+    METRICS --> UI["Coverage Metrics<br/><i>displayed in Streamlit</i>"]
+
+    style ER fill:#e8f5e9,stroke:#2e7d32
+    style AP fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style NEXT fill:#fff3e0,stroke:#e65100
+    style UI fill:#e3f2fd,stroke:#1565c0
+    style Stage4 fill:#fafafa,stroke:#666

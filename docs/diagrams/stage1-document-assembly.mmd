@@ -1,0 +1,66 @@
+---
+title: "Stage 1: Document Assembly"
+---
+
+flowchart TD
+    PDF["Protocol PDF"] --> OPEN["fitz.open(pdf_path)<br/><i>PyMuPDF</i>"]
+
+    subgraph Stage1["Stage 1: Document Assembly"]
+        direction TB
+
+        OPEN --> PAGES["Page Text Extraction<br/><code>doc[i].get_text()</code>"]
+
+        PAGES --> TOC_DETECT{"TOC Detection<br/><code>_is_toc_page()</code>"}
+        TOC_DETECT -->|TOC found| TOC_PARSE["Parse TOC Entries<br/><code>_parse_toc_page()</code><br/><i>numbered, appendix regexes</i>"]
+        TOC_DETECT -->|No TOC| BODY_ONLY["Synthesize from<br/>body headers"]
+
+        PAGES --> HDR_FTR["Header/Footer Detection<br/><code>_detect_repeating_lines()</code><br/><i>frequency analysis</i>"]
+        HDR_FTR --> STRIP["Strip Boilerplate<br/><code>_strip_page_headers_footers()</code>"]
+
+        STRIP --> FULL_TEXT["full_text"]
+
+        PAGES --> MD["pymupdf4llm.to_markdown()"]
+        MD --> MD_NORM["normalize_markdown()<br/><i>structured markdown</i>"]
+
+        FULL_TEXT --> BODY_HDR["Detect Body Headers<br/><code>_detect_body_headers()</code>"]
+        BODY_HDR --> SECT_HDR["list[SectionHeader]"]
+
+        TOC_PARSE --> RESOLVE["Resolve TOC to Body<br/><code>_resolve_toc_pages()</code>"]
+        SECT_HDR --> RESOLVE
+
+        SECT_HDR --> CONTENT["Build Content Spans<br/><code>_resolve_content_spans()</code>"]
+        FULL_TEXT --> CONTENT
+        CONTENT --> SPANS["content_spans<br/><i>dict[section_num, text]</i>"]
+
+        MD_NORM -->|replace full_text| SPANS
+
+        PAGES --> TABLES["Table Extraction<br/><code>extract_all_tables()</code><br/><i>pdfplumber + Camelot</i>"]
+
+        PAGES --> DIAGRAMS["Diagram Detection<br/><code>DiagramFinder</code><br/><i>PTCV-261</i>"]
+
+        subgraph DiagramPath["Diagram Extraction"]
+            direction LR
+            VEC["Vector Detection<br/><i>rects/lines/curves</i><br/><i>zero API cost</i>"]
+            VIS["Vision Fallback<br/><i>raster images</i><br/><i>PTCV_ENABLE_DIAGRAM_VISION</i>"]
+        end
+
+        DIAGRAMS --> DiagramPath
+        DiagramPath --> DIAG_LIST["list[Diagram]<br/><i>nodes, edges, type</i>"]
+    end
+
+    RESOLVE --> PI
+    SECT_HDR --> PI
+    SPANS --> PI
+    FULL_TEXT --> PI
+    TABLES --> PI
+    DIAG_LIST --> PI
+
+    PI["<b>ProtocolIndex</b><br/>toc_entries, section_headers<br/>content_spans, full_text<br/>tables, diagrams"]
+
+    PI --> NEXT["→ Stage 2: Section Classification"]
+
+    style PDF fill:#e3f2fd,stroke:#1565c0
+    style PI fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style NEXT fill:#fff3e0,stroke:#e65100
+    style Stage1 fill:#fafafa,stroke:#666
+    style DiagramPath fill:#f5f5f5,stroke:#999

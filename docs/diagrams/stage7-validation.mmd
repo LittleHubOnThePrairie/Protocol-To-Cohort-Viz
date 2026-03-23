@@ -1,0 +1,40 @@
+flowchart TD
+    SPECS["SDTM Domain Specs<br/><i>from Stage 6</i>"] --> VAL
+    SOA["SoA Metadata<br/><i>assessments, visits</i>"] --> REQ
+
+    subgraph Stage7["Stage 7: Validation"]
+        direction TB
+
+        VAL["ValidationService.validate()"]
+
+        VAL --> P21["P21Validator<br/><i>115 FDA rules</i><br/><i>variable order, length</i><br/><i>permitted values</i>"]
+        VAL --> TCG["TcgChecker<br/><i>FDA TCG v5.9</i><br/><i>21 required TS params</i>"]
+        VAL --> DEFINE["DefineXmlValidator<br/><i>schema conformance</i><br/><i>codelist references</i>"]
+        VAL --> SCHED["VisitScheduleValidator<br/><i>12 validation rules</i><br/><i>window overlaps, gaps</i>"]
+
+        REQ["check_required_domains()"]
+        REQ --> ALWAYS["Always Required<br/><i>DM, DS, AE, TA, TE</i><br/><i>TI, TS, TV</i>"]
+        REQ --> COND["Conditionally Required<br/><i>CM, MH, VS, LB, EG</i><br/><i>PE, EX (from SoA)</i>"]
+
+        P21 --> FINDINGS
+        TCG --> FINDINGS
+        DEFINE --> FINDINGS
+        SCHED --> FINDINGS
+        ALWAYS --> FINDINGS
+        COND --> FINDINGS
+
+        FINDINGS["Validation Findings<br/><i>errors + warnings</i>"]
+    end
+
+    FINDINGS --> REPORTS["4 JSON Reports<br/><i>p21_report.json</i><br/><i>tcg_completeness.json</i><br/><i>schedule_validation.json</i><br/><i>compliance_summary.json</i>"]
+
+    REPORTS --> LINEAGE["LineageRecord<br/><i>SHA-256 chain</i><br/><i>21 CFR 11.10(e)</i>"]
+
+    REPORTS --> DISPLAY["Streamlit UI<br/><i>Quality tab</i>"]
+
+    style SPECS fill:#e8f5e9,stroke:#2e7d32
+    style SOA fill:#e8f5e9,stroke:#2e7d32
+    style REPORTS fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style LINEAGE fill:#fff9c4,stroke:#f9a825
+    style DISPLAY fill:#e3f2fd,stroke:#1565c0
+    style Stage7 fill:#fafafa,stroke:#666

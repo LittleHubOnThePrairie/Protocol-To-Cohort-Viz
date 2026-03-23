@@ -1,0 +1,76 @@
+---
+title: "Stage 3: Query Extraction"
+---
+
+flowchart TD
+    PI["ProtocolIndex"] --> ROUTES
+    MR["MatchResult<br/><i>from Stage 2</i>"] --> ROUTES
+
+    subgraph Stage3["Stage 3: Query Extraction"]
+        direction TB
+
+        SCHEMA["appendix_b_queries.yaml<br/><i>~120 queries across B.1–B.16</i>"] --> QE
+
+        ROUTES["_build_routes()<br/><i>ICH code → content spans</i>"] --> INJECT1["Front-matter injection<br/><i>B.1 fallback from cover pages</i>"]
+        INJECT1 --> INJECT2["Registry route injection<br/><i>CT.gov for missing/LOW routes</i><br/><i>PTCV-230</i>"]
+        INJECT2 --> CITE["Citation consolidation<br/><i>collect → B.2.7, strip others</i>"]
+
+        CITE --> QE["QueryExtractor.extract()"]
+
+        QE --> DETECT["Content Format Detection<br/><i>PTCV-257</i>"]
+
+        subgraph FormatDetect["Auto-Detection"]
+            direction LR
+            FD1["Pipe table?"]
+            FD2["Bullet list?"]
+            FD3["Short text?"]
+            FD4["Prose → text_long"]
+        end
+
+        DETECT --> FormatDetect
+        FormatDetect --> STRATEGY["select_strategy()<br/><i>detected vs YAML hint</i>"]
+
+        STRATEGY --> DISPATCH{"Type-specific<br/>extraction"}
+
+        DISPATCH --> T1["text_long<br/><i>paragraph relevance</i>"]
+        DISPATCH --> T2["text_short / identifier<br/><i>regex patterns</i>"]
+        DISPATCH --> T3["list / table<br/><i>bullet items, pipes</i>"]
+        DISPATCH --> T4["date / numeric / enum<br/><i>specialized regex</i>"]
+
+        T1 --> LLM{"LLM<br/>transform?"}
+        T3 --> LLM
+        T2 --> RESULTS
+        T4 --> RESULTS
+
+        LLM -->|Yes| TRANSFORM["Claude Sonnet<br/><i>reframe to query intent</i><br/><i>ThreadPoolExecutor</i>"]
+        LLM -->|No| RESULTS
+
+        TRANSFORM --> RESULTS
+
+        RESULTS --> GAP{"Result<br/>empty?"}
+        GAP -->|Yes| RECOVERY["Gap Recovery Cascade<br/><i>PTCV-258</i>"]
+        GAP -->|No| FINAL
+
+        subgraph RecoveryCascade["Recovery Levels"]
+            direction LR
+            L1["1. Alt strategy<br/><i>try list/table</i>"]
+            L2["2. Adjacent sections<br/><i>search B.x neighbors</i>"]
+            L3["3. Registry fallback<br/><i>CT.gov direct field</i>"]
+        end
+
+        RECOVERY --> RecoveryCascade
+        RecoveryCascade --> FINAL["list[QueryExtraction]"]
+    end
+
+    FINAL --> INJECT3["Registry query injection<br/><i>PTCV-259: replace LOW with</i><br/><i>direct CT.gov answers</i>"]
+    INJECT3 --> ER["ExtractionResult<br/><i>extractions + gaps + coverage</i>"]
+    ER --> NEXT["→ Stage 4: Template Assembly"]
+
+    style PI fill:#e8f5e9,stroke:#2e7d32
+    style MR fill:#e8f5e9,stroke:#2e7d32
+    style ER fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style NEXT fill:#fff3e0,stroke:#e65100
+    style Stage3 fill:#fafafa,stroke:#666
+    style SCHEMA fill:#e3f2fd,stroke:#1565c0
+    style FormatDetect fill:#f5f5f5,stroke:#999
+    style RecoveryCascade fill:#fce4ec,stroke:#c62828

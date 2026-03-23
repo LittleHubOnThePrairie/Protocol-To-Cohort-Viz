@@ -1,0 +1,42 @@
+---
+title: "Fine-Tuned Model Usage Across Pipeline"
+---
+
+flowchart TD
+    MODEL["ich_classifier_v1<br/><i>Fine-tuned MiniLM (384-dim)</i><br/><i>+0.423 same-section improvement</i>"]:::model
+
+    subgraph IndexTime["Index Time (build/rebuild)"]
+        direction TB
+        REG["CT.gov Registry<br/><i>1,820 vectors</i>"]
+        PUB["PubMed Abstracts<br/><i>671 anchored vectors</i>"]
+        CORPUS["Alignment Corpus<br/><i>1,644 records → 6 centroids</i>"]
+
+        REG -->|"_encode()"| MODEL
+        PUB -->|"_encode(anchored_text)"| MODEL
+        CORPUS -->|"model.encode()"| MODEL
+
+        MODEL -->|"embed"| FAISS["FAISS RAG Index<br/><i>2,491 vectors</i><br/><i>IndexFlatIP (cosine sim)</i>"]
+        MODEL -->|"mean centroid"| CENT["Centroid Matrix<br/><i>6 section centroids</i>"]
+    end
+
+    subgraph QueryTime["Query Time (classification)"]
+        direction TB
+        PROTO["Protocol Content Span<br/><i>from Stage 1</i>"]
+
+        PROTO -->|"classify(text)"| MODEL
+        MODEL -->|"query embedding"| Q_FAISS["RAG Index Query<br/><i>top-k neighbors</i><br/><i>exemplar voting</i>"]
+        MODEL -->|"cosine similarity"| Q_CENT["Centroid Classify<br/><i>nearest centroid</i><br/><i>confidence score</i>"]
+
+        FAISS -.->|"search"| Q_FAISS
+        CENT -.->|"dot product"| Q_CENT
+
+        Q_FAISS --> RESULT["Classification Result<br/><i>ICH section code</i><br/><i>confidence score</i>"]
+        Q_CENT --> RESULT
+    end
+
+    classDef model fill:#e3f2fd,stroke:#1565c0,stroke-width:3px
+    style IndexTime fill:#fff8e1,stroke:#f9a825
+    style QueryTime fill:#e8f5e9,stroke:#2e7d32
+    style FAISS fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style CENT fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    style RESULT fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px

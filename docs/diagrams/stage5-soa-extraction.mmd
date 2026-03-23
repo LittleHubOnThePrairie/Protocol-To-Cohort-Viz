@@ -1,0 +1,64 @@
+---
+title: "Stage 5: SoA Extraction"
+---
+
+flowchart TD
+    TABLES["Extracted Tables<br/><i>from ProtocolIndex</i>"] --> FILTER
+    ICH["IchSections<br/><i>from Stage 2</i>"] --> LLM_BUILD
+
+    subgraph Stage5["Stage 5: SoA Extraction"]
+        direction TB
+
+        FILTER["filter_soa_tables()<br/><i>schedule heading detection</i><br/><i>column pattern matching</i>"]
+
+        FILTER --> DISCOVERY["TableDiscovery<br/><i>multi-method table detection</i>"]
+
+        DISCOVERY --> FOOTNOTE["FootnoteParser<br/><i>PTCV-266</i><br/><i>strip markers from names</i>"]
+
+        FOOTNOTE --> RAW["list[RawSoaTable]"]
+
+        RAW --> RECONCILE["Reconciler<br/><i>PTCV-265</i><br/><i>merge multi-table results</i><br/><i>majority voting</i>"]
+
+        RECONCILE --> PARSE["SoaTableParser.parse()<br/><i>visit headers, assessment rows</i>"]
+
+        LLM_BUILD["LlmSoaBuilder<br/><i>PTCV-166: Claude Sonnet</i><br/><i>construct from prose</i>"]
+
+        LLM_BUILD --> PARSE
+
+        PARSE --> MAPPER["UsdmMapper.map()<br/><i>convert to CDISC USDM</i>"]
+
+        MAPPER --> EPOCHS["UsdmEpoch<br/><i>Screening, Treatment</i><br/><i>Follow-up, EOT</i>"]
+        MAPPER --> TP_RAW["UsdmTimepoint<br/><i>visit_name, day_offset</i>"]
+        MAPPER --> ACT["UsdmActivity<br/><i>assessment names, types</i>"]
+        MAPPER --> INST["UsdmScheduledInstance<br/><i>activity x timepoint</i>"]
+
+        TP_RAW --> RESOLVER["VisitDayResolver<br/><i>PTCV-253</i>"]
+
+        subgraph Resolution["Visit Day Strategies"]
+            direction LR
+            R1["Day N"]
+            R2["Cycle C Day D"]
+            R3["Week W"]
+            R4["Screening → -14"]
+            R5["Baseline → 1"]
+            R6["Month M"]
+            R7["EOT/Follow-up"]
+        end
+
+        RESOLVER --> Resolution
+        Resolution --> TP["Resolved Timepoints<br/><i>chronological real_day</i>"]
+    end
+
+    EPOCHS --> PARQUET["5 Parquet Artifacts<br/><i>epochs, timepoints, activities</i><br/><i>instances, synonyms</i>"]
+    TP --> PARQUET
+    ACT --> PARQUET
+    INST --> PARQUET
+
+    PARQUET --> NEXT["→ Stage 6: SDTM Generation"]
+
+    style TABLES fill:#e8f5e9,stroke:#2e7d32
+    style ICH fill:#e8f5e9,stroke:#2e7d32
+    style PARQUET fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style NEXT fill:#fff3e0,stroke:#e65100
+    style Stage5 fill:#fafafa,stroke:#666
+    style Resolution fill:#f5f5f5,stroke:#999

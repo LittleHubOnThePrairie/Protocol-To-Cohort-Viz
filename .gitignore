@@ -18,7 +18,10 @@ data/templates/*
 .secrets
 .claude/
 jira_changelog.md
-docs/
+docs/*
+!docs/diagrams/
+!docs/analysis/
+!docs/TEST_COVERAGE_MAP.md
 PTCV/jira_changelog.md
 debug_*.py
 tmp_*.txt

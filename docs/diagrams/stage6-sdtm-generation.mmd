@@ -1,0 +1,60 @@
+flowchart TD
+    SOA["SoA USDM Entities<br/><i>from Stage 5</i>"] --> OBS
+    ICH["IchSections<br/><i>B.4, B.5, B.9</i>"] --> SUBJ
+    REG["CT.gov Registry<br/><i>ArmsInterventionsModule</i>"] --> EX_GEN
+
+    subgraph Stage6["Stage 6: SDTM Domain Spec Generation"]
+        direction TB
+
+        subgraph Observation["Observation Domains (from SoA)"]
+            OBS["build_domain_specs()<br/><i>map assessments → CDISC</i>"]
+            OBS --> VS["VS<br/><i>Vital Signs</i>"]
+            OBS --> LB["LB<br/><i>Labs</i>"]
+            OBS --> EG["EG<br/><i>ECG</i>"]
+            OBS --> PE["PE<br/><i>Physical Exam</i>"]
+        end
+
+        subgraph Subject["Subject Domains (always-include)"]
+            SUBJ["Subject Generators<br/><i>PTCV-245</i>"]
+            SUBJ --> DM["DM<br/><i>Demographics</i>"]
+            SUBJ --> DS["DS<br/><i>Disposition</i>"]
+            SUBJ --> AE["AE<br/><i>Adverse Events</i>"]
+            SUBJ --> CM["CM<br/><i>Con Meds</i>"]
+            SUBJ --> MH["MH<br/><i>Medical Hx</i>"]
+        end
+
+        subgraph Criteria["Criteria Domains"]
+            IE_GEN["IeSpecGenerator<br/><i>PTCV-247</i><br/><i>17 criterion patterns</i>"]
+            IE_GEN --> IE["IE<br/><i>Incl/Excl Data</i>"]
+        end
+
+        subgraph Intervention["Intervention Domain"]
+            EX_GEN["build_ex_domain_spec()<br/><i>arms + interventions</i>"]
+            EX_GEN --> EX_DOM["EX<br/><i>Exposure</i>"]
+        end
+
+        ICH -->|"B.5"| IE_GEN
+    end
+
+    VS --> SPECS
+    LB --> SPECS
+    EG --> SPECS
+    PE --> SPECS
+    DM --> SPECS
+    DS --> SPECS
+    AE --> SPECS
+    CM --> SPECS
+    MH --> SPECS
+    IE --> SPECS
+    EX_DOM --> SPECS
+
+    SPECS["SDTM Domain Specs<br/><i>variable lists + codelists</i><br/><i>per domain</i>"]
+
+    SPECS --> NEXT["→ Stage 7: Validation"]
+
+    style SOA fill:#e8f5e9,stroke:#2e7d32
+    style ICH fill:#e8f5e9,stroke:#2e7d32
+    style REG fill:#e3f2fd,stroke:#1565c0
+    style SPECS fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+    style NEXT fill:#fff3e0,stroke:#e65100
+    style Stage6 fill:#fafafa,stroke:#666

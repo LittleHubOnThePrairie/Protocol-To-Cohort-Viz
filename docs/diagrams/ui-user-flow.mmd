@@ -1,0 +1,79 @@
+---
+title: "PTCV Streamlit UI — User Flow"
+---
+
+flowchart TD
+    START["User opens localhost:8501"] --> SIDEBAR
+
+    subgraph Sidebar["Sidebar"]
+        direction TB
+        SIDEBAR["Protocol Selection<br/><i>Browse 241 cached PDFs</i><br/><i>or upload new PDF</i>"]
+        SIDEBAR --> OPTS["Pipeline Options<br/><i>LLM Transform, Summarization</i><br/><i>API Key Config</i>"]
+        OPTS --> RUN["Run Query Pipeline"]
+    end
+
+    RUN --> PROGRESS["Progress Tracker<br/><i>7 stages, real-time bars</i>"]
+
+    PROGRESS --> TAB_SELECT{"Select Tab"}
+
+    TAB_SELECT --> QT
+    TAB_SELECT --> RT
+    TAB_SELECT --> ST
+    TAB_SELECT --> DT
+    TAB_SELECT --> QL
+    TAB_SELECT --> CT
+
+    subgraph QT["Query Pipeline Tab"]
+        QT1["Section Matching Table<br/><i>ICH code, confidence, method</i>"]
+        QT2["Sub-Section Matching<br/><i>auto-map %, LLM calls</i>"]
+        QT3["Extraction Results<br/><i>per-query answers</i>"]
+        QT4["Provenance Matrix<br/><i>source per section</i>"]
+    end
+
+    subgraph RT["Results Tab"]
+        RT1["Assembled Protocol<br/><i>ICH E6(R3) template</i>"]
+        RT2["Section-by-Section<br/><i>B.1 through B.16</i>"]
+        RT3["Confidence Badges<br/><i>HIGH / REVIEW / LOW</i>"]
+    end
+
+    subgraph ST["SoA & Observations Tab"]
+        ST1["Schedule of Visits Grid<br/><i>assessment x visit matrix</i>"]
+        ST2["Visit Timeline Plot<br/><i>resolved study days</i>"]
+        ST3["Observation Specs<br/><i>VS, LB, EG, PE</i>"]
+    end
+
+    subgraph DT["SDTM & Validation Tab"]
+        DT1["Domain Specs<br/><i>DM, DS, AE, CM, MH, IE, EX</i>"]
+        DT2["Validation Results<br/><i>P21, TCG, Define-XML</i>"]
+        DT3["Required Domains<br/><i>always + conditional</i>"]
+    end
+
+    subgraph QL["Quality Tab"]
+        QL1["Coverage Diagram"]
+        QL2["Confidence Distribution"]
+        QL3["Gap Analysis"]
+    end
+
+    subgraph CT["Protocol Catalog Tab"]
+        CT1["Protocol Browser"]
+        CT2["Registry Metadata"]
+        CT3["File Browser"]
+    end
+
+    RT --> DL["Download Markdown"]
+    DT --> EX["Export SDTM Specs"]
+    QL --> REV["Review Flagged Sections"]
+
+    style START fill:#e3f2fd,stroke:#1565c0
+    style RUN fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px
+    style PROGRESS fill:#fff9c4,stroke:#f9a825
+    style Sidebar fill:#f5f5f5,stroke:#999
+    style QT fill:#e8f5e9,stroke:#2e7d32
+    style RT fill:#e3f2fd,stroke:#1565c0
+    style ST fill:#fff3e0,stroke:#e65100
+    style DT fill:#f3e5f5,stroke:#7b1fa2
+    style QL fill:#fce4ec,stroke:#c62828
+    style CT fill:#fff8e1,stroke:#f9a825
+    style DL fill:#e0f2f1,stroke:#00695c
+    style EX fill:#e0f2f1,stroke:#00695c
+    style REV fill:#e0f2f1,stroke:#00695c
