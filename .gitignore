@@ -14,6 +14,7 @@ data/*
 !data/templates/
 data/templates/*
 !data/templates/ich_e6r3_schema.yaml
+!data/templates/appendix_b_queries.yaml
 *.jsonl
 .secrets
 .claude/

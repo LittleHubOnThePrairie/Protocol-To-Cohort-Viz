@@ -1,0 +1,580 @@
+# ICH E6(R3) Appendix B — Query Schema (PTCV-88).
+#
+# Decomposes each Appendix B section into structured queries for
+# query-driven protocol extraction.  Each query describes a specific
+# piece of information that a compliant protocol should contain.
+#
+# Section numbering follows the actual ICH E6(R3) Step 4 Final
+# Guideline (2025-01-06), pages 65-69: B.1 through B.16.
+#
+# The `schema_section` field maps each query back to the code used
+# in ich_e6r3_schema.yaml (B.1 through B.16).
+#
+# Expected content types:
+#   text_short  — single phrase / sentence (< 200 chars typical)
+#   text_long   — paragraph(s) of prose
+#   identifier  — code, number, or short identifier string
+#   date        — date or date range
+#   list        — bulleted / numbered list items
+#   table       — tabular data (schedule, dose table, etc.)
+#   numeric     — numeric value with optional unit
+#   enum        — value from a known set (e.g. phase, design type)
+#   statement   — compliance or regulatory boilerplate statement
+
+version: "1.0"
+source_guideline: "ICH E6(R3) Step 4 Final Guideline 2025-01-06"
+appendix: "B"
+
+queries:
+
+  # ===================================================================
+  # B.1 General Information
+  # ===================================================================
+  - query_id: B.1.1.q1
+    section_id: "B.1.1"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the protocol title?"
+    expected_type: text_short
+    required: true
+
+  - query_id: B.1.1.q2
+    section_id: "B.1.1"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the unique protocol identifying number?"
+    expected_type: identifier
+    required: true
+
+  - query_id: B.1.1.q3
+    section_id: "B.1.1"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the protocol date?"
+    expected_type: date
+    required: true
+
+  - query_id: B.1.1.q4
+    section_id: "B.1.1"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the amendment number and date (if applicable)?"
+    expected_type: identifier
+    required: false
+
+  - query_id: B.1.2.q1
+    section_id: "B.1.2"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the name and address of the sponsor?"
+    expected_type: text_short
+    required: true
+
+  - query_id: B.1.3.q1
+    section_id: "B.1.3"
+    parent_section: "B.1"
+    schema_section: "B.1"
+    query_text: "What is the name and title of the person(s) authorised to sign the protocol for the sponsor?"
+    expected_type: text_short
+    required: true
+
+  # ===================================================================
+  # B.2 Background Information
+  # ===================================================================
+  - query_id: B.2.1.q1
+    section_id: "B.2.1"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What is the name and description of the investigational product(s)?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.2.2.q1
+    section_id: "B.2.2"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What is the summary of findings from nonclinical studies that potentially have clinical significance and from clinical trials relevant to the trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.2.3.q1
+    section_id: "B.2.3"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What is the summary of known and potential risks and benefits to human participants?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.2.4.q1
+    section_id: "B.2.4"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What is the description of and justification for the route of administration, dosage, dosage regimen, and treatment period(s)?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.2.5.q1
+    section_id: "B.2.5"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "Is there a statement that the trial will be conducted in compliance with the protocol, GCP, and applicable regulatory requirement(s)?"
+    expected_type: statement
+    required: true
+
+  - query_id: B.2.6.q1
+    section_id: "B.2.6"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What is the description of the population to be studied?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.2.7.q1
+    section_id: "B.2.7"
+    parent_section: "B.2"
+    schema_section: "B.2"
+    query_text: "What are the references to literature and data relevant to the trial that provide background?"
+    expected_type: list
+    required: true
+
+  # ===================================================================
+  # B.3 Trial Objectives and Purpose
+  # ===================================================================
+  - query_id: B.3.q1
+    section_id: "B.3"
+    parent_section: "B.3"
+    schema_section: "B.3"
+    query_text: "What are the primary objective(s) of the trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.3.q2
+    section_id: "B.3"
+    parent_section: "B.3"
+    schema_section: "B.3"
+    query_text: "What are the secondary objective(s) of the trial?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.3.q3
+    section_id: "B.3"
+    parent_section: "B.3"
+    schema_section: "B.3"
+    query_text: "What are the exploratory objective(s) of the trial (if any)?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.3.q4
+    section_id: "B.3"
+    parent_section: "B.3"
+    schema_section: "B.3"
+    query_text: "What are the estimands defined for the trial (if any, per ICH E9(R1))?"
+    expected_type: text_long
+    required: false
+
+  # ===================================================================
+  # B.4 Trial Design
+  # ===================================================================
+  - query_id: B.4.1.q1
+    section_id: "B.4.1"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the primary endpoint(s) to be measured during the trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.1.q2
+    section_id: "B.4.1"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the secondary endpoint(s) to be measured during the trial (if any)?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.4.2.q1
+    section_id: "B.4.2"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the type and design of trial (e.g., double-blind, placebo-controlled, parallel design, adaptive, platform/umbrella/basket, decentralised elements)?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.2.q2
+    section_id: "B.4.2"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "Is there a schematic diagram of the trial design, procedures, and stages?"
+    expected_type: table
+    required: false
+
+  - query_id: B.4.3.q1
+    section_id: "B.4.3"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the description of randomisation procedures?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.3.q2
+    section_id: "B.4.3"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the description of blinding/masking procedures?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.4.q1
+    section_id: "B.4.4"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the description of the investigational product(s), including dosage, dosage regimen, dosage form, packaging, and labelling?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.5.q1
+    section_id: "B.4.5"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the preparation (e.g., reconstitution) and administration instructions for the investigational product?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.4.6.q1
+    section_id: "B.4.6"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the schedule of events (trial visits, interventions, and assessments)?"
+    expected_type: table
+    required: true
+
+  - query_id: B.4.7.q1
+    section_id: "B.4.7"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What is the expected duration of the participant's involvement in the trial, including the sequence and duration of all trial periods and follow-up?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.8.q1
+    section_id: "B.4.8"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the stopping rules, discontinuation criteria, dose adjustment, or dose interruption rules for individual participants, parts of the trial, or the entire trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.9.q1
+    section_id: "B.4.9"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the accountability procedures for the investigational product(s), including placebo(s) and comparator(s)?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.4.10.q1
+    section_id: "B.4.10"
+    parent_section: "B.4"
+    schema_section: "B.4"
+    query_text: "What are the procedures for maintenance of treatment randomisation codes and for breaking codes?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.5 Selection of Participants
+  # ===================================================================
+  - query_id: B.5.1.q1
+    section_id: "B.5.1"
+    parent_section: "B.5"
+    schema_section: "B.5"
+    query_text: "What are the participant inclusion criteria?"
+    expected_type: list
+    required: true
+
+  - query_id: B.5.2.q1
+    section_id: "B.5.2"
+    parent_section: "B.5"
+    schema_section: "B.5"
+    query_text: "What are the participant exclusion criteria?"
+    expected_type: list
+    required: true
+
+  - query_id: B.5.3.q1
+    section_id: "B.5.3"
+    parent_section: "B.5"
+    schema_section: "B.5"
+    query_text: "What is the mechanism for pre-screening and screening of participants?"
+    expected_type: text_long
+    required: false
+
+  # ===================================================================
+  # B.6 Discontinuation of Trial Intervention and Participant Withdrawal
+  # ===================================================================
+  - query_id: B.6.q1
+    section_id: "B.6"
+    parent_section: "B.6"
+    schema_section: "B.6"
+    query_text: "When and how should participants be discontinued from the trial or investigational product treatment?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.6.q2
+    section_id: "B.6"
+    parent_section: "B.6"
+    schema_section: "B.6"
+    query_text: "What type and timing of data should be collected for withdrawn or discontinued participants?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.6.q3
+    section_id: "B.6"
+    parent_section: "B.6"
+    schema_section: "B.6"
+    query_text: "Whether and how are participants to be replaced?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.6.q4
+    section_id: "B.6"
+    parent_section: "B.6"
+    schema_section: "B.6"
+    query_text: "What is the follow-up procedure for participants who have discontinued the investigational product?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.7 Treatment and Interventions for Participants
+  # ===================================================================
+  - query_id: B.7.1.q1
+    section_id: "B.7.1"
+    parent_section: "B.7"
+    schema_section: "B.7"
+    query_text: "What are the treatment(s) to be administered, including name(s), dose(s), dosing schedule(s), criteria for dose adjustment(s), route/mode(s) of administration, and treatment period(s) for each arm?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.7.2.q1
+    section_id: "B.7.2"
+    parent_section: "B.7"
+    schema_section: "B.7"
+    query_text: "What medication(s) or treatment(s) are permitted (including concomitant and rescue medication) and not permitted before and/or during the trial?"
+    expected_type: list
+    required: true
+
+  - query_id: B.7.3.q1
+    section_id: "B.7.3"
+    parent_section: "B.7"
+    schema_section: "B.7"
+    query_text: "What are the strategies to monitor the participant's adherence to treatment?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.8 Assessment of Efficacy
+  # ===================================================================
+  - query_id: B.8.1.q1
+    section_id: "B.8.1"
+    parent_section: "B.8"
+    schema_section: "B.8"
+    query_text: "What are the efficacy parameters and their specification?"
+    expected_type: list
+    required: true
+
+  - query_id: B.8.2.q1
+    section_id: "B.8.2"
+    parent_section: "B.8"
+    schema_section: "B.8"
+    query_text: "What are the methods and timing for assessing, recording, and analysing efficacy parameters?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.8.2.q2
+    section_id: "B.8.2"
+    parent_section: "B.8"
+    schema_section: "B.8"
+    query_text: "Are there trial-related committees (e.g., IDMC, adjudication committees) for assessing efficacy data, and what are their procedures?"
+    expected_type: text_long
+    required: false
+
+  # ===================================================================
+  # B.9 Assessment of Safety
+  # ===================================================================
+  - query_id: B.9.1.q1
+    section_id: "B.9.1"
+    parent_section: "B.9"
+    schema_section: "B.9"
+    query_text: "What are the safety parameters and their specification?"
+    expected_type: list
+    required: true
+
+  - query_id: B.9.2.q1
+    section_id: "B.9.2"
+    parent_section: "B.9"
+    schema_section: "B.9"
+    query_text: "What are the methods, extent, and timing for recording and assessing safety parameters?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.9.2.q2
+    section_id: "B.9.2"
+    parent_section: "B.9"
+    schema_section: "B.9"
+    query_text: "Are there trial-related committees (e.g., IDMC) for assessing safety data, and what are their procedures?"
+    expected_type: text_long
+    required: false
+
+  - query_id: B.9.3.q1
+    section_id: "B.9.3"
+    parent_section: "B.9"
+    schema_section: "B.9"
+    query_text: "What are the procedures for obtaining reports of and for recording and reporting adverse events?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.9.4.q1
+    section_id: "B.9.4"
+    parent_section: "B.9"
+    schema_section: "B.9"
+    query_text: "What is the type and duration of follow-up of participants after adverse events and other events such as pregnancies?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.10 Statistical Considerations
+  # ===================================================================
+  - query_id: B.10.1.q1
+    section_id: "B.10.1"
+    parent_section: "B.10"
+    schema_section: "B.10"
+    query_text: "What are the statistical methods to be employed, including timing and purpose of any planned interim analysis(ses) and statistical criteria for stopping the trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.10.2.q1
+    section_id: "B.10.2"
+    parent_section: "B.10"
+    schema_section: "B.10"
+    query_text: "What is the number of participants planned to be enrolled and the reason for the choice of sample size, including power calculations or clinical justification?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.10.3.q1
+    section_id: "B.10.3"
+    parent_section: "B.10"
+    schema_section: "B.10"
+    query_text: "What is the level of significance to be used, or the threshold for success on the posterior probability in a Bayesian design?"
+    expected_type: numeric
+    required: true
+
+  - query_id: B.10.4.q1
+    section_id: "B.10.4"
+    parent_section: "B.10"
+    schema_section: "B.10"
+    query_text: "What is the selection of participants to be included in the planned analyses (analysis populations), the statistical methods for handling intercurrent events, and procedures for accounting for missing, unused, and spurious data?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.10.5.q1
+    section_id: "B.10.5"
+    parent_section: "B.10"
+    schema_section: "B.10"
+    query_text: "Is there a statement that any deviation(s) from the statistical analysis plan will be described and justified in the clinical trial report?"
+    expected_type: statement
+    required: true
+
+  # ===================================================================
+  # B.11 Direct Access to Source Records
+  # ===================================================================
+  - query_id: B.11.q1
+    section_id: "B.11"
+    parent_section: "B.11"
+    schema_section: "B.11"
+    query_text: "Is it specified that the investigator(s)/institution(s) will permit trial-related monitoring, audits, regulatory inspection(s), and IRB/IEC review, providing direct access to source records?"
+    expected_type: statement
+    required: true
+
+  # ===================================================================
+  # B.12 Quality Control and Quality Assurance
+  # ===================================================================
+  - query_id: B.12.1.q1
+    section_id: "B.12.1"
+    parent_section: "B.12"
+    schema_section: "B.12"
+    query_text: "What are the identified critical to quality factors, associated risks, and risk mitigation strategies in the trial?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.12.2.q1
+    section_id: "B.12.2"
+    parent_section: "B.12"
+    schema_section: "B.12"
+    query_text: "What is the summary of monitoring approaches that are part of the quality control process?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.12.3.q1
+    section_id: "B.12.3"
+    parent_section: "B.12"
+    schema_section: "B.12"
+    query_text: "What is the process for handling noncompliance with the protocol or GCP?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.13 Ethics
+  # ===================================================================
+  - query_id: B.13.q1
+    section_id: "B.13"
+    parent_section: "B.13"
+    schema_section: "B.13"
+    query_text: "What are the ethical considerations relating to the trial?"
+    expected_type: text_long
+    required: true
+
+  # ===================================================================
+  # B.14 Data Handling and Record Keeping
+  # ===================================================================
+  - query_id: B.14.1.q1
+    section_id: "B.14.1"
+    parent_section: "B.14"
+    schema_section: "B.14"
+    query_text: "What data are to be collected and what is the method of collection?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.14.2.q1
+    section_id: "B.14.2"
+    parent_section: "B.14"
+    schema_section: "B.14"
+    query_text: "What data are to be recorded directly into data acquisition tools (i.e., no prior written or electronic record) and considered to be the source record?"
+    expected_type: text_long
+    required: true
+
+  - query_id: B.14.3.q1
+    section_id: "B.14.3"
+    parent_section: "B.14"
+    schema_section: "B.14"
+    query_text: "Is there a statement that records should be retained in accordance with applicable regulatory requirements?"
+    expected_type: statement
+    required: true
+
+  # ===================================================================
+  # B.15 Financing and Insurance
+  # ===================================================================
+  - query_id: B.15.q1
+    section_id: "B.15"
+    parent_section: "B.15"
+    schema_section: "B.15"
+    query_text: "What are the financing and insurance provisions for the trial?"
+    expected_type: text_long
+    required: false
+
+  # ===================================================================
+  # B.16 Publication Policy
+  # ===================================================================
+  - query_id: B.16.q1
+    section_id: "B.16"
+    parent_section: "B.16"
+    schema_section: "B.16"
+    query_text: "What is the publication policy for the trial?"
+    expected_type: text_long
+    required: false
